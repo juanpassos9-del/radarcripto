@@ -9,9 +9,9 @@ services:
     envVars:
       - key: NEXUS_API_ORIGIN
         fromService:
-          type: web
           name: nexus-terminal-api
-          property: url
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
       - key: NEXT_PUBLIC_MARKET_WS_URL
         value: wss://nexus-terminal-api.onrender.com/ws/market
 
