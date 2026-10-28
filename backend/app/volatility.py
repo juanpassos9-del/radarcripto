@@ -1,4 +1,4 @@
-"""Daily GARCH(1,1) and historical-volatility price zones for perpetuals."""
+"""Daily GARCH(1,1) and historical-volatility price zones."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def calculate_zones(
     garch_daily = math.sqrt(max(variance, 0.0))
     hv_sample = returns[-hv_period:]
     hv_daily = statistics.stdev(hv_sample) if len(hv_sample) >= hv_period else None
-    reference = closes[-1]  # last fully closed daily futures candle
+    reference = closes[-1]  # last fully closed daily candle
 
     def band(vol: float | None, multiple: float) -> dict[str, float | None]:
         if vol is None:
@@ -48,7 +48,7 @@ def calculate_zones(
     return {
         "symbol": symbol,
         "status": "ready",
-        "source": "Binance USDⓈ-M Futures daily klines",
+        "source": "Binance Spot daily klines",
         "referenceMode": "previous_daily_close",
         "reference": reference,
         "asOf": times[-1] * 1000,
