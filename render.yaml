@@ -17,6 +17,8 @@ services:
           name: nexus-terminal-api
           type: web
           envVarKey: RENDER_EXTERNAL_URL
+      - key: NEXT_PUBLIC_FUTURES_DATA_MODE
+        value: demo
 
   - type: web
     name: nexus-terminal-api
@@ -30,3 +32,9 @@ services:
         value: https://nexus-terminal-web.onrender.com
       - key: LOG_LEVEL
         value: INFO
+      - key: BINANCE_FUTURES_REST_URL
+        value: https://demo-fapi.binance.com
+      - key: BINANCE_FUTURES_WS_URL
+        value: wss://stream.binancefuture.com/stream
+      - key: BINANCE_FUTURES_DATA_MODE
+        value: demo

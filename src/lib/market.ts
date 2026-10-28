@@ -39,6 +39,9 @@ export async function getJson<T>(path: string): Promise<T> {
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json() as Promise<T>;
 }
+export const marketDataLabel = process.env.NEXT_PUBLIC_FUTURES_DATA_MODE === "demo"
+  ? "BINANCE USDⓈ-M DEMO · DADOS DE MERCADO"
+  : "BINANCE USDⓈ-M PERPETUAL";
 export const fmtPrice = (value: number | null | undefined, digits = 2) => value == null ? "—" : new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
 export const fmtCompact = (value: number | null | undefined) => value == null ? "—" : new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
 export const fmtTime = (timestamp: number | null | undefined) => timestamp == null ? "—" : new Date(timestamp).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour12: false });

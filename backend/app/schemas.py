@@ -32,6 +32,7 @@ class BookSnapshot(BaseModel):
     eventTime: int | None
     receivedAt: int
     status: str
+    source: str = "Binance"
 
 
 class Trade(BaseModel):

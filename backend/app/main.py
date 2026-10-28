@@ -22,9 +22,10 @@ from .volatility import calculate_zones
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("nexus.market")
 SPOT = "https://api.binance.com"
-FUTURES = "https://fapi.binance.com"
+FUTURES = os.getenv("BINANCE_FUTURES_REST_URL", "https://demo-fapi.binance.com")
 SPOT_WS = "wss://stream.binance.com:9443/stream"
-FUTURES_WS = "wss://fstream.binance.com/stream"
+FUTURES_WS = os.getenv("BINANCE_FUTURES_WS_URL", "wss://stream.binancefuture.com/stream")
+FUTURES_DATA_MODE = os.getenv("BINANCE_FUTURES_DATA_MODE", "demo").strip().lower()
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -75,7 +76,13 @@ class MarketService:
         received = int(time.time() * 1000)
         row = await self.request(base, path, {"symbol": symbol})
         event = int(row["closeTime"])
-        return MarketSnapshot(symbol=symbol, price=float(row["lastPrice"]), change24h=float(row["priceChangePercent"]), volume24h=float(row["volume"]), high24h=float(row["highPrice"]), low24h=float(row["lowPrice"]), source=f"Binance {market}", eventTime=event, receivedAt=received, latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale")
+        return MarketSnapshot(symbol=symbol, price=float(row["lastPrice"]), change24h=float(row["priceChangePercent"]), volume24h=float(row["volume"]), high24h=float(row["highPrice"]), low24h=float(row["lowPrice"]), source=self.market_source(market), eventTime=event, receivedAt=received, latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale")
+
+    @staticmethod
+    def market_source(market: str) -> str:
+        if market == "futures" and FUTURES_DATA_MODE == "demo":
+            return "Binance USDⓈ-M demo market data"
+        return f"Binance {market}"
 
     async def book(self, symbol: str, market: str, limit: int) -> BookSnapshot:
         key = (market, symbol)
@@ -96,6 +103,7 @@ class MarketService:
         bids = {float(price): float(qty) for price, qty in snapshot["bids"] if float(qty) > 0}
         asks = {float(price): float(qty) for price, qty in snapshot["asks"] if float(qty) > 0}
         state = {"bids": bids, "asks": asks, "lastUpdateId": int(snapshot["lastUpdateId"]), "status": "syncing", "eventTime": None, "receivedAt": int(time.time() * 1000), "buffer": [], "lock": asyncio.Lock(), "task": None}
+        state["market"] = market
         self.books[key] = state
         state["task"] = asyncio.create_task(self.book_stream(market, symbol, state))
         return self.book_payload(symbol, state, limit)
@@ -115,7 +123,8 @@ class MarketService:
         bid_volume = sum(qty for _, qty in bids)
         ask_volume = sum(qty for _, qty in asks)
         imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume) if bid_volume + ask_volume else 0.0
-        return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=asks[0][0] - bids[0][0] if asks and bids else 0, imbalance=imbalance, eventTime=state["eventTime"], receivedAt=state["receivedAt"], status=state["status"])
+        source = self.market_source(state.get("market", "spot"))
+        return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=asks[0][0] - bids[0][0] if asks and bids else 0, imbalance=imbalance, eventTime=state["eventTime"], receivedAt=state["receivedAt"], status=state["status"], source=source)
 
     async def book_stream(self, market: str, symbol: str, state: dict[str, Any]) -> None:
         endpoint = FUTURES_WS if market == "futures" else SPOT_WS
@@ -196,7 +205,7 @@ class MarketService:
                             yield {"type": "candle", "data": candle.model_dump(), "closed": bool(row.get("x", False))}
                         elif "ticker" in stream:
                             event = int(data.get("E", received))
-                            snapshot = MarketSnapshot(symbol=symbol, price=float(data["c"]), change24h=float(data["P"]), volume24h=float(data["v"]), high24h=float(data["h"]), low24h=float(data["l"]), source=f"Binance {market}", eventTime=event, receivedAt=received, latencyMs=max(0, received-event), status="live")
+                            snapshot = MarketSnapshot(symbol=symbol, price=float(data["c"]), change24h=float(data["P"]), volume24h=float(data["v"]), high24h=float(data["h"]), low24h=float(data["l"]), source=self.market_source(market), eventTime=event, receivedAt=received, latencyMs=max(0, received-event), status="live")
                             yield {"type": "market", "data": snapshot.model_dump()}
             except asyncio.CancelledError:
                 raise
@@ -265,7 +274,7 @@ async def candles(symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), m
     except (httpx.HTTPError, HTTPException) as error:
         log.exception("candle request failed", extra={"symbol": symbol, "market": market, "interval": interval})
         raise HTTPException(502, f"Unable to load Binance candles: {error}") from error
-    return {"candles": [Candle(time=int(r[0] // 1000), open=float(r[1]), high=float(r[2]), low=float(r[3]), close=float(r[4]), volume=float(r[5])).model_dump() for r in rows], "source": f"Binance {market}", "receivedAt": int(time.time() * 1000), "coverage": "exchange historical OHLCV"}
+    return {"candles": [Candle(time=int(r[0] // 1000), open=float(r[1]), high=float(r[2]), low=float(r[3]), close=float(r[4]), volume=float(r[5])).model_dump() for r in rows], "source": service.market_source(market), "receivedAt": int(time.time() * 1000), "coverage": "exchange historical OHLCV"}
 
 
 def _period_starts(timestamp_ms: int) -> tuple[int, int, int]:
@@ -377,7 +386,7 @@ async def chart_overlays(symbol: str = Query("BTCUSDT"), interval: str = Query("
                 "low": _period_extreme(daily_rows, previous_month_start, month_start, 3, "low"),
             },
         }
-        return {"symbol": symbol, "interval": interval, "timezone": "UTC", "vwap": series, "previous": previous, "source": "Binance USDⓈ-M klines quote volume / base volume", "receivedAt": int(time.time() * 1000)}
+        return {"symbol": symbol, "interval": interval, "timezone": "UTC", "vwap": series, "previous": previous, "source": f"{service.market_source(market)} klines quote volume / base volume", "receivedAt": int(time.time() * 1000)}
     except httpx.HTTPError as error:
         raise HTTPException(502, f"Unable to load anchored VWAP and previous period levels: {error}") from error
 
@@ -403,7 +412,7 @@ async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), li
         for trade in reversed(rows):
             if trade.id not in known:
                 sample.append(trade)
-    return {"trades": [trade.model_dump() for trade in rows], "source": f"Binance {market} aggTrades", "receivedAt": int(time.time() * 1000), "coverage": "observed trades; bounded in-memory sample"}
+    return {"trades": [trade.model_dump() for trade in rows], "source": f"{service.market_source(market)} aggTrades", "receivedAt": int(time.time() * 1000), "coverage": "observed trades; bounded in-memory sample"}
 
 
 @app.get("/api/reversal-signals")
@@ -482,7 +491,7 @@ async def derivatives(symbol: str = Query("BTCUSDT")):
     symbol = validate_symbol(symbol)
     try:
         premium, interest = await asyncio.gather(service.request(FUTURES, "/fapi/v1/premiumIndex", {"symbol": symbol}), service.request(FUTURES, "/fapi/v1/openInterest", {"symbol": symbol}))
-        return {"rate": float(premium["lastFundingRate"]), "markPrice": float(premium["markPrice"]), "indexPrice": float(premium["indexPrice"]), "openInterest": float(interest["openInterest"]), "nextFundingTime": int(premium["nextFundingTime"]), "eventTime": int(premium["time"]), "receivedAt": int(time.time() * 1000), "status": "live"}
+        return {"rate": float(premium["lastFundingRate"]), "markPrice": float(premium["markPrice"]), "indexPrice": float(premium["indexPrice"]), "openInterest": float(interest["openInterest"]), "nextFundingTime": int(premium["nextFundingTime"]), "eventTime": int(premium["time"]), "receivedAt": int(time.time() * 1000), "status": "live", "source": service.market_source("futures")}
     except (httpx.HTTPError, KeyError, ValueError) as error:
         raise HTTPException(502, f"Futures data unavailable: {error}") from error
 
