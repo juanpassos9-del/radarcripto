@@ -281,6 +281,8 @@ async def lifespan(_: FastAPI):
         log.warning("flow store shutdown timed out with queued trades", extra={"queued": service.flow_store.queue.qsize()})
     writer_task.cancel()
     await asyncio.gather(collector_task, writer_task, return_exceptions=True)
+    if service.flow_store:
+        await asyncio.to_thread(service.flow_store.close)
     for state in service.books.values():
         task = state.get("task")
         if task:
@@ -480,8 +482,8 @@ async def flow_quality(symbol: str = Query("BTCUSDT")):
         "queueDepth": store.queue.qsize() if store else 0,
         "queueDropped": store.dropped if store else 0,
         "persistedThisProcess": store.saved if store else 0,
-        "storage": "sqlite",
-        "storagePath": str(store.path) if store else None,
+        "storage": store.storage if store else "unavailable",
+        "storagePath": str(store.path) if store and store.storage == "sqlite" else None,
         "storageDurable": store.durable if store else False,
         "retentionDays": store.retention_days if store else None,
         "source": "Binance Spot aggTrade combined stream",
