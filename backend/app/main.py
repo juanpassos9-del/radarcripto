@@ -25,6 +25,7 @@ log = logging.getLogger("nexus.market")
 SPOT_DATA = os.getenv("BINANCE_SPOT_REST_URL", "https://data-api.binance.vision")
 SPOT_WS = os.getenv("BINANCE_SPOT_WS_URL", "wss://data-stream.binance.vision/stream")
 MAX_GAP_BACKFILL_TRADES = max(0, int(os.getenv("FLOW_GAP_RECOVERY_MAX_TRADES", "5000")))
+MAX_AGGREGATED_BOOK_LEVELS = 150
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -44,6 +45,9 @@ class MarketService:
         }
         self.books: dict[tuple[str, str], dict[str, Any]] = {}
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
+        self.external_books: dict[tuple[str, str], dict[str, Any]] = {}
+        self.external_trades: dict[str, deque[Trade]] = {}
+        self.external_tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
         self.gap_recovery_locks = {symbol: asyncio.Lock() for symbol in SYMBOLS}
         self.recovery_tasks: set[asyncio.Task[Any]] = set()
         self.flow_store: FlowStore | None = None
@@ -201,6 +205,7 @@ class MarketService:
         return SPOT_DATA, paths[resource]
 
     async def book(self, symbol: str, market: str, limit: int) -> BookSnapshot:
+        self.ensure_external_collectors(symbol)
         key = (market, symbol)
         state = self.books.get(key)
         if state:
@@ -225,20 +230,165 @@ class MarketService:
     def book_payload(self, symbol: str, state: dict[str, Any], limit: int) -> BookSnapshot:
         bids = sorted(state["bids"].items(), reverse=True)[:limit]
         asks = sorted(state["asks"].items())[:limit]
+        now_ms = int(time.time() * 1000)
+        external = [self.external_books.get((symbol, venue)) for venue in ("Kraken", "Coinbase")]
+        venue_states = {"Binance": "stale" if state["status"] == "live" and now_ms - int(state["receivedAt"]) > 15_000 else state["status"]}
+        for venue, other in zip(("Kraken", "Coinbase"), external):
+            status = other["status"] if other else "connecting"
+            venue_states[venue] = "stale" if status == "live" and now_ms - int(other["receivedAt"]) > 15_000 else status
+        combined_bids: dict[float, dict[str, Any]] = {}
+        combined_asks: dict[float, dict[str, Any]] = {}
+        source_books = [("Binance", state), *[(name, item) for name, item in zip(("Kraken", "Coinbase"), external) if item and venue_states.get(name) == "live"]]
+        source_books = [(venue, item) for venue, item in source_books if item.get("status") == "live" and now_ms - int(item.get("receivedAt", 0)) <= 15_000]
+        mids = [(max(item["bids"]) + min(item["asks"])) / 2 for _, item in source_books if item.get("bids") and item.get("asks")]
+        reference_price = sum(mids) / len(mids) if mids else 1.0
+        bucket_size = max(reference_price * 0.00001, 0.00000001)  # 0.1 bp shared across venues.
+        for venue, venue_state in source_books:
+            if venue_state.get("status") != "live" or int(time.time() * 1000) - int(venue_state.get("receivedAt", 0)) > 15_000:
+                continue
+            for side, output in (("bids", combined_bids), ("asks", combined_asks)):
+                levels = venue_state.get(side, {}).items()
+                levels = sorted(levels, reverse=(side == "bids"))[:MAX_AGGREGATED_BOOK_LEVELS]
+                for price, qty in levels:
+                    price = float(price)  # USD and USDT are treated as 1:1 for this indicative cross-venue view.
+                    qty = float(qty)
+                    bucket = round(price / bucket_size) * bucket_size
+                    level = output.setdefault(bucket, {"quantity": 0.0, "sources": set()})
+                    level["quantity"] += qty
+                    level["sources"].add(venue)
+        bid_rows = sorted(combined_bids.items(), reverse=True)[:limit]
+        ask_rows = sorted(combined_asks.items())[:limit]
         bid_levels, ask_levels = [], []
         total = 0.0
-        for price, qty in bids:
+        for price, aggregate in bid_rows:
+            qty = aggregate["quantity"]
             total += price * qty
-            bid_levels.append(Level(price=price, quantity=qty, total=total))
+            bid_levels.append(Level(price=price, quantity=qty, total=total, sources=sorted(aggregate["sources"])))
         total = 0.0
-        for price, qty in asks:
+        for price, aggregate in ask_rows:
+            qty = aggregate["quantity"]
             total += price * qty
-            ask_levels.append(Level(price=price, quantity=qty, total=total))
-        bid_volume = sum(qty for _, qty in bids)
-        ask_volume = sum(qty for _, qty in asks)
+            ask_levels.append(Level(price=price, quantity=qty, total=total, sources=sorted(aggregate["sources"])))
+        bid_volume = sum(item["quantity"] for item in combined_bids.values())
+        ask_volume = sum(item["quantity"] for item in combined_asks.values())
         imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume) if bid_volume + ask_volume else 0.0
-        source = self.market_source(state.get("market", "spot"))
-        return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=asks[0][0] - bids[0][0] if asks and bids else 0, imbalance=imbalance, eventTime=state["eventTime"], receivedAt=state["receivedAt"], status=state["status"], source=source)
+        live_sources = [name for name, status in venue_states.items() if status == "live"]
+        event_times = [item.get("eventTime") for item in [state, *[x for x in external if x]] if item.get("eventTime")]
+        return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=ask_rows[0][0] - bid_rows[0][0] if ask_rows and bid_rows else 0, imbalance=imbalance, eventTime=max(event_times) if event_times else None, receivedAt=now_ms, status="live" if live_sources else "connecting", source=" + ".join(live_sources) or "Nenhuma fonte ao vivo", sources=venue_states)
+
+    def ensure_external_collectors(self, symbol: str) -> None:
+        # Only the currently requested watchlist asset needs external sockets.
+        for (active_symbol, venue), task in list(self.external_tasks.items()):
+            if active_symbol != symbol and not task.done():
+                task.cancel()
+                if (active_symbol, venue) in self.external_books:
+                    self.external_books[(active_symbol, venue)]["status"] = "stopped"
+        for venue in ("Kraken", "Coinbase"):
+            key = (symbol, venue)
+            task = self.external_tasks.get(key)
+            if task is None or task.done():
+                self.external_tasks[key] = asyncio.create_task(self.external_collector(symbol, venue))
+
+    @staticmethod
+    def external_pair(symbol: str, venue: str) -> str:
+        base = symbol.removesuffix("USDT")
+        if venue == "Kraken":
+            return f"{base}/USD"
+        return f"{base}-USD"
+
+    @staticmethod
+    def exchange_time(value: Any) -> int:
+        if isinstance(value, (int, float)):
+            return int(value if value > 10_000_000_000 else value * 1000)
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000)
+
+    async def external_collector(self, symbol: str, venue: str) -> None:
+        pair = self.external_pair(symbol, venue)
+        key = (symbol, venue)
+        state = self.external_books.setdefault(key, {"bids": {}, "asks": {}, "status": "connecting", "eventTime": None, "receivedAt": 0})
+        trades = self.external_trades.setdefault(symbol, deque(maxlen=5000))
+        url = "wss://ws.kraken.com/v2" if venue == "Kraken" else "wss://advanced-trade-ws.coinbase.com"
+        while True:
+            try:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=8 * 2**20) as socket:
+                    if venue == "Kraken":
+                        await socket.send(json.dumps({"method": "subscribe", "params": {"channel": "book", "symbol": [pair], "depth": 100, "snapshot": True}}))
+                        await socket.send(json.dumps({"method": "subscribe", "params": {"channel": "trade", "symbol": [pair], "snapshot": False}}))
+                    else:
+                        for channel in ("level2", "market_trades"):
+                            await socket.send(json.dumps({"type": "subscribe", "product_ids": [pair], "channel": channel}))
+                    async for raw in socket:
+                        message = json.loads(raw)
+                        received = int(time.time() * 1000)
+                        if venue == "Kraken":
+                            channel, rows, message_type = message.get("channel"), message.get("data", []), message.get("type")
+                            if message.get("success") is False or message.get("method") == "subscribe" and message.get("success") is False:
+                                state["status"] = "unavailable"
+                                log.info("Kraken pair unavailable", extra={"symbol": symbol, "error": message.get("error")})
+                                continue
+                            for row in rows:
+                                if channel == "book":
+                                    if message_type == "snapshot":
+                                        state["bids"] = {float(x["price"]): float(x["qty"]) for x in row.get("bids", []) if float(x["qty"]) > 0}
+                                        state["asks"] = {float(x["price"]): float(x["qty"]) for x in row.get("asks", []) if float(x["qty"]) > 0}
+                                        state["bids"] = dict(sorted(state["bids"].items(), reverse=True)[:MAX_AGGREGATED_BOOK_LEVELS])
+                                        state["asks"] = dict(sorted(state["asks"].items())[:MAX_AGGREGATED_BOOK_LEVELS])
+                                    else:
+                                        for side in ("bids", "asks"):
+                                            for update in row.get(side, []):
+                                                price, qty = float(update["price"]), float(update["qty"])
+                                                if qty:
+                                                    state[side][price] = qty
+                                                else:
+                                                    state[side].pop(price, None)
+                                                if len(state[side]) > MAX_AGGREGATED_BOOK_LEVELS:
+                                                    worst = min(state[side]) if side == "bids" else max(state[side])
+                                                    state[side].pop(worst, None)
+                                    state.update(status="live", eventTime=self.exchange_time(row.get("timestamp", received)), receivedAt=received)
+                                elif channel == "trade":
+                                    stamp = self.exchange_time(row["timestamp"])
+                                    trades.append(Trade(id=f"{row.get('trade_id', stamp)}", time=stamp, price=float(row["price"]), quantity=float(row["qty"]), side=row["side"], source=venue))
+                        else:
+                            if message.get("type") == "error":
+                                state["status"] = "unavailable"
+                                log.info("Coinbase pair/channel unavailable", extra={"symbol": symbol, "error": message.get("message")})
+                                continue
+                            channel = message.get("channel")
+                            for event in message.get("events", []):
+                                if channel == "l2_data":
+                                    product = event.get("product_id")
+                                    if product != pair:
+                                        continue
+                                    if event.get("type") == "snapshot":
+                                        state["bids"], state["asks"] = {}, {}
+                                    for update in event.get("updates", []):
+                                        side = "bids" if update.get("side", "").lower() == "bid" else "asks"
+                                        price, qty = float(update["price_level"]), float(update["new_quantity"])
+                                        if qty:
+                                            state[side][price] = qty
+                                        else:
+                                            state[side].pop(price, None)
+                                        if len(state[side]) > MAX_AGGREGATED_BOOK_LEVELS:
+                                            worst = min(state[side]) if side == "bids" else max(state[side])
+                                            state[side].pop(worst, None)
+                                    if event.get("type") == "snapshot":
+                                        state["bids"] = dict(sorted(state["bids"].items(), reverse=True)[:MAX_AGGREGATED_BOOK_LEVELS])
+                                        state["asks"] = dict(sorted(state["asks"].items())[:MAX_AGGREGATED_BOOK_LEVELS])
+                                    state.update(status="live", eventTime=self.exchange_time(event.get("event_time", received)), receivedAt=received)
+                                elif channel == "market_trades":
+                                    for row in event.get("trades", []):
+                                        if row.get("product_id") != pair:
+                                            continue
+                                        stamp = self.exchange_time(row.get("time", received))
+                                        maker_side = row.get("side", "BUY").lower()
+                                        trades.append(Trade(id=str(row.get("trade_id", stamp)), time=stamp, price=float(row["price"]), quantity=float(row["size"]), side="sell" if maker_side == "buy" else "buy", source=venue))
+                state["status"] = "reconnecting"
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                state["status"] = "unavailable" if not state["receivedAt"] else "reconnecting"
+                log.exception("external spot stream disconnected", extra={"symbol": symbol, "venue": venue})
+            await asyncio.sleep(2)
 
     async def book_stream(self, market: str, symbol: str, state: dict[str, Any]) -> None:
         endpoint = SPOT_WS
@@ -339,6 +489,9 @@ async def lifespan(_: FastAPI):
     collector_task = asyncio.create_task(service.collect_all_trades())
     yield
     collector_task.cancel()
+    for task in service.external_tasks.values():
+        task.cancel()
+    await asyncio.gather(*service.external_tasks.values(), return_exceptions=True)
     recovery_tasks = list(service.recovery_tasks)
     for task in recovery_tasks:
         task.cancel()
@@ -519,23 +672,31 @@ async def order_book(symbol: str = Query("BTCUSDT"), market: str = Query("spot")
 @app.get("/api/trades")
 async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), limit: int = Query(24, ge=1, le=100)):
     symbol, market = validate_symbol(symbol), validate_market(market)
+    service.ensure_external_collectors(symbol)
     sample = service.samples.get((market, symbol), deque())
     stored = await asyncio.to_thread(service.flow_store.recent, symbol, limit) if service.flow_store else []
     if len(stored) >= limit:
-        rows = stored
+        binance_rows = stored
     elif len(sample) >= limit:
-        rows = list(sample)[-limit:]
-        rows.reverse()
+        binance_rows = list(sample)[-limit:]
+        binance_rows.reverse()
     else:
         base, path = service.base_and_path(market, "trades")
         response = await service.request(base, path, {"symbol": symbol, "limit": limit})
         fetched = [Trade(id=int(r["a"]), time=int(r["T"]), price=float(r["p"]), quantity=float(r["q"]), side="sell" if r["m"] else "buy") for r in response]
-        rows = sorted({trade.id: trade for trade in [*stored, *list(sample), *fetched]}.values(), key=lambda trade: (trade.time, trade.id), reverse=True)[:limit]
+        binance_rows = sorted({trade.id: trade for trade in [*stored, *list(sample), *fetched]}.values(), key=lambda trade: (trade.time, str(trade.id)), reverse=True)[:limit]
         known = {trade.id for trade in sample}
-        for trade in reversed(rows):
+        for trade in reversed(binance_rows):
             if trade.id not in known:
                 sample.append(trade)
-    return {"trades": [trade.model_dump() for trade in rows], "source": f"{service.market_source(market)} aggTrades", "receivedAt": int(time.time() * 1000), "coverage": "stored collector history plus current exchange sample"}
+    external_rows = list(service.external_trades.get(symbol, []))
+    unique = {(trade.source, str(trade.id)): trade for trade in [*binance_rows, *external_rows]}
+    rows = sorted(unique.values(), key=lambda trade: (trade.time, str(trade.id)), reverse=True)[:limit]
+    sources = {"Binance": "live" if service.flow_quality[symbol]["connected"] else "reconnecting"}
+    for venue in ("Kraken", "Coinbase"):
+        state = service.external_books.get((symbol, venue))
+        sources[venue] = state["status"] if state else "connecting"
+    return {"trades": [trade.model_dump() for trade in rows], "source": "Binance + Kraken + Coinbase Spot", "sources": sources, "receivedAt": int(time.time() * 1000), "coverage": "negociações públicas observadas; volumes são somados por ativo base; USD tratado como aproximadamente 1 USDT"}
 
 @app.get("/api/flow-quality")
 async def flow_quality(symbol: str = Query("BTCUSDT")):

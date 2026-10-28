@@ -6,14 +6,14 @@ export type ChartOverlays = {
   previous: { day: { high: number | null; low: number | null }; week: { high: number | null; low: number | null }; month: { high: number | null; low: number | null } };
   source: string; receivedAt: number;
 };
-export type Trade = { id: number; time: number; price: number; quantity: number; side: "buy" | "sell" };
-export type Level = { price: number; quantity: number; total: number };
+export type Trade = { id: number | string; time: number; price: number; quantity: number; side: "buy" | "sell"; source?: string };
+export type Level = { price: number; quantity: number; total: number; sources?: string[] };
 export type MarketSnapshot = {
   symbol: string; price: number | null; change24h: number | null; volume24h: number | null;
   high24h: number | null; low24h: number | null; source: string; eventTime: number | null;
   receivedAt: number; latencyMs: number | null; status: "live" | "stale" | "unavailable";
 };
-export type BookData = { bids: Level[]; asks: Level[]; spread: number; imbalance: number; eventTime: number | null; receivedAt: number; status: string };
+export type BookData = { bids: Level[]; asks: Level[]; spread: number; imbalance: number; eventTime: number | null; receivedAt: number; status: string; source?: string; sources?: Record<string, string> };
 export type ReversalSignal = {
   time: number; symbol: string; interval: string; direction: "BUY" | "SELL"; price: number; bandPrice: number;
   sigma: number; source: "GARCH" | "HV252"; sources: Array<"GARCH" | "HV252">; pattern: string;

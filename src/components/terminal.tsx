@@ -27,6 +27,7 @@ export default function Terminal() {
   const [bookThreshold, setBookThreshold] = useState(10_000);
   const [showAllBookLevels, setShowAllBookLevels] = useState(false);
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [tradeSources, setTradeSources] = useState<Record<string, string>>({});
   const [flowQuality, setFlowQuality] = useState<{ status: string; connected: boolean; lastEventTime: number | null; lastLatencyMs: number | null; events: number; reconnects: number; possibleIdGaps: number; backfillRowsQueued?: number; backfillSkippedIds?: number; backfillFailures?: number; storedTrades: number; oldestTradeTime: number | null; storedFlowBars?: number; oldestFlowBarTime?: number | null; aggregateRetentionDays?: number | null; queueDropped: number; storage: string; storageBytes: number; storageDurable: boolean; rawRetentionHours: number } | null>(null);
   const [reversalData, setReversalData] = useState<ReversalSignalData | null>(null);
   const [reversalError, setReversalError] = useState(false);
@@ -75,7 +76,7 @@ export default function Terminal() {
     const [candleResult, bookResult, tradeResult] = await Promise.allSettled([
       getJson<{ candles: Candle[] }>(`/api/candles?symbol=${symbol}&interval=${interval}&market=${market}&limit=240`),
       getJson<BookData>(`/api/book?symbol=${symbol}&market=${market}&limit=16`),
-      getJson<{ trades: Trade[] }>(`/api/trades?symbol=${symbol}&market=${market}&limit=24`),
+      getJson<{ trades: Trade[]; sources?: Record<string, string> }>(`/api/trades?symbol=${symbol}&market=${market}&limit=24`),
     ]);
     if (selectedKeyRef.current !== requestKey) return;
     if (candleResult.status === "fulfilled") setCandles(candleResult.value.candles);
@@ -84,6 +85,7 @@ export default function Terminal() {
     else setBook(null);
     if (tradeResult.status === "fulfilled") {
       setTrades(tradeResult.value.trades);
+      setTradeSources(tradeResult.value.sources ?? {});
     }
     if (isFirst) setLoading(false);
   }, [symbol, interval, market]);
@@ -210,6 +212,7 @@ export default function Terminal() {
   const sigmaZone = sigmaDistance == null ? "Sem dados" : Math.abs(sigmaDistance) < 0.5 ? "Neutra" : Math.abs(sigmaDistance) < 1 ? "Moderada" : Math.abs(sigmaDistance) < 2 ? "Atenção" : Math.abs(sigmaDistance) < 3 ? "Extrema" : "Anomalia";
   const bestBid = book?.bids[0]?.price ?? null;
   const bestAsk = book?.asks[0]?.price ?? null;
+  const liveBookSources = Object.values(book?.sources ?? {}).filter(status => status === "live").length;
   const visibleAsks = useMemo(() => {
     const levels = book?.asks?.slice().reverse() ?? [];
     return (showAllBookLevels ? levels : levels.filter(level => level.price * level.quantity >= bookThreshold)).slice(0, 7);
@@ -302,19 +305,19 @@ export default function Terminal() {
         </section>
 
         <aside className="rightstack">
-          <section className="panel"><div className="panelhead"><span className="paneltitle">Spot order book</span><span className={`badge ${book?.status === "live" ? "good" : ""}`}>{book?.status === "live" ? "LIVE" : book?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div>
-            <div className="booksummary"><div><span>SPREAD</span><strong className="mono">{book ? fmtPrice(book.spread, 4) : "—"}</strong></div><div style={{ textAlign: "right" }}><span>IMBALANCE</span><strong className={`mono ${book ? directionClass(book.imbalance) : ""}`}>{book ? `${book.imbalance >= 0 ? "+" : ""}${book.imbalance.toFixed(2)}` : "—"}</strong></div></div>
+          <section className="panel"><div className="panelhead"><span className="paneltitle">Spot order book · 3 corretoras</span><span className={`badge ${book?.status === "live" ? "good" : ""}`}>{liveBookSources}/3 FONTES</span></div>
+            <div className="booksummary"><div><span>GAP INDICATIVO · MELHOR BID/ASK</span><strong className="mono">{book ? fmtPrice(book.spread, 4) : "—"}</strong></div><div style={{ textAlign: "right" }}><span>IMBALANCE</span><strong className={`mono ${book ? directionClass(book.imbalance) : ""}`}>{book ? `${book.imbalance >= 0 ? "+" : ""}${book.imbalance.toFixed(2)}` : "—"}</strong></div></div>
             <div className="bookfilters"><label>Filtro mínimo<select value={showAllBookLevels ? "all" : String(bookThreshold)} onChange={event => { const value = event.target.value; setShowAllBookLevels(value === "all"); if (value !== "all") setBookThreshold(Number(value)); }}><option value="all">Todos os níveis</option><option value="10000">10 mil USDT</option><option value="50000">50 mil USDT</option><option value="100000">100 mil USDT</option><option value="250000">250 mil USDT</option><option value="500000">500 mil USDT</option></select></label><span>Valor visível = preço × quantidade</span></div>
             <div className="depthbook">
               <div className="depthbook-head"><span>QTD. COMPRA</span><span>TOTAL</span><span>COMPRA</span><span>VENDA</span><span>TOTAL</span><span>QTD. VENDA</span></div>
               <div className="depthbook-grid">
-                <div className="depthbook-side left">{visibleBids.map((level, index) => <div className="depthbook-row" key={`b${index}`}><span className="book-qty mono">{fmtCompact(level.quantity)}</span><span className="book-total mono">{fmtCompact(cumulativeBids[index])}</span><span className="book-price mono pos">{fmtPrice(level.price, 2)}</span><span className="book-bar bid" style={{ "--book-depth": `${Math.min(100, (level.price * level.quantity / bookMaxNotional) * 100)}%` } as React.CSSProperties}/></div>)}{visibleBids.length === 0 && <div className="bookempty">Sem ofertas de compra nesta amostra.</div>}</div>
-                <div className="depthbook-side right">{visibleAsks.map((level, index) => <div className="depthbook-row" key={`a${index}`}><span className="book-price mono neg">{fmtPrice(level.price, 2)}</span><span className="book-bar ask" style={{ "--book-depth": `${Math.min(100, (level.price * level.quantity / bookMaxNotional) * 100)}%` } as React.CSSProperties}/><span className="book-total mono">{fmtCompact(cumulativeAsks[index])}</span><span className="book-qty mono">{fmtCompact(level.quantity)}</span></div>)}{visibleAsks.length === 0 && <div className="bookempty">Sem ofertas de venda nesta amostra.</div>}</div>
+                <div className="depthbook-side left">{visibleBids.map((level, index) => <div className="depthbook-row" key={`b${index}`} title={`Fontes: ${(level.sources ?? []).join(", ")}`}><span className="book-qty mono">{fmtCompact(level.quantity)}</span><span className="book-total mono">{fmtCompact(cumulativeBids[index])}</span><span className="book-price mono pos">{fmtPrice(level.price, 2)}</span><span className="book-bar bid" style={{ "--book-depth": `${Math.min(100, (level.price * level.quantity / bookMaxNotional) * 100)}%` } as React.CSSProperties}/></div>)}{visibleBids.length === 0 && <div className="bookempty">Sem ofertas de compra nesta amostra.</div>}</div>
+                <div className="depthbook-side right">{visibleAsks.map((level, index) => <div className="depthbook-row" key={`a${index}`} title={`Fontes: ${(level.sources ?? []).join(", ")}`}><span className="book-price mono neg">{fmtPrice(level.price, 2)}</span><span className="book-bar ask" style={{ "--book-depth": `${Math.min(100, (level.price * level.quantity / bookMaxNotional) * 100)}%` } as React.CSSProperties}/><span className="book-total mono">{fmtCompact(cumulativeAsks[index])}</span><span className="book-qty mono">{fmtCompact(level.quantity)}</span></div>)}{visibleAsks.length === 0 && <div className="bookempty">Sem ofertas de venda nesta amostra.</div>}</div>
               </div>
-              <div className="depthbook-mid"><span className="mono pos">{bestBid != null ? fmtPrice(bestBid, 2) : "—"}</span><span>{book && bestBid != null && bestAsk != null ? `SPREAD ${fmtPrice(book.spread, 4)}` : "CONECTANDO"}</span><span className="mono neg">{bestAsk != null ? fmtPrice(bestAsk, 2) : "—"}</span></div>
-              <div className="depthbook-foot">TOTAL ACUMULADO DOS NÍVEIS VISÍVEIS · BARRA = VALOR DA ORDEM · USDT</div>
+              <div className="depthbook-mid"><span className="mono pos">{bestBid != null ? fmtPrice(bestBid, 2) : "—"}</span><span>{book && bestBid != null && bestAsk != null ? `GAP ${fmtPrice(book.spread, 4)}` : "CONECTANDO"}</span><span className="mono neg">{bestAsk != null ? fmtPrice(bestAsk, 2) : "—"}</span></div>
+              <div className="depthbook-foot">BINANCE + KRAKEN + COINBASE · USD ≈ USDT · FAIXAS DE 0,1 PB</div>
             </div>
-            <div className="dataerror">Profundidade via snapshot + deltas. A amostra mostra apenas os níveis recebidos da Binance nesta sessão.</div>
+            <div className="dataerror">Book indicativo: o gap pode ser negativo entre corretoras e não representa arbitragem executável. Cada nível mostra as fontes ao passar o cursor; USD ≈ USDT.</div>
           </section>
 
           <section className="panel" id="reversal-signals"><div className="panelhead"><span className="paneltitle">Reversão · {nameOf(symbol)}</span><span className={`badge ${latestReversal?.direction === "BUY" ? "good" : latestReversal?.direction === "SELL" ? "neg" : ""}`}>{latestReversal ? `ÚLTIMO ${latestReversal.direction}` : "SEM SINAL"}</span></div>
@@ -336,11 +339,11 @@ export default function Terminal() {
       </div>
 
       <div className="bottomgrid" id="flow">
-        <section className="panel"><div className="panelhead"><span className="paneltitle">Times & trades</span><span className="badge good"><span className="dot" style={{ display: "inline-block", width: 5, height: 5 }}/> &nbsp;BINANCE · AGGTRADES</span></div>
-          <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. {nameOf(symbol)}</span><span>LADO AGRESSOR</span></div>
-            {trades.slice(0,18).map((trade,i)=><div className="taperow" key={`${trade.id}-${i}`}><span className="mono" style={{ color: "#8290a0" }}>{fmtTime(trade.time)}</span><span className={`mono ${trade.side === "buy" ? "pos" : "neg"}`}>{fmtPrice(trade.price, 2)}</span><span className="mono" style={{ textAlign: "right" }}>{trade.quantity.toFixed(5)}</span><span style={{ textAlign: "right", color: trade.side === "buy" ? "#44d49a" : "#ff667c" }}>{trade.side === "buy" ? "▲ COMPRA" : "▼ VENDA"}</span></div>)}
+        <section className="panel"><div className="panelhead"><span className="paneltitle">Times & trades agregado</span><span className={`badge ${Object.values(tradeSources).filter(status => status === "live").length === 3 ? "good" : ""}`}>{["Binance", "Kraken", "Coinbase"].map(venue => `${venue}: ${(tradeSources[venue] ?? "connecting").toUpperCase()}`).join(" · ")}</span></div>
+          <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. {nameOf(symbol)}</span><span>LADO AGRESSOR</span><span>ORIGEM</span></div>
+            {trades.slice(0,18).map((trade,i)=><div className="taperow" key={`${trade.source}-${trade.id}-${i}`}><span className="mono" style={{ color: "#8290a0" }}>{fmtTime(trade.time)}</span><span className={`mono ${trade.side === "buy" ? "pos" : "neg"}`}>{fmtPrice(trade.price, 2)}</span><span className="mono" style={{ textAlign: "right" }}>{trade.quantity.toFixed(5)}</span><span style={{ textAlign: "right", color: trade.side === "buy" ? "#44d49a" : "#ff667c" }}>{trade.side === "buy" ? "▲ COMPRA" : "▼ VENDA"}</span><span style={{ textAlign: "right", color: "#91a0af" }}>{trade.source ?? "Binance"}</span></div>)}
             {trades.length === 0 && <div className="loading">Aguardando negociações observadas…</div>}
-          </div><div className="disclaimer">O lado agressor é inferido do campo maker da Binance. Trades são deduplicados e persistidos no coletor; lacunas ou desconexões podem deixar períodos incompletos.</div>
+          </div><div className="disclaimer">A fita ordena execuções observadas e preserva a corretora de origem. USD é tratado como aproximadamente 1 USDT; CVD soma quantidades por ativo base, não volume em cotação.</div>
         </section>
 
         <section className="panel" id="data"><div className="panelhead"><span className="paneltitle">Fluxo observado</span><Database size={13} color="#8794a2"/></div>

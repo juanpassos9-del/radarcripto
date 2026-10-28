@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class MarketSnapshot(BaseModel):
@@ -21,6 +21,7 @@ class Level(BaseModel):
     price: float
     quantity: float
     total: float
+    sources: list[str] = Field(default_factory=list)
 
 
 class BookSnapshot(BaseModel):
@@ -33,14 +34,16 @@ class BookSnapshot(BaseModel):
     receivedAt: int
     status: str
     source: str = "Binance"
+    sources: dict[str, str] = Field(default_factory=dict)
 
 
 class Trade(BaseModel):
-    id: int
+    id: int | str
     time: int
     price: float
     quantity: float
     side: Literal["buy", "sell"]
+    source: str = "Binance"
 
 
 class Candle(BaseModel):
