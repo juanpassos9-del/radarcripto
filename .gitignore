@@ -5,6 +5,10 @@ out/
 !.env.example
 *.log
 *.db
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+backend/data/
 *.tsbuildinfo
 __pycache__/
 .venv/

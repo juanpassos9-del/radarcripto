@@ -1,6 +1,6 @@
 # NEXUS Crypto Terminal
 
-Terminal local de análise de contratos perpétuos USDⓈ-M com foco em fluxo observado, qualidade dos dados e sinais explicáveis. A aplicação abre em Binance USDⓈ-M Futures, não oferece fluxo Spot no dashboard e não envia ordens nem pede chaves de exchange.
+Terminal de análise de mercado Spot da Binance com foco em fluxo observado, qualidade dos dados e sinais explicáveis. A versão hospedada usa Binance Spot e não envia ordens nem pede chaves de exchange.
 
 ## Começar no Windows
 
@@ -23,12 +23,12 @@ Copie `.env.example` para `.env.local` se precisar trocar a URL do WebSocket. AP
 
 ## O que está implementado
 
-- Binance USDⓈ-M Futures (contratos perpétuos) para 25 pares USDT: BTC, ETH, SOL, BNB, XRP, ADA, DOGE, AVAX, LINK, DOT, LTC, BCH, SUI, TRX, NEAR, APT, ARB, OP, INJ, FIL, UNI, ETC, ATOM, AAVE e WIF.
+- Binance Spot para 25 pares USDT: BTC, ETH, SOL, BNB, XRP, ADA, DOGE, AVAX, LINK, DOT, LTC, BCH, SUI, TRX, NEAR, APT, ARB, OP, INJ, FIL, UNI, ETC, ATOM, AAVE e WIF.
 - Cotações 24h e candles OHLCV históricos, com preço, hora de evento/recebimento e latência aproximada.
 - Candles ao vivo por WebSocket e gráfico de candles/volume, intervalos de 1m a 1M.
-- Trades agregados reais (aggTrades), classificação do lado agressor conforme campo `m` da Binance, deduplicação por ID e reconexão com backoff.
+- Trades agregados reais (aggTrades), classificação do lado agressor conforme campo `m` da Binance e deduplicação por ID. Um coletor em segundo plano acompanha os 25 pares sem depender de uma tela aberta, grava os trades em SQLite com retenção configurável e expõe qualidade/latência em `/api/flow-quality`.
 - Livro de ofertas com snapshot seguido de diffs de profundidade. O backend verifica a sequência de IDs e sincroniza novamente quando detecta gap. Exibe spread e OBI para a profundidade mostrada.
-- CVD calculado somente da amostra de trades observada e em memória (limite de 5.000 eventos), com cobertura explicitamente marcada.
+- CVD calculado somente da amostra visível de trades, com cobertura explicitamente marcada. O histórico de trades do coletor fica em SQLite local por um dia por padrão (`FLOW_RETENTION_DAYS` controla a retenção).
 - Zonas diárias de volatilidade GARCH(1,1) e HV252 nos gráficos intradiários, com referência no último fechamento diário concluído, faixas lognormais e controles para ocultar cada conjunto. O candle diário ainda aberto é excluído.
 - Sinais determinísticos de reversão BUY/SELL em bandas GARCH/HV252, confirmados por rejeição em candle fechado, filtro de volume (1,2× a média dos 20 candles prévios), score mínimo 50 e cooldown de 10 candles. Direções, fontes, sigma mínimo e tolerância de toque são configuráveis; marcadores aparecem no gráfico e nenhuma ordem é enviada.
 - Sinal determinístico por candle fechado: EMA(9/21), RSI(14), volume relativo e rompimento de estrutura. Pesos indisponíveis continuam ausentes; pontuação não é normalizada nem apresentada como probabilidade.
@@ -42,7 +42,8 @@ Copie `.env.example` para `.env.local` se precisar trocar a URL do WebSocket. AP
 - CVD e volume de trades no painel representam a janela/amostra observada, não todo o volume do candle nem histórico completo. A API pode buscar uma amostra REST recente para preencher a primeira tela; isso não equivale a cobertura contínua do coletor.
 - O sinal não incorpora fluxo nem derivativos; os fatores aparecem como ausentes no motor. Não calcula entradas, stops ou alvos.
 - Alertas cruzam somente o preço para cima, são por navegador e não sincronizam entre dispositivos.
-- Não há usuário, login, cobrança, planos, autorização por assinatura ou serviço hospedado. O dashboard local valida experiência e dados antes da construção dessas partes.
+- SQLite mantém os trades enquanto o arquivo existir. Configure `FLOW_DB_PATH` para escolher o caminho e `FLOW_STORAGE_DURABLE=true` somente quando esse caminho estiver em disco persistente. Os serviços gratuitos do Render não têm disco persistente; reinícios e deploys podem apagar o arquivo e a API sinaliza essa limitação.
+- Não há usuário, login, cobrança, planos ou autorização por assinatura. O dashboard local valida experiência e dados antes da construção dessas partes.
 - Não há backtest ou paper trading nesta fase. Nenhum módulo simula desempenho ou execução financeira.
 - REST pública está sujeita a rate limits, disponibilidade regional e alterações da exchange. A aplicação reporta erros e não fabrica dados.
 
@@ -62,8 +63,8 @@ Arquitetura sugerida para evolução: separar coletores por exchange, normaliza�
 
 ## Fases
 
-1. **MVP local (esta entrega):** Binance USDⓈ-M perpetual, 25 pares USDT, candles, trades, book, CVD observado, métricas de derivativos, zonas de volatilidade com sinais de reversão explicáveis e alerta de preço.
-2. **Coleta própria:** armazenamento com retenção e cobertura declarada; replay e heatmap; footprint somente com trades suficientes.
+1. **MVP local (esta entrega):** Binance Spot, 25 pares USDT, candles, trades, book, CVD observado, zonas de volatilidade com sinais de reversão explicáveis e alerta de preço.
+2. **Coleta própria:** trades com SQLite local, retenção e cobertura declarada; migrar para armazenamento durável hospedado antes de depender de histórico na publicação; replay e heatmap; footprint somente com trades suficientes.
 3. **Análise:** indicadores, sinais com fatores adicionais e backtest sem look-ahead, custos/slippage e validação fora da amostra.
 4. **Produto hospedado:** autenticação, equipes/contas, planos, billing, limites, privacidade, segurança, monitoramento e reconciliação de dados.
 5. **Expansão:** Bybit e outras fontes após revisar APIs, limites e licenças de redistribuição.

@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 
 from .schemas import BookSnapshot, Candle, Level, MarketSnapshot, Trade
+from .flow_store import FlowStore
 from .reversal_engine import build_reversal_signals
 from .volatility import calculate_zones
 
@@ -42,9 +43,56 @@ class MarketService:
         }
         self.books: dict[tuple[str, str], dict[str, Any]] = {}
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
+        self.flow_store: FlowStore | None = None
+        self.flow_quality: dict[str, dict[str, Any]] = {
+            symbol: {"status": "starting", "connected": False, "sessionStartedAt": int(time.time() * 1000), "connectedAt": None, "lastEventTime": None, "lastReceivedAt": None, "lastLatencyMs": None, "events": 0, "reconnects": 0, "possibleIdGaps": 0, "lastTradeId": None, "lastDisconnectAt": None}
+            for symbol in SYMBOLS
+        }
 
     async def close(self) -> None:
         await self.client.aclose()
+
+    async def collect_all_trades(self) -> None:
+        streams = [f"{symbol.lower()}@aggTrade" for symbol in SYMBOLS]
+        url = f"{SPOT_WS}?streams={'/'.join(streams)}"
+        while True:
+            try:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2**20) as socket:
+                    connected_at = int(time.time() * 1000)
+                    for state in self.flow_quality.values():
+                        if state["connectedAt"] is not None:
+                            state["reconnects"] += 1
+                        state.update(status="live", connected=True, connectedAt=connected_at)
+                    async for raw in socket:
+                        message = json.loads(raw)
+                        data = message.get("data", message)
+                        symbol = str(data.get("s", "")).upper()
+                        if symbol not in self.flow_quality:
+                            continue
+                        received = int(time.time() * 1000)
+                        trade = Trade(id=int(data["a"]), time=int(data["T"]), price=float(data["p"]), quantity=float(data["q"]), side="sell" if data["m"] else "buy")
+                        state = self.flow_quality[symbol]
+                        previous_id = state["lastTradeId"]
+                        if previous_id is not None and trade.id > previous_id + 1:
+                            state["possibleIdGaps"] += trade.id - previous_id - 1
+                        state.update(lastTradeId=trade.id, lastEventTime=trade.time, lastReceivedAt=received, lastLatencyMs=max(0, received-trade.time), events=state["events"] + 1, status="live", connected=True)
+                        sample = self.samples.setdefault(("spot", symbol), deque(maxlen=5000))
+                        if not sample or sample[-1].id != trade.id:
+                            sample.append(trade)
+                        if self.flow_store:
+                            self.flow_store.enqueue(symbol, trade, received)
+                disconnected_at = int(time.time() * 1000)
+                for state in self.flow_quality.values():
+                    state.update(status="reconnecting", connected=False, lastDisconnectAt=disconnected_at)
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                disconnected_at = int(time.time() * 1000)
+                log.exception("aggregate trade collector disconnected")
+                for state in self.flow_quality.values():
+                    state.update(status="reconnecting", connected=False, lastDisconnectAt=disconnected_at)
+                await asyncio.sleep(2)
 
     async def request(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
         for attempt in range(4):
@@ -198,6 +246,8 @@ class MarketService:
                             sample = self.samples.setdefault(key, deque(maxlen=5000))
                             if not sample or sample[-1].id != trade.id:
                                 sample.append(trade)
+                            if self.flow_store:
+                                self.flow_store.enqueue(symbol, trade, received)
                             yield {"type": "trade", "data": trade.model_dump()}
                         elif "kline" in stream or "kline" in data:
                             row = data["k"]
@@ -219,7 +269,18 @@ service: MarketService
 async def lifespan(_: FastAPI):
     global service
     service = MarketService()
+    service.flow_store = FlowStore()
+    await asyncio.to_thread(service.flow_store.initialize)
+    writer_task = asyncio.create_task(service.flow_store.writer())
+    collector_task = asyncio.create_task(service.collect_all_trades())
     yield
+    collector_task.cancel()
+    try:
+        await asyncio.wait_for(service.flow_store.queue.join(), timeout=5)
+    except asyncio.TimeoutError:
+        log.warning("flow store shutdown timed out with queued trades", extra={"queued": service.flow_store.queue.qsize()})
+    writer_task.cancel()
+    await asyncio.gather(collector_task, writer_task, return_exceptions=True)
     for state in service.books.values():
         task = state.get("task")
         if task:
@@ -389,19 +450,43 @@ async def order_book(symbol: str = Query("BTCUSDT"), market: str = Query("spot")
 async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), limit: int = Query(24, ge=1, le=100)):
     symbol, market = validate_symbol(symbol), validate_market(market)
     sample = service.samples.get((market, symbol), deque())
-    if len(sample) >= limit:
+    stored = await asyncio.to_thread(service.flow_store.recent, symbol, limit) if service.flow_store else []
+    if len(stored) >= limit:
+        rows = stored
+    elif len(sample) >= limit:
         rows = list(sample)[-limit:]
         rows.reverse()
     else:
         base, path = service.base_and_path(market, "trades")
         response = await service.request(base, path, {"symbol": symbol, "limit": limit})
-        rows = [Trade(id=int(r["a"]), time=int(r["T"]), price=float(r["p"]), quantity=float(r["q"]), side="sell" if r["m"] else "buy") for r in response]
-        rows.reverse()
+        fetched = [Trade(id=int(r["a"]), time=int(r["T"]), price=float(r["p"]), quantity=float(r["q"]), side="sell" if r["m"] else "buy") for r in response]
+        rows = sorted({trade.id: trade for trade in [*stored, *list(sample), *fetched]}.values(), key=lambda trade: (trade.time, trade.id), reverse=True)[:limit]
         known = {trade.id for trade in sample}
         for trade in reversed(rows):
             if trade.id not in known:
                 sample.append(trade)
-    return {"trades": [trade.model_dump() for trade in rows], "source": f"{service.market_source(market)} aggTrades", "receivedAt": int(time.time() * 1000), "coverage": "observed trades; bounded in-memory sample"}
+    return {"trades": [trade.model_dump() for trade in rows], "source": f"{service.market_source(market)} aggTrades", "receivedAt": int(time.time() * 1000), "coverage": "stored collector history plus current exchange sample"}
+
+@app.get("/api/flow-quality")
+async def flow_quality(symbol: str = Query("BTCUSDT")):
+    symbol = validate_symbol(symbol)
+    state = service.flow_quality[symbol].copy()
+    summary = await asyncio.to_thread(service.flow_store.summary, symbol) if service.flow_store else {"storedTrades": 0, "oldestTradeTime": None, "newestTradeTime": None}
+    store = service.flow_store
+    return {
+        "symbol": symbol,
+        **state,
+        **summary,
+        "queueDepth": store.queue.qsize() if store else 0,
+        "queueDropped": store.dropped if store else 0,
+        "persistedThisProcess": store.saved if store else 0,
+        "storage": "sqlite",
+        "storagePath": str(store.path) if store else None,
+        "storageDurable": store.durable if store else False,
+        "retentionDays": store.retention_days if store else None,
+        "source": "Binance Spot aggTrade combined stream",
+        "receivedAt": int(time.time() * 1000),
+    }
 
 @app.get("/api/reversal-signals")
 async def reversal_signals(

@@ -26,6 +26,7 @@ export default function Terminal() {
   const [bookThreshold, setBookThreshold] = useState(10_000);
   const [showAllBookLevels, setShowAllBookLevels] = useState(false);
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [flowQuality, setFlowQuality] = useState<{ status: string; connected: boolean; lastEventTime: number | null; lastLatencyMs: number | null; events: number; reconnects: number; possibleIdGaps: number; storedTrades: number; oldestTradeTime: number | null; queueDropped: number; storageDurable: boolean; retentionDays: number } | null>(null);
   const [reversalData, setReversalData] = useState<ReversalSignalData | null>(null);
   const [reversalError, setReversalError] = useState(false);
   const [buyEnabled, setBuyEnabled] = useState(true);
@@ -136,6 +137,14 @@ export default function Terminal() {
 
   useEffect(() => {
     let active = true;
+    const refresh = () => getJson<NonNullable<typeof flowQuality>>(`/api/flow-quality?symbol=${symbol}`).then(data => { if (active) setFlowQuality(data); }).catch(() => { if (active) setFlowQuality(null); });
+    void refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [symbol]);
+
+  useEffect(() => {
+    let active = true;
     let polling = false;
     setLoading(true);
     setCandles([]); setBook(null); setTrades([]);
@@ -208,6 +217,15 @@ export default function Terminal() {
     const levels = book?.bids ?? [];
     return (showAllBookLevels ? levels : levels.filter(level => level.price * level.quantity >= bookThreshold)).slice(0, 7);
   }, [book, bookThreshold, showAllBookLevels]);
+  const bookMaxNotional = useMemo(() => Math.max(1, ...visibleAsks.map(level => level.price * level.quantity), ...visibleBids.map(level => level.price * level.quantity)), [visibleAsks, visibleBids]);
+  const cumulativeAsks = useMemo(() => {
+    let total = 0;
+    return visibleAsks.map(level => { total += level.price * level.quantity; return total; });
+  }, [visibleAsks]);
+  const cumulativeBids = useMemo(() => {
+    let total = 0;
+    return visibleBids.map(level => { total += level.price * level.quantity; return total; });
+  }, [visibleBids]);
   const cvd = useMemo(() => trades.reduce((sum, trade) => sum + (trade.side === "buy" ? 1 : -1) * trade.quantity, 0), [trades]);
   const buyVolume = useMemo(() => trades.filter(t => t.side === "buy").reduce((n,t) => n+t.quantity,0), [trades]);
   const sellVolume = useMemo(() => trades.filter(t => t.side === "sell").reduce((n,t) => n+t.quantity,0), [trades]);
@@ -286,13 +304,16 @@ export default function Terminal() {
           <section className="panel"><div className="panelhead"><span className="paneltitle">Spot order book</span><span className={`badge ${book?.status === "live" ? "good" : ""}`}>{book?.status === "live" ? "LIVE" : book?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div>
             <div className="booksummary"><div><span>SPREAD</span><strong className="mono">{book ? fmtPrice(book.spread, 4) : "—"}</strong></div><div style={{ textAlign: "right" }}><span>IMBALANCE</span><strong className={`mono ${book ? directionClass(book.imbalance) : ""}`}>{book ? `${book.imbalance >= 0 ? "+" : ""}${book.imbalance.toFixed(2)}` : "—"}</strong></div></div>
             <div className="bookfilters"><label>Filtro mínimo<select value={showAllBookLevels ? "all" : String(bookThreshold)} onChange={event => { const value = event.target.value; setShowAllBookLevels(value === "all"); if (value !== "all") setBookThreshold(Number(value)); }}><option value="all">Todos os níveis</option><option value="10000">10 mil USDT</option><option value="50000">50 mil USDT</option><option value="100000">100 mil USDT</option><option value="250000">250 mil USDT</option><option value="500000">500 mil USDT</option></select></label><span>Valor visível = preço × quantidade</span></div>
-            <div className="bookhead"><span>QTD.</span><span>PREÇO</span><span>TOTAL</span></div>
-            {visibleAsks.map((l,i) => <div className="bookrow" key={`a${i}`}><span className="mono">{l.quantity.toFixed(4)}</span><span className="mono neg">{fmtPrice(l.price, 2)}</span><span className="mono depth" style={{ "--depth": `${Math.min(100, l.total / Math.max(...(book?.asks ?? []).map(x => x.total),1) * 80)}%` } as React.CSSProperties}>{fmtCompact(l.price * l.quantity)}</span></div>)}
-            {!showAllBookLevels && visibleAsks.length === 0 && <div className="bookempty">Nenhuma venda acima de {fmtCompact(bookThreshold)} USDT nesta amostra.</div>}
-            <div className="midspread mono">{book && bestBid != null && bestAsk != null ? fmtPrice((bestBid + bestAsk) / 2) : "Conectando ao book…"}</div>
-            {visibleBids.map((l,i) => <div className="bookrow" key={`b${i}`}><span className="mono">{l.quantity.toFixed(4)}</span><span className="mono pos">{fmtPrice(l.price, 2)}</span><span className="mono depth bid" style={{ "--depth": `${Math.min(100, l.total / Math.max(...(book?.bids ?? []).map(x => x.total),1) * 80)}%` } as React.CSSProperties}>{fmtCompact(l.price * l.quantity)}</span></div>)}
-            {!showAllBookLevels && visibleBids.length === 0 && <div className="bookempty">Nenhuma compra acima de {fmtCompact(bookThreshold)} USDT nesta amostra.</div>}
-            <div className="dataerror">Profundidade atual via snapshot + deltas; histórico de liquidez começa com esta sessão.</div>
+            <div className="depthbook">
+              <div className="depthbook-head"><span>QTD. COMPRA</span><span>TOTAL</span><span>COMPRA</span><span>VENDA</span><span>TOTAL</span><span>QTD. VENDA</span></div>
+              <div className="depthbook-grid">
+                <div className="depthbook-side left">{visibleBids.map((level, index) => <div className="depthbook-row" key={`b${index}`}><span className="book-qty mono">{fmtCompact(level.quantity)}</span><span className="book-total mono">{fmtCompact(cumulativeBids[index])}</span><span className="book-price mono pos">{fmtPrice(level.price, 2)}</span><span className="book-bar bid" style={{ "--book-depth": `${Math.min(100, (level.price * level.quantity / bookMaxNotional) * 100)}%` } as React.CSSProperties}/></div>)}{visibleBids.length === 0 && <div className="bookempty">Sem ofertas de compra nesta amostra.</div>}</div>
+                <div className="depthbook-side right">{visibleAsks.map((level, index) => <div className="depthbook-row" key={`a${index}`}><span className="book-price mono neg">{fmtPrice(level.price, 2)}</span><span className="book-bar ask" style={{ "--book-depth": `${Math.min(100, (level.price * level.quantity / bookMaxNotional) * 100)}%` } as React.CSSProperties}/><span className="book-total mono">{fmtCompact(cumulativeAsks[index])}</span><span className="book-qty mono">{fmtCompact(level.quantity)}</span></div>)}{visibleAsks.length === 0 && <div className="bookempty">Sem ofertas de venda nesta amostra.</div>}</div>
+              </div>
+              <div className="depthbook-mid"><span className="mono pos">{bestBid != null ? fmtPrice(bestBid, 2) : "—"}</span><span>{book && bestBid != null && bestAsk != null ? `SPREAD ${fmtPrice(book.spread, 4)}` : "CONECTANDO"}</span><span className="mono neg">{bestAsk != null ? fmtPrice(bestAsk, 2) : "—"}</span></div>
+              <div className="depthbook-foot">TOTAL ACUMULADO DOS NÍVEIS VISÍVEIS · BARRA = VALOR DA ORDEM · USDT</div>
+            </div>
+            <div className="dataerror">Profundidade via snapshot + deltas. A amostra mostra apenas os níveis recebidos da Binance nesta sessão.</div>
           </section>
 
           <section className="panel" id="reversal-signals"><div className="panelhead"><span className="paneltitle">Reversão · {nameOf(symbol)}</span><span className={`badge ${latestReversal?.direction === "BUY" ? "good" : latestReversal?.direction === "SELL" ? "neg" : ""}`}>{latestReversal ? `ÚLTIMO ${latestReversal.direction}` : "SEM SINAL"}</span></div>
@@ -318,11 +339,11 @@ export default function Terminal() {
           <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. {nameOf(symbol)}</span><span>LADO AGRESSOR</span></div>
             {trades.slice(0,18).map((trade,i)=><div className="taperow" key={`${trade.id}-${i}`}><span className="mono" style={{ color: "#8290a0" }}>{fmtTime(trade.time)}</span><span className={`mono ${trade.side === "buy" ? "pos" : "neg"}`}>{fmtPrice(trade.price, 2)}</span><span className="mono" style={{ textAlign: "right" }}>{trade.quantity.toFixed(5)}</span><span style={{ textAlign: "right", color: trade.side === "buy" ? "#44d49a" : "#ff667c" }}>{trade.side === "buy" ? "▲ COMPRA" : "▼ VENDA"}</span></div>)}
             {trades.length === 0 && <div className="loading">Aguardando negociações observadas…</div>}
-          </div><div className="disclaimer">O lado agressor é inferido do campo da exchange (maker side). Agregação e CVD representam apenas a amostra observada nesta sessão; IDs deduplicados.</div>
+          </div><div className="disclaimer">O lado agressor é inferido do campo maker da Binance. Trades são deduplicados e persistidos no coletor; lacunas ou desconexões podem deixar períodos incompletos.</div>
         </section>
 
         <section className="panel" id="data"><div className="panelhead"><span className="paneltitle">Fluxo observado</span><Database size={13} color="#8794a2"/></div>
-          <div className="coverage"><div className="coverrow"><span>CVD SPOT · AMOSTRA</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · spot</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · spot</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades spot visíveis</span><span className="mono">{trades.length} / 24</span></div><div className="coverrow"><span>Cobertura do coletor</span><span className="mono">Sessão atual</span></div>
+          <div className="coverage"><div className="coverrow"><span>CVD SPOT · AMOSTRA VISÍVEL</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · spot</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · spot</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades na fita</span><span className="mono">{trades.length} / 24</span></div><div className="coverrow"><span>Coletor Binance</span><span className={`mono ${flowQuality?.connected ? "pos" : "neg"}`}>{flowQuality?.connected ? "AO VIVO" : flowQuality?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div><div className="coverrow"><span>Último evento · latência</span><span className="mono">{flowQuality?.lastEventTime ? `${fmtTime(flowQuality.lastEventTime)} · ${flowQuality.lastLatencyMs ?? "—"} ms` : "—"}</span></div><div className="coverrow"><span>Eventos · reconexões</span><span className="mono">{flowQuality?.events ?? 0} · {flowQuality?.reconnects ?? 0}</span></div><div className="coverrow"><span>Trades gravados · retenção</span><span className="mono">{flowQuality?.storedTrades ?? 0} · {flowQuality?.retentionDays ?? "—"} d</span></div><div className="coverrow"><span>Lacunas possíveis · descartes</span><span className={`mono ${flowQuality?.possibleIdGaps || flowQuality?.queueDropped ? "neg" : "pos"}`}>{flowQuality?.possibleIdGaps ?? 0} · {flowQuality?.queueDropped ?? 0}</span></div>{!flowQuality?.storageDurable && <div className="dataerror">SQLite no disco local do serviço: no Render sem volume persistente, o histórico pode sumir em reinícios ou deploys.</div>}
             <hr style={{ border: 0, borderTop: "1px solid #202833", margin: "9px 0" }}/>
             <div className="coverrow"><span>Sentimento · Fear & Greed</span><strong className="mono" style={{ color: fear?.value != null ? "#d5c080" : "#8996a5" }}>{fear?.value != null ? `${fear.value} · ${fear.label}` : "Indisponível"}</strong></div>
             <div className="coverrow"><span>Mercado</span><span className="mono">À vista · sem alavancagem</span></div><div className="coverrow"><span>Preço de referência spot</span><span className="mono">{fmtPrice(marketInfo?.price)}</span></div>
