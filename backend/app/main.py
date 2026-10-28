@@ -24,6 +24,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(
 log = logging.getLogger("nexus.market")
 SPOT_DATA = os.getenv("BINANCE_SPOT_REST_URL", "https://data-api.binance.vision")
 SPOT_WS = os.getenv("BINANCE_SPOT_WS_URL", "wss://data-stream.binance.vision/stream")
+MAX_GAP_BACKFILL_TRADES = max(0, int(os.getenv("FLOW_GAP_RECOVERY_MAX_TRADES", "5000")))
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -43,9 +44,11 @@ class MarketService:
         }
         self.books: dict[tuple[str, str], dict[str, Any]] = {}
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
+        self.gap_recovery_locks = {symbol: asyncio.Lock() for symbol in SYMBOLS}
+        self.recovery_tasks: set[asyncio.Task[Any]] = set()
         self.flow_store: FlowStore | None = None
         self.flow_quality: dict[str, dict[str, Any]] = {
-            symbol: {"status": "starting", "connected": False, "sessionStartedAt": int(time.time() * 1000), "connectedAt": None, "lastEventTime": None, "lastReceivedAt": None, "lastLatencyMs": None, "events": 0, "reconnects": 0, "possibleIdGaps": 0, "lastTradeId": None, "lastDisconnectAt": None}
+            symbol: {"status": "starting", "connected": False, "sessionStartedAt": int(time.time() * 1000), "connectedAt": None, "lastEventTime": None, "lastReceivedAt": None, "lastLatencyMs": None, "events": 0, "reconnects": 0, "possibleIdGaps": 0, "backfillRowsFetched": 0, "backfillRowsQueued": 0, "backfillSkippedIds": 0, "backfillFailures": 0, "lastBackfillAt": None, "lastTradeId": None, "lastDisconnectAt": None}
             for symbol in SYMBOLS
         }
 
@@ -74,7 +77,15 @@ class MarketService:
                         state = self.flow_quality[symbol]
                         previous_id = state["lastTradeId"]
                         if previous_id is not None and trade.id > previous_id + 1:
-                            state["possibleIdGaps"] += trade.id - previous_id - 1
+                            first_missing, last_missing = previous_id + 1, trade.id - 1
+                            gap_size = last_missing - first_missing + 1
+                            state["possibleIdGaps"] += gap_size
+                            if self.flow_store and MAX_GAP_BACKFILL_TRADES:
+                                recovery = asyncio.create_task(self.recover_trade_gap(symbol, first_missing, last_missing))
+                                self.recovery_tasks.add(recovery)
+                                recovery.add_done_callback(self.recovery_tasks.discard)
+                            elif gap_size:
+                                state["backfillSkippedIds"] += gap_size
                         state.update(lastTradeId=trade.id, lastEventTime=trade.time, lastReceivedAt=received, lastLatencyMs=max(0, received-trade.time), events=state["events"] + 1, status="live", connected=True)
                         sample = self.samples.setdefault(("spot", symbol), deque(maxlen=5000))
                         if not sample or sample[-1].id != trade.id:
@@ -93,6 +104,59 @@ class MarketService:
                 for state in self.flow_quality.values():
                     state.update(status="reconnecting", connected=False, lastDisconnectAt=disconnected_at)
                 await asyncio.sleep(2)
+
+    async def recover_trade_gap(self, symbol: str, first_id: int, last_id: int) -> None:
+        """Fill a bounded slice of a Binance aggTrade ID gap from its public REST API."""
+        state = self.flow_quality[symbol]
+        async with self.gap_recovery_locks[symbol]:
+            if not self.flow_store or MAX_GAP_BACKFILL_TRADES <= 0:
+                return
+            requested_count = last_id - first_id + 1
+            start_id = max(first_id, last_id - MAX_GAP_BACKFILL_TRADES + 1)
+            state["backfillSkippedIds"] += max(0, start_id - first_id)
+            cursor_id = start_id
+            received_at = int(time.time() * 1000)
+            try:
+                while cursor_id <= last_id:
+                    page_limit = min(1000, last_id - cursor_id + 1)
+                    rows = await self.request(SPOT_DATA, "/api/v3/aggTrades", {
+                        "symbol": symbol, "fromId": cursor_id, "limit": page_limit,
+                    })
+                    if not rows:
+                        break
+                    page_ids: list[int] = []
+                    for row in rows:
+                        trade_id = int(row["a"])
+                        if trade_id < cursor_id:
+                            continue
+                        if trade_id > last_id:
+                            break
+                        expected_id = (max(page_ids) + 1) if page_ids else cursor_id
+                        if trade_id > expected_id:
+                            state["backfillSkippedIds"] += trade_id - expected_id
+                        recovered = Trade(
+                            id=trade_id, time=int(row["T"]), price=float(row["p"]),
+                            quantity=float(row["q"]), side="sell" if row["m"] else "buy",
+                        )
+                        page_ids.append(trade_id)
+                        state["backfillRowsFetched"] += 1
+                        if self.flow_store.enqueue(symbol, recovered, received_at):
+                            state["backfillRowsQueued"] += 1
+                    if not page_ids:
+                        break
+                    next_id = max(page_ids) + 1
+                    if next_id <= cursor_id:
+                        break
+                    cursor_id = next_id
+                    state["lastBackfillAt"] = int(time.time() * 1000)
+                if cursor_id <= last_id:
+                    state["backfillSkippedIds"] += last_id - cursor_id + 1
+                    log.warning("Binance trade gap was only partially recovered", extra={"symbol": symbol, "requested": requested_count, "fetched": state["backfillRowsFetched"]})
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                state["backfillFailures"] += 1
+                log.exception("Binance trade gap recovery failed", extra={"symbol": symbol, "from_id": cursor_id, "to_id": last_id})
 
     async def request(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
         for attempt in range(4):
@@ -275,6 +339,10 @@ async def lifespan(_: FastAPI):
     collector_task = asyncio.create_task(service.collect_all_trades())
     yield
     collector_task.cancel()
+    recovery_tasks = list(service.recovery_tasks)
+    for task in recovery_tasks:
+        task.cancel()
+    await asyncio.gather(*recovery_tasks, return_exceptions=True)
     try:
         await asyncio.wait_for(service.flow_store.queue.join(), timeout=5)
     except asyncio.TimeoutError:

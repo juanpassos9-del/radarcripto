@@ -205,11 +205,13 @@ class FlowStore:
             connection.execute("PRAGMA incremental_vacuum(10000)")
             connection.commit()
 
-    def enqueue(self, symbol: str, trade: Trade, received_time_ms: int) -> None:
+    def enqueue(self, symbol: str, trade: Trade, received_time_ms: int) -> bool:
         try:
             self.queue.put_nowait((symbol, trade, received_time_ms))
+            return True
         except asyncio.QueueFull:
             self.dropped += 1
+            return False
 
     def _insert_batch(self, batch: list[tuple[str, Trade, int]]) -> int:
         values = [(symbol, trade.id, trade.time, trade.price, trade.quantity, trade.side, received) for symbol, trade, received in batch]
