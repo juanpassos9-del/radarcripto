@@ -38,6 +38,7 @@ INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"
 class MarketService:
     def __init__(self) -> None:
         self.client = httpx.AsyncClient(headers={"User-Agent": "NexusCryptoTerminal/0.1"}, timeout=12)
+        self.request_slots = asyncio.Semaphore(5)
         self.books: dict[tuple[str, str], dict[str, Any]] = {}
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
 
@@ -47,7 +48,11 @@ class MarketService:
     async def request(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
         for attempt in range(4):
             try:
-                response = await self.client.get(base + path, params=params)
+                # Keep concurrent exchange requests within a small bound. The free
+                # Render instance has limited CPU/connections and should not fan
+                # out dozens of simultaneous Binance calls per dashboard refresh.
+                async with self.request_slots:
+                    response = await self.client.get(base + path, params=params)
                 if response.status_code == 429 or response.status_code == 418:
                     wait = min(float(response.headers.get("Retry-After", 1)), 10)
                     await asyncio.sleep(wait)
@@ -237,7 +242,12 @@ async def health():
 async def markets(market: str = Query("spot")):
     market = validate_market(market)
     results = await asyncio.gather(*(service.ticker(symbol, market) for symbol in SYMBOLS), return_exceptions=True)
-    return {"markets": [item.model_dump() for item in results if isinstance(item, MarketSnapshot)], "unavailable": [SYMBOLS[index] for index, item in enumerate(results) if isinstance(item, Exception)]}
+    unavailable = []
+    for index, item in enumerate(results):
+        if isinstance(item, Exception):
+            log.warning("market ticker unavailable", extra={"symbol": SYMBOLS[index], "market": market, "error": str(item)})
+            unavailable.append({"symbol": SYMBOLS[index], "reason": str(item) or type(item).__name__})
+    return {"markets": [item.model_dump() for item in results if isinstance(item, MarketSnapshot)], "unavailable": unavailable}
 
 
 @app.get("/api/candles")
@@ -246,7 +256,11 @@ async def candles(symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), m
     if interval not in INTERVALS:
         raise HTTPException(400, "Unsupported candle interval")
     base, path = (FUTURES, "/fapi/v1/klines") if market == "futures" else (SPOT, "/api/v3/klines")
-    rows = await service.request(base, path, {"symbol": symbol, "interval": interval, "limit": limit})
+    try:
+        rows = await service.request(base, path, {"symbol": symbol, "interval": interval, "limit": limit})
+    except (httpx.HTTPError, HTTPException) as error:
+        log.exception("candle request failed", extra={"symbol": symbol, "market": market, "interval": interval})
+        raise HTTPException(502, f"Unable to load Binance candles: {error}") from error
     return {"candles": [Candle(time=int(r[0] // 1000), open=float(r[1]), high=float(r[2]), low=float(r[3]), close=float(r[4]), volume=float(r[5])).model_dump() for r in rows], "source": f"Binance {market}", "receivedAt": int(time.time() * 1000), "coverage": "exchange historical OHLCV"}
 
 
