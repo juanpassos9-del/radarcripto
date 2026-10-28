@@ -26,6 +26,7 @@ SPOT_DATA = os.getenv("BINANCE_SPOT_REST_URL", "https://data-api.binance.vision"
 SPOT_WS = os.getenv("BINANCE_SPOT_WS_URL", "wss://data-stream.binance.vision/stream")
 MAX_GAP_BACKFILL_TRADES = max(0, int(os.getenv("FLOW_GAP_RECOVERY_MAX_TRADES", "5000")))
 MAX_AGGREGATED_BOOK_LEVELS = 150
+MAX_EXTERNAL_SYMBOLS = 5
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -48,6 +49,7 @@ class MarketService:
         self.external_books: dict[tuple[str, str], dict[str, Any]] = {}
         self.external_trades: dict[str, deque[Trade]] = {}
         self.external_tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        self.external_symbol_access: dict[str, int] = {}
         self.gap_recovery_locks = {symbol: asyncio.Lock() for symbol in SYMBOLS}
         self.recovery_tasks: set[asyncio.Task[Any]] = set()
         self.flow_store: FlowStore | None = None
@@ -277,12 +279,21 @@ class MarketService:
         return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=ask_rows[0][0] - bid_rows[0][0] if ask_rows and bid_rows else 0, imbalance=imbalance, eventTime=max(event_times) if event_times else None, receivedAt=now_ms, status="live" if live_sources else "connecting", source=" + ".join(live_sources) or "Nenhuma fonte ao vivo", sources=venue_states)
 
     def ensure_external_collectors(self, symbol: str) -> None:
-        # Only the currently requested watchlist asset needs external sockets.
-        for (active_symbol, venue), task in list(self.external_tasks.items()):
-            if active_symbol != symbol and not task.done():
-                task.cancel()
-                if (active_symbol, venue) in self.external_books:
-                    self.external_books[(active_symbol, venue)]["status"] = "stopped"
+        # Keep a small LRU of requested symbols to bound public sockets on free hosting.
+        self.external_symbol_access[symbol] = int(time.time() * 1000)
+        active_symbols = {active_symbol for (active_symbol, _), task in self.external_tasks.items() if not task.done()}
+        active_symbols.add(symbol)
+        while len(active_symbols) > MAX_EXTERNAL_SYMBOLS:
+            candidates = active_symbols - {symbol}
+            if not candidates:
+                break
+            evicted = min(candidates, key=lambda item: self.external_symbol_access.get(item, 0))
+            for (active_symbol, venue), task in list(self.external_tasks.items()):
+                if active_symbol == evicted and not task.done():
+                    task.cancel()
+                    if (active_symbol, venue) in self.external_books:
+                        self.external_books[(active_symbol, venue)]["status"] = "stopped"
+            active_symbols.discard(evicted)
         for venue in ("Kraken", "Coinbase"):
             key = (symbol, venue)
             task = self.external_tasks.get(key)
