@@ -4,6 +4,10 @@ COPY package.json package-lock.json* ./
 RUN npm install
 FROM node:22-alpine AS builder
 WORKDIR /app
+ARG NEXUS_API_ORIGIN
+ARG NEXT_PUBLIC_MARKET_API_URL
+ENV NEXUS_API_ORIGIN=${NEXUS_API_ORIGIN}
+ENV NEXT_PUBLIC_MARKET_API_URL=${NEXT_PUBLIC_MARKET_API_URL}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

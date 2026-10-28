@@ -33,7 +33,9 @@ export type VolatilityZones = {
 };
 
 export async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, { cache: "no-store" });
+  const apiOrigin = process.env.NEXT_PUBLIC_MARKET_API_URL?.replace(/\/+$/, "");
+  const url = apiOrigin ? new URL(path, apiOrigin).toString() : path;
+  const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json() as Promise<T>;
 }
