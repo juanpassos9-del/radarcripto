@@ -21,11 +21,8 @@ from .volatility import calculate_zones
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("nexus.market")
-SPOT = "https://api.binance.com"
-FUTURES = os.getenv("BINANCE_FUTURES_REST_URL", "https://demo-fapi.binance.com")
-SPOT_WS = "wss://stream.binance.com:9443/stream"
-FUTURES_WS = os.getenv("BINANCE_FUTURES_WS_URL", "wss://stream.binancefuture.com/stream")
-FUTURES_DATA_MODE = os.getenv("BINANCE_FUTURES_DATA_MODE", "demo").strip().lower()
+SPOT_DATA = os.getenv("BINANCE_SPOT_REST_URL", "https://data-api.binance.vision")
+SPOT_WS = os.getenv("BINANCE_SPOT_WS_URL", "wss://data-stream.binance.vision/stream")
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -34,7 +31,6 @@ SYMBOLS = [
     "UNIUSDT", "ETCUSDT", "ATOMUSDT", "AAVEUSDT", "WIFUSDT",
 ]
 INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"}
-
 
 class MarketService:
     def __init__(self) -> None:
@@ -71,8 +67,7 @@ class MarketService:
         raise HTTPException(502, "Binance rate limit exceeded")
 
     async def ticker(self, symbol: str, market: str) -> MarketSnapshot:
-        base = FUTURES if market == "futures" else SPOT
-        path = "/fapi/v1/ticker/24hr" if market == "futures" else "/api/v3/ticker/24hr"
+        base, path = self.base_and_path(market, "ticker")
         received = int(time.time() * 1000)
         row = await self.request(base, path, {"symbol": symbol})
         event = int(row["closeTime"])
@@ -80,9 +75,18 @@ class MarketService:
 
     @staticmethod
     def market_source(market: str) -> str:
-        if market == "futures" and FUTURES_DATA_MODE == "demo":
-            return "Binance USDⓈ-M demo market data"
-        return f"Binance {market}"
+        return "Binance Spot"
+
+    @staticmethod
+    def base_and_path(market: str, resource: str) -> tuple[str, str]:
+        """Return the REST base and endpoint for a supported public market feed."""
+        paths = {
+            "ticker": "/api/v3/ticker/24hr",
+            "depth": "/api/v3/depth",
+            "klines": "/api/v3/klines",
+            "trades": "/api/v3/aggTrades",
+        }
+        return SPOT_DATA, paths[resource]
 
     async def book(self, symbol: str, market: str, limit: int) -> BookSnapshot:
         key = (market, symbol)
@@ -94,11 +98,9 @@ class MarketService:
             if task and not task.done():
                 # Never replace an in-progress snapshot/stream; callers share one book collector per symbol.
                 return self.book_payload(symbol, state, limit)
-        base = FUTURES if market == "futures" else SPOT
-        path = "/fapi/v1/depth" if market == "futures" else "/api/v3/depth"
-        # USDⓈ-M accepts only specific depth limits (5, 10, 20, 50, 100, ...).
-        # Fetch enough levels for snapshot/diff synchronization; trim in the response.
-        snapshot_limit = 1000 if market == "spot" else 100
+        base, path = self.base_and_path(market, "depth")
+        # Fetch enough levels for Spot snapshot/diff synchronization; trim in the response.
+        snapshot_limit = 1000
         snapshot = await self.request(base, path, {"symbol": symbol, "limit": snapshot_limit})
         bids = {float(price): float(qty) for price, qty in snapshot["bids"] if float(qty) > 0}
         asks = {float(price): float(qty) for price, qty in snapshot["asks"] if float(qty) > 0}
@@ -127,16 +129,17 @@ class MarketService:
         return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=asks[0][0] - bids[0][0] if asks and bids else 0, imbalance=imbalance, eventTime=state["eventTime"], receivedAt=state["receivedAt"], status=state["status"], source=source)
 
     async def book_stream(self, market: str, symbol: str, state: dict[str, Any]) -> None:
-        endpoint = FUTURES_WS if market == "futures" else SPOT_WS
-        stream = f"{symbol.lower()}@depth@100ms" if market == "futures" else f"{symbol.lower()}@depth@100ms"
+        endpoint = SPOT_WS
+        stream = f"{symbol.lower()}@depth@100ms"
         url = f"{endpoint}?streams={stream}"
         while True:
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2**20) as socket:
                     # Subscribe first, then fetch a snapshot while Binance buffers depth diffs.
                     # This avoids losing updates between the REST snapshot and WS handshake.
-                    snapshot_limit = 100 if market == "futures" else 1000
-                    snapshot = await self.request(FUTURES if market == "futures" else SPOT, "/fapi/v1/depth" if market == "futures" else "/api/v3/depth", {"symbol": symbol, "limit": snapshot_limit})
+                    snapshot_limit = 1000
+                    base, path = self.base_and_path(market, "depth")
+                    snapshot = await self.request(base, path, {"symbol": symbol, "limit": snapshot_limit})
                     async with state["lock"]:
                         state["bids"] = {float(p): float(q) for p, q in snapshot["bids"] if float(q) > 0}
                         state["asks"] = {float(p): float(q) for p, q in snapshot["asks"] if float(q) > 0}
@@ -154,13 +157,10 @@ class MarketService:
                                 continue
                             if state["status"] != "live":
                                 # Skip old buffered events; wait for the event spanning the snapshot ID.
-                                bridge_id = last + 1 if market == "futures" else last
+                                bridge_id = last
                                 if not (first <= bridge_id <= final):
                                     continue
-                            elif market == "futures" and int(data.get("pu", last)) != last:
-                                # Futures depth diffs are chained by pu; a broken chain needs a fresh snapshot.
-                                state["status"] = "stale"
-                                break
+
                             for key, side in (("b", "bids"), ("a", "asks")):
                                 for price_text, qty_text in data.get(key, []):
                                     price, qty = float(price_text), float(qty_text)
@@ -181,7 +181,7 @@ class MarketService:
                 await asyncio.sleep(1)
 
     async def event_stream(self, market: str, symbol: str, interval: str):
-        endpoint = FUTURES_WS if market == "futures" else SPOT_WS
+        endpoint = SPOT_WS
         streams = [f"{symbol.lower()}@aggTrade", f"{symbol.lower()}@kline_{interval}", f"{symbol.lower()}@ticker"]
         url = f"{endpoint}?streams={'/'.join(streams)}"
         while True:
@@ -213,9 +213,7 @@ class MarketService:
                 log.exception("market websocket disconnected", extra={"symbol": symbol, "market": market})
                 await asyncio.sleep(1)
 
-
 service: MarketService
-
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -228,10 +226,8 @@ async def lifespan(_: FastAPI):
             task.cancel()
     await service.close()
 
-
 app = FastAPI(title="NEXUS Market API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","), allow_credentials=False, allow_methods=["GET"], allow_headers=["*"])
-
 
 def validate_symbol(symbol: str) -> str:
     symbol = symbol.upper()
@@ -239,17 +235,17 @@ def validate_symbol(symbol: str) -> str:
         raise HTTPException(400, f"MVP supports only: {', '.join(SYMBOLS)}")
     return symbol
 
-
 def validate_market(market: str) -> str:
-    if market not in {"spot", "futures"}:
-        raise HTTPException(400, "market must be spot or futures")
-    return market
-
+    configured = os.getenv("NEXUS_MARKET_MODE", "spot").strip().lower()
+    if configured != "spot":
+        raise HTTPException(500, "Only the Spot data feed is configured on this service")
+    if market != "spot":
+        raise HTTPException(400, "This terminal provides Binance Spot data only")
+    return "spot"
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "nexus-market-api", "symbols": SYMBOLS, "time": int(time.time() * 1000)}
-
 
 @app.get("/api/markets")
 async def markets(market: str = Query("spot")):
@@ -262,20 +258,18 @@ async def markets(market: str = Query("spot")):
             unavailable.append({"symbol": SYMBOLS[index], "reason": str(item) or type(item).__name__})
     return {"markets": [item.model_dump() for item in results if isinstance(item, MarketSnapshot)], "unavailable": unavailable}
 
-
 @app.get("/api/candles")
 async def candles(symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"), limit: int = Query(240, ge=10, le=500)):
     symbol, market = validate_symbol(symbol), validate_market(market)
     if interval not in INTERVALS:
         raise HTTPException(400, "Unsupported candle interval")
-    base, path = (FUTURES, "/fapi/v1/klines") if market == "futures" else (SPOT, "/api/v3/klines")
+    base, path = service.base_and_path(market, "klines")
     try:
         rows = await service.request(base, path, {"symbol": symbol, "interval": interval, "limit": limit})
     except (httpx.HTTPError, HTTPException) as error:
         log.exception("candle request failed", extra={"symbol": symbol, "market": market, "interval": interval})
         raise HTTPException(502, f"Unable to load Binance candles: {error}") from error
     return {"candles": [Candle(time=int(r[0] // 1000), open=float(r[1]), high=float(r[2]), low=float(r[3]), close=float(r[4]), volume=float(r[5])).model_dump() for r in rows], "source": service.market_source(market), "receivedAt": int(time.time() * 1000), "coverage": "exchange historical OHLCV"}
-
 
 def _period_starts(timestamp_ms: int) -> tuple[int, int, int]:
     moment = datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc)
@@ -284,7 +278,6 @@ def _period_starts(timestamp_ms: int) -> tuple[int, int, int]:
     month = day.replace(day=1)
     return int(day.timestamp() * 1000), int(week.timestamp() * 1000), int(month.timestamp() * 1000)
 
-
 def _vwap_add(totals: list[float], row: list[Any]) -> None:
     base_volume = float(row[5])
     quote_volume = float(row[7])
@@ -292,20 +285,18 @@ def _vwap_add(totals: list[float], row: list[Any]) -> None:
         totals[0] += quote_volume
         totals[1] += base_volume
 
-
 def _period_extreme(rows: list[list[Any]], start_ms: int, end_ms: int, field: int, mode: str) -> float | None:
     values = [float(row[field]) for row in rows if start_ms <= int(row[0]) < end_ms and int(row[6]) + 1 <= end_ms]
     if not values:
         return None
     return max(values) if mode == "high" else min(values)
 
-
 @app.get("/api/chart-overlays")
-async def chart_overlays(symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("futures")):
+async def chart_overlays(symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot")):
     symbol, market = validate_symbol(symbol), validate_market(market)
     if interval not in {"1m", "5m", "15m", "1h", "4h", "1d"}:
         raise HTTPException(400, "Unsupported chart overlay interval")
-    base, path = (FUTURES, "/fapi/v1/klines") if market == "futures" else (SPOT, "/api/v3/klines")
+    base, path = service.base_and_path(market, "klines")
     try:
         now_ms = int(time.time() * 1000)
         if interval == "1d":
@@ -390,11 +381,9 @@ async def chart_overlays(symbol: str = Query("BTCUSDT"), interval: str = Query("
     except httpx.HTTPError as error:
         raise HTTPException(502, f"Unable to load anchored VWAP and previous period levels: {error}") from error
 
-
 @app.get("/api/book")
 async def order_book(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), limit: int = Query(16, ge=5, le=100)):
     return (await service.book(validate_symbol(symbol), validate_market(market), limit)).model_dump()
-
 
 @app.get("/api/trades")
 async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), limit: int = Query(24, ge=1, le=100)):
@@ -404,7 +393,7 @@ async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), li
         rows = list(sample)[-limit:]
         rows.reverse()
     else:
-        base, path = (FUTURES, "/fapi/v1/aggTrades") if market == "futures" else (SPOT, "/api/v3/aggTrades")
+        base, path = service.base_and_path(market, "trades")
         response = await service.request(base, path, {"symbol": symbol, "limit": limit})
         rows = [Trade(id=int(r["a"]), time=int(r["T"]), price=float(r["p"]), quantity=float(r["q"]), side="sell" if r["m"] else "buy") for r in response]
         rows.reverse()
@@ -414,12 +403,11 @@ async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), li
                 sample.append(trade)
     return {"trades": [trade.model_dump() for trade in rows], "source": f"{service.market_source(market)} aggTrades", "receivedAt": int(time.time() * 1000), "coverage": "observed trades; bounded in-memory sample"}
 
-
 @app.get("/api/reversal-signals")
 async def reversal_signals(
     symbol: str = Query("BTCUSDT"),
     interval: str = Query("5m"),
-    market: str = Query("futures"),
+    market: str = Query("spot"),
     min_sigma: float = Query(1.0, ge=1.0, le=3),
     touch_tolerance: float = Query(0.001, ge=0, le=0.02),
     min_score: int = Query(50, ge=0, le=100),
@@ -433,7 +421,7 @@ async def reversal_signals(
     symbol, market = validate_symbol(symbol), validate_market(market)
     if interval not in INTERVALS:
         raise HTTPException(400, "Unsupported candle interval")
-    base, path = (FUTURES, "/fapi/v1/klines") if market == "futures" else (SPOT, "/api/v3/klines")
+    base, path = service.base_and_path(market, "klines")
     try:
         candles_limit = 400 if interval == "1d" else 240
         rows, daily_rows = await asyncio.gather(
@@ -473,11 +461,10 @@ async def reversal_signals(
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
         raise HTTPException(502, f"Unable to calculate reversal signals: {error}") from error
 
-
 @app.get("/api/volatility")
-async def volatility(symbol: str = Query("BTCUSDT"), market: str = Query("futures")):
+async def volatility(symbol: str = Query("BTCUSDT"), market: str = Query("spot")):
     symbol, market = validate_symbol(symbol), validate_market(market)
-    base, path = (FUTURES, "/fapi/v1/klines") if market == "futures" else (SPOT, "/api/v3/klines")
+    base, path = service.base_and_path(market, "klines")
     try:
         rows = await service.request(base, path, {"symbol": symbol, "interval": "1d", "limit": 400})
         daily = [{"time": int(row[0] // 1000), "close": float(row[4])} for row in rows]
@@ -485,16 +472,19 @@ async def volatility(symbol: str = Query("BTCUSDT"), market: str = Query("future
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
         raise HTTPException(502, f"Daily volatility data unavailable: {error}") from error
 
-
-@app.get("/api/derivatives")
-async def derivatives(symbol: str = Query("BTCUSDT")):
-    symbol = validate_symbol(symbol)
+@app.get("/api/market-info")
+async def market_info(symbol: str = Query("BTCUSDT"), market: str = Query("spot")):
+    symbol, market = validate_symbol(symbol), validate_market(market)
     try:
-        premium, interest = await asyncio.gather(service.request(FUTURES, "/fapi/v1/premiumIndex", {"symbol": symbol}), service.request(FUTURES, "/fapi/v1/openInterest", {"symbol": symbol}))
-        return {"rate": float(premium["lastFundingRate"]), "markPrice": float(premium["markPrice"]), "indexPrice": float(premium["indexPrice"]), "openInterest": float(interest["openInterest"]), "nextFundingTime": int(premium["nextFundingTime"]), "eventTime": int(premium["time"]), "receivedAt": int(time.time() * 1000), "status": "live", "source": service.market_source("futures")}
+        price = await service.request(SPOT_DATA, "/api/v3/ticker/price", {"symbol": symbol})
+        return {
+            "market": "spot", "source": "Binance Spot", "price": float(price["price"]),
+            "markPrice": None, "indexPrice": None, "fundingRate": None,
+            "openInterest": None, "nextFundingTime": None,
+            "receivedAt": int(time.time() * 1000), "status": "live",
+        }
     except (httpx.HTTPError, KeyError, ValueError) as error:
-        raise HTTPException(502, f"Futures data unavailable: {error}") from error
-
+        raise HTTPException(502, f"Spot data unavailable: {error}") from error
 
 @app.get("/api/sentiment")
 async def sentiment():
@@ -507,13 +497,16 @@ async def sentiment():
         log.warning("sentiment unavailable: %s", error)
         return {"value": None, "label": "Indisponível", "source": "Alternative.me", "status": "unavailable"}
 
-
 @app.websocket("/ws/market")
 async def market_ws(socket: WebSocket):
     symbol = socket.query_params.get("symbol", "BTCUSDT").upper()
-    market = socket.query_params.get("market", "spot")
+    requested_market = socket.query_params.get("market", "spot")
+    market = os.getenv("NEXUS_MARKET_MODE", "spot").strip().lower()
+    if requested_market != "spot":
+        await socket.close(code=1008, reason="This terminal provides Binance Spot data only")
+        return
     interval = socket.query_params.get("interval", "5m")
-    if symbol not in SYMBOLS or market not in {"spot", "futures"} or interval not in INTERVALS:
+    if symbol not in SYMBOLS or interval not in INTERVALS:
         await socket.close(code=1008, reason="Unsupported symbol, market or interval")
         return
     await socket.accept()
@@ -531,11 +524,9 @@ async def market_ws(socket: WebSocket):
         consumer.cancel()
         producer.cancel()
 
-
 async def _consume_market(socket: WebSocket, symbol: str, market: str, interval: str):
     async for event in service.event_stream(market, symbol, interval):
         await socket.send_json(event)
-
 
 async def _produce_book(socket: WebSocket, symbol: str, market: str):
     key = (market, symbol)

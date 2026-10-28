@@ -17,8 +17,8 @@ services:
           name: nexus-terminal-api
           type: web
           envVarKey: RENDER_EXTERNAL_URL
-      - key: NEXT_PUBLIC_FUTURES_DATA_MODE
-        value: demo
+      - key: NEXT_PUBLIC_MARKET_MODE
+        value: spot
 
   - type: web
     name: nexus-terminal-api
@@ -30,11 +30,11 @@ services:
     envVars:
       - key: CORS_ORIGINS
         value: https://nexus-terminal-web.onrender.com
+      - key: NEXUS_MARKET_MODE
+        value: spot
+      - key: BINANCE_SPOT_REST_URL
+        value: https://data-api.binance.vision
+      - key: BINANCE_SPOT_WS_URL
+        value: wss://data-stream.binance.vision/stream
       - key: LOG_LEVEL
         value: INFO
-      - key: BINANCE_FUTURES_REST_URL
-        value: https://demo-fapi.binance.com
-      - key: BINANCE_FUTURES_WS_URL
-        value: wss://stream.binancefuture.com/stream
-      - key: BINANCE_FUTURES_DATA_MODE
-        value: demo

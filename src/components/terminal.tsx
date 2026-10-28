@@ -17,7 +17,7 @@ const nameOf = (symbol: string) => symbol.replace("USDT", "");
 export default function Terminal() {
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [interval, setInterval] = useState("5m");
-  const [market] = useState<"futures">("futures");
+  const [market] = useState<"spot">("spot");
   const selectedKeyRef = useRef("");
   selectedKeyRef.current = `${symbol}|${interval}|${market}`;
   const [markets, setMarkets] = useState<Record<string, MarketSnapshot>>({});
@@ -44,7 +44,7 @@ export default function Terminal() {
   const [showAnchoredVwaps, setShowAnchoredVwaps] = useState(true);
   const [showPreviousLevels, setShowPreviousLevels] = useState(true);
   const [fear, setFear] = useState<{ value: number | null; label: string; status: string; source: string } | null>(null);
-  const [funding, setFunding] = useState<{ rate: number | null; markPrice: number | null; indexPrice: number | null; openInterest: number | null; nextFundingTime: number | null; status: string } | null>(null);
+  const [marketInfo, setMarketInfo] = useState<{ market: string; source: string; price: number | null; markPrice: number | null; indexPrice: number | null; fundingRate: number | null; openInterest: number | null; nextFundingTime: number | null; receivedAt: number; status: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [clock, setClock] = useState<number | null>(null);
   const [apiState, setApiState] = useState<"checking" | "connected" | "error">("checking");
@@ -182,7 +182,7 @@ export default function Terminal() {
 
   useEffect(() => {
     let live = true;
-    const refresh = () => getJson<typeof funding>(`/api/derivatives?symbol=${symbol}`).then(data => { if (live) setFunding(data); }).catch(() => { if (live) setFunding(null); });
+    const refresh = () => getJson<typeof marketInfo>(`/api/market-info?symbol=${symbol}&market=${market}`).then(data => { if (live) setMarketInfo(data); }).catch(() => { if (live) setMarketInfo(null); });
     refresh(); const timer = window.setInterval(refresh, 10000);
     return () => { live = false; window.clearInterval(timer); };
   }, [symbol, market]);
@@ -202,7 +202,6 @@ export default function Terminal() {
   const buyVolume = useMemo(() => trades.filter(t => t.side === "buy").reduce((n,t) => n+t.quantity,0), [trades]);
   const sellVolume = useMemo(() => trades.filter(t => t.side === "sell").reduce((n,t) => n+t.quantity,0), [trades]);
   const coverage = Math.min(100, Math.round((trades.length / 24) * 100));
-  const selectedFutures = true;
   const directionClass = (value: number | null | undefined) => value != null && value >= 0 ? "pos" : "neg";
 
   const createPriceAlert = async () => {
@@ -225,11 +224,11 @@ export default function Terminal() {
     if (!current?.price || !alertsOn || typeof window === "undefined") return;
     for (const asset of assets) {
       const m = markets[asset]; if (!m?.price) continue;
-      const key = `nexus-alert-futures-${asset}`; const raw = window.localStorage.getItem(key); if (!raw) continue;
+      const key = `nexus-alert-${market}-${asset}`; const raw = window.localStorage.getItem(key); if (!raw) continue;
       try {
         const alert = JSON.parse(raw) as { threshold: number };
         if (asset === symbol && m.price >= alert.threshold) {
-          if ("Notification" in window && Notification.permission === "granted") new Notification(`NEXUS Perp · ${asset}`, { body: `Preço ${fmtPrice(m.price)} atingiu ${fmtPrice(alert.threshold)}.` });
+          if ("Notification" in window && Notification.permission === "granted") new Notification(`NEXUS Spot · ${asset}`, { body: `Preço ${fmtPrice(m.price)} atingiu ${fmtPrice(alert.threshold)}.` });
           window.localStorage.removeItem(key);
         }
       } catch { window.localStorage.removeItem(key); }
@@ -244,7 +243,7 @@ export default function Terminal() {
     </header>
 
     <div className="wrap">
-      <div className="heading"><div><div className="eyebrow">DERIVATIVES INTELLIGENCE / 01</div><h1>Perpetual Market Flow</h1></div><div className="headmeta"><span className="badge good"><Radio size={10} style={{ display: "inline", verticalAlign: "-2px" }}/> &nbsp;USDⓈ-M PERPETUAL</span><span className="badge">UTC−3 · SÃO PAULO</span><span className="badge">{clock == null ? "--:--:--" : fmtTime(clock)}</span></div></div>
+      <div className="heading"><div><div className="eyebrow">SPOT MARKET INTELLIGENCE / 01</div><h1>Spot Market Flow</h1></div><div className="headmeta"><span className="badge good"><Radio size={10} style={{ display: "inline", verticalAlign: "-2px" }}/> &nbsp;BINANCE SPOT</span><span className="badge">UTC−3 · SÃO PAULO</span><span className="badge">{clock == null ? "--:--:--" : fmtTime(clock)}</span></div></div>
 
       <section className="tickerbar">
         {["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"].map((asset, index) => {
@@ -258,23 +257,23 @@ export default function Terminal() {
       </section>
 
       <div className="layout">
-        <aside className="panel watchlist"><div className="panelhead"><span className="paneltitle">Watchlist</span><span className="badge">25 PERPÉTUOS</span></div>
+        <aside className="panel watchlist"><div className="panelhead"><span className="paneltitle">Watchlist</span><span className="badge">25 SPOT</span></div>
           {assets.map((asset) => { const m = markets[asset]; const ticker = nameOf(asset); const icon = asset === "BTCUSDT" ? "₿" : asset === "ETHUSDT" ? "Ξ" : ticker.slice(0, 1); return <button key={asset} className={`watchrow ${symbol === asset ? "selected" : ""}`} onClick={() => setSymbol(asset)}>
-            <div className="coinicon">{icon}</div><div><div className="coinname">{ticker} <span style={{ color: "#697687", fontWeight: 400 }}>/ USDT</span></div><div className="coinsub">Binance USDⓈ-M Perp</div></div>
+            <div className="coinicon">{icon}</div><div><div className="coinname">{ticker} <span style={{ color: "#697687", fontWeight: 400 }}>/ USDT</span></div><div className="coinsub">Binance Spot</div></div>
             <div><div className="coinprice mono">{fmtPrice(m?.price, m?.price && m.price < 10 ? 4 : 2)}</div><div className={`change ${directionClass(m?.change24h)}`}>{m?.change24h == null ? "—" : `${m.change24h >= 0 ? "+" : ""}${m.change24h.toFixed(2)}%`}</div></div>
           </button>; })}
-          <div className="watchfoot subtle">Ativos perpétuos USDⓈ-M · Binance</div>
+          <div className="watchfoot subtle">Mercado à vista USDT · Binance</div>
         </aside>
 
-        <section className="panel mainchart"><div className="assetbar"><div><h2>{nameOf(symbol)} <span style={{ color: "#7b8795", fontWeight: 400 }}>/ USDT</span></h2><span className="subtle">BINANCE · {selectedFutures ? "PERPETUAL" : "SPOT"}</span></div><span className="largeprice mono">{fmtPrice(current?.price, current?.price && current.price < 10 ? 4 : 2)}</span><span className={`asset-change ${directionClass(current?.change24h)}`}>{current?.change24h == null ? "—" : `${current.change24h >= 0 ? "+" : ""}${current.change24h.toFixed(2)}%`}</span><button className="iconbtn" title="Tela cheia" onClick={() => document.querySelector(".mainchart")?.requestFullscreen()}><Maximize2 size={14}/></button></div>
+        <section className="panel mainchart"><div className="assetbar"><div><h2>{nameOf(symbol)} <span style={{ color: "#7b8795", fontWeight: 400 }}>/ USDT</span></h2><span className="subtle">BINANCE · SPOT</span></div><span className="largeprice mono">{fmtPrice(current?.price, current?.price && current.price < 10 ? 4 : 2)}</span><span className={`asset-change ${directionClass(current?.change24h)}`}>{current?.change24h == null ? "—" : `${current.change24h >= 0 ? "+" : ""}${current.change24h.toFixed(2)}%`}</span><button className="iconbtn" title="Tela cheia" onClick={() => document.querySelector(".mainchart")?.requestFullscreen()}><Maximize2 size={14}/></button></div>
           <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
           <div className="chart-overlay-strip"><div className="chart-overlay-legend">{showAnchoredVwaps && <><span><i style={{ background: "#f0bd61" }}/>VWAP D</span><span><i style={{ background: "#4d9bff" }}/>VWAP S</span><span><i style={{ background: "#bd82ff" }}/>VWAP M</span></>}{showPreviousLevels && <><span><i style={{ background: "linear-gradient(90deg,#ff667c 50%,#44d49a 50%)" }}/>D−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#ff9a58 50%,#28d6c5 50%)" }}/>S−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#e86cff 50%,#7aa2ff 50%)" }}/>M−1 H/L</span></>}</div></div>
-          <div className="chartarea"><span className="chartlabel">{symbol} · {interval} · OHLCV PERP · {marketDataLabel} · UTC</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} signals={chartSignals}/> : <div className="chartfallback">Candles indisponíveis · verifique a conexão com a API local</div>}</div>
-          <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · CONTRATO</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · CONTRATO</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">FUNDING · PRÓXIMO CICLO</div><div className={`statvalue mono ${funding?.rate != null ? directionClass(funding.rate) : ""}`}>{funding?.rate != null ? `${(funding.rate * 100).toFixed(4)}%` : "—"}</div></div></div>
+          <div className="chartarea"><span className="chartlabel">{symbol} · {interval} · OHLCV SPOT · BINANCE · UTC</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} signals={chartSignals}/> : <div className="chartfallback">Candles indisponíveis · verifique a conexão com a API local</div>}</div>
+          <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">PREÇO SPOT</div><div className="statvalue mono">{fmtPrice(marketInfo?.price)}</div></div></div>
         </section>
 
         <aside className="rightstack">
-          <section className="panel"><div className="panelhead"><span className="paneltitle">Perpetual order book</span><span className={`badge ${book?.status === "live" ? "good" : ""}`}>{book?.status === "live" ? "LIVE" : book?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div>
+          <section className="panel"><div className="panelhead"><span className="paneltitle">Spot order book</span><span className={`badge ${book?.status === "live" ? "good" : ""}`}>{book?.status === "live" ? "LIVE" : book?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div>
             <div className="booksummary"><div><span>SPREAD</span><strong className="mono">{book ? fmtPrice(book.spread, 4) : "—"}</strong></div><div style={{ textAlign: "right" }}><span>IMBALANCE</span><strong className={`mono ${book ? directionClass(book.imbalance) : ""}`}>{book ? `${book.imbalance >= 0 ? "+" : ""}${book.imbalance.toFixed(2)}` : "—"}</strong></div></div>
             <div className="bookhead"><span>QTD.</span><span>PREÇO</span><span>TOTAL</span></div>
             {book?.asks?.slice().reverse().slice(0, 7).map((l,i) => <div className="bookrow" key={`a${i}`}><span className="mono">{l.quantity.toFixed(4)}</span><span className="mono neg">{fmtPrice(l.price, 2)}</span><span className="mono depth" style={{ "--depth": `${Math.min(100, l.total / Math.max(...book.asks.map(x => x.total),1) * 80)}%` } as React.CSSProperties}>{fmtCompact(l.total)}</span></div>)}
@@ -310,10 +309,10 @@ export default function Terminal() {
         </section>
 
         <section className="panel" id="data"><div className="panelhead"><span className="paneltitle">Fluxo observado</span><Database size={13} color="#8794a2"/></div>
-          <div className="coverage"><div className="coverrow"><span>CVD PERP · AMOSTRA</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · perp</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · perp</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades perp visíveis</span><span className="mono">{trades.length} / 24</span></div><div className="coverrow"><span>Cobertura do coletor</span><span className="mono">Sessão atual</span></div>
+          <div className="coverage"><div className="coverrow"><span>CVD SPOT · AMOSTRA</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · spot</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · spot</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades spot visíveis</span><span className="mono">{trades.length} / 24</span></div><div className="coverrow"><span>Cobertura do coletor</span><span className="mono">Sessão atual</span></div>
             <hr style={{ border: 0, borderTop: "1px solid #202833", margin: "9px 0" }}/>
             <div className="coverrow"><span>Sentimento · Fear & Greed</span><strong className="mono" style={{ color: fear?.value != null ? "#d5c080" : "#8996a5" }}>{fear?.value != null ? `${fear.value} · ${fear.label}` : "Indisponível"}</strong></div>
-            <div className="coverrow"><span>Open interest · contratos</span><span className="mono">{fmtCompact(funding?.openInterest)}</span></div><div className="coverrow"><span>Mark price</span><span className="mono">{fmtPrice(funding?.markPrice)}</span></div><div className="coverrow"><span>Index price</span><span className="mono">{fmtPrice(funding?.indexPrice)}</span></div><div className="coverrow"><span>Próximo funding · UTC−3</span><span className="mono">{funding?.nextFundingTime ? fmtTime(funding.nextFundingTime) : "—"}</span></div>
+            <div className="coverrow"><span>Mercado</span><span className="mono">À vista · sem alavancagem</span></div><div className="coverrow"><span>Preço de referência spot</span><span className="mono">{fmtPrice(marketInfo?.price)}</span></div>
             <div className="footnote">{book?.status === "live" ? `Book recebido ${fmtTime(book.receivedAt)} · ${book.eventTime ? `${Math.max(0, book.receivedAt-book.eventTime)} ms de latência` : "sem timestamp de exchange"}` : "Book aguardando conexão"}</div>
           </div>
         </section>
