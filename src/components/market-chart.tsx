@@ -21,7 +21,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       width: host.current.clientWidth, height: host.current.clientHeight,
       layout: { background: { type: ColorType.Solid, color: "#0d1219" }, textColor: "#778596", fontFamily: "DM Mono, monospace", fontSize: 10 },
       grid: { vertLines: { color: "#17202a" }, horzLines: { color: "#17202a" } },
-      crosshair: { mode: CrosshairMode.Normal }, rightPriceScale: { borderColor: "#27313c" }, timeScale: { borderColor: "#27313c", timeVisible: true, secondsVisible: false },
+      crosshair: { mode: CrosshairMode.Normal }, rightPriceScale: { borderColor: "#27313c", scaleMargins: { top: 0.08, bottom: 0.2 } }, timeScale: { borderColor: "#27313c", timeVisible: true, secondsVisible: false },
     });
     const candle = chart.addSeries(CandlestickSeries, { upColor: "#44d49a", downColor: "#ff667c", borderUpColor: "#44d49a", borderDownColor: "#ff667c", wickUpColor: "#44d49a", wickDownColor: "#ff667c", priceLineColor: "#28d6c5" });
     const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume" });
@@ -91,7 +91,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
     }
     for (const level of levels) {
       if (level.value == null || !Number.isFinite(level.value)) continue;
-      const series = chart.addSeries(LineSeries, { color: level.color, lineWidth: level.width ?? 1, lineStyle: level.style ?? LineStyle.Solid, title: level.title, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, pointMarkersVisible: false, crosshairMarkerRadius: 0 });
+      const series = chart.addSeries(LineSeries, { color: level.color, lineWidth: level.width ?? 1, lineStyle: level.style ?? LineStyle.Solid, title: level.title, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, pointMarkersVisible: false, crosshairMarkerRadius: 0, autoscaleInfoProvider: () => null });
       series.setData([{ time: first, value: level.value }, { time: last, value: level.value }]);
       zoneSeriesRef.current.push(series);
     }
@@ -113,6 +113,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
         color, lineWidth: 2, lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
         title, priceLineVisible: false, lastValueVisible: false,
         crosshairMarkerVisible: false, pointMarkersVisible: false, crosshairMarkerRadius: 0,
+        autoscaleInfoProvider: () => null,
       });
       series.setData(points.map(point => ({ time: point.time as UTCTimestamp, value: point.value })));
       referenceSeriesRef.current.push(series);
