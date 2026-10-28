@@ -426,13 +426,16 @@ class MarketService:
                         final = int(data.get("u", 0))
                         async with state["lock"]:
                             last = state["lastUpdateId"]
-                            if final < last:
+                            if final <= last:
                                 continue
                             if state["status"] != "live":
-                                # Skip old buffered events; wait for the event spanning the snapshot ID.
-                                bridge_id = last
-                                if not (first <= bridge_id <= final):
+                                # Binance requires the first event to bridge lastUpdateId + 1.
+                                if not (first <= last + 1 <= final):
                                     continue
+                            elif first > last + 1:
+                                # A missing sequence invalidates this local book; reconnect and resnapshot.
+                                state["status"] = "syncing"
+                                break
 
                             for key, side in (("b", "bids"), ("a", "asks")):
                                 for price_text, qty_text in data.get(key, []):
