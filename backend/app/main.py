@@ -485,9 +485,58 @@ async def flow_quality(symbol: str = Query("BTCUSDT")):
         "storage": store.storage if store else "unavailable",
         "storagePath": str(store.path) if store and store.storage == "sqlite" else None,
         "storageDurable": store.durable if store else False,
-        "retentionDays": store.retention_days if store else None,
+        "rawRetentionHours": store.retention_hours if store else None,
+        "aggregateRetentionDays": store.aggregate_retention_days if store else None,
         "source": "Binance Spot aggTrade combined stream",
         "receivedAt": int(time.time() * 1000),
+    }
+
+@app.get("/api/flow-history")
+async def flow_history(
+    symbol: str = Query("BTCUSDT"),
+    interval: int = Query(5, ge=1, le=60),
+    start_ms: int | None = Query(None, ge=0),
+    end_ms: int | None = Query(None, ge=0),
+):
+    """Return compact, persisted flow bars built only from observed aggTrades."""
+    symbol = validate_symbol(symbol)
+    if interval not in {1, 5, 15, 30, 60}:
+        raise HTTPException(400, "Interval must be one of 1, 5, 15, 30 or 60 minutes")
+    store = service.flow_store
+    if store is None:
+        raise HTTPException(503, "Flow storage is not ready")
+    now_ms = int(time.time() * 1000)
+    end = end_ms if end_ms is not None else now_ms
+    start = start_ms if start_ms is not None else end - 6 * 60 * 60_000
+    if start >= end:
+        raise HTTPException(400, "start_ms must be before end_ms")
+    max_window = store.aggregate_retention_days * 86_400_000
+    if end - start > max_window:
+        raise HTTPException(400, f"Requested range exceeds aggregate retention ({store.aggregate_retention_days} days)")
+    if start < now_ms - max_window:
+        raise HTTPException(400, "Requested start is older than configured aggregate retention")
+    try:
+        bars = await asyncio.to_thread(store.flow_history, symbol, start, end, interval)
+    except Exception as error:
+        log.exception("flow history query failed", extra={"symbol": symbol})
+        raise HTTPException(503, "Persisted flow history is temporarily unavailable") from error
+    observed_start = max(start, bars[0]["time"] * 1000) if bars else None
+    expected_buckets = max(0, (end - observed_start + interval * 60_000 - 1) // (interval * 60_000)) if observed_start else 0
+    return {
+        "symbol": symbol,
+        "intervalMinutes": interval,
+        "bars": bars,
+        "source": "Observed Binance Spot aggTrades aggregated into UTC time buckets",
+        "coverage": {
+            "requestedStart": start,
+            "requestedEnd": end,
+            "observedStart": observed_start,
+            "observedBuckets": len(bars),
+            "expectedBucketsSinceObservedStart": expected_buckets,
+            "estimatedPercent": round(min(100, len(bars) / expected_buckets * 100), 2) if expected_buckets else None,
+            "interpretation": "Estimate based on non-empty buckets; quiet minutes and collector gaps cannot be distinguished.",
+        },
+        "receivedAt": now_ms,
     }
 
 @app.get("/api/reversal-signals")
@@ -547,6 +596,96 @@ async def reversal_signals(
         )
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
         raise HTTPException(502, f"Unable to calculate reversal signals: {error}") from error
+
+@app.get("/api/reversal-evaluation")
+async def reversal_evaluation(
+    symbol: str = Query("BTCUSDT"),
+    interval: str = Query("5m"),
+    market: str = Query("spot"),
+    lookahead: int = Query(12, ge=1, le=100),
+    fee_bps: float = Query(10, ge=0, le=100),
+    slippage_bps: float = Query(5, ge=0, le=100),
+):
+    """Evaluate closed-candle reversal signals against later OHLCV, with explicit costs."""
+    symbol, market = validate_symbol(symbol), validate_market(market)
+    if interval not in INTERVALS:
+        raise HTTPException(400, "Unsupported candle interval")
+    base, path = service.base_and_path(market, "klines")
+    try:
+        candles_limit = 1000
+        rows, daily_rows = await asyncio.gather(
+            service.request(base, path, {"symbol": symbol, "interval": interval, "limit": candles_limit}),
+            service.request(base, path, {"symbol": symbol, "interval": "1d", "limit": 400}),
+        )
+        candles = [
+            {"time": int(row[0] // 1000), "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5])}
+            for row in rows[:-1]
+        ]
+        daily_times = [int(row[0] // 1000) for row in daily_rows]
+        zones_cache: dict[int, dict[str, Any]] = {}
+        zones_by_candle: list[dict[str, Any] | None] = []
+        for candle in candles:
+            day_index = -1
+            for index, day_start in enumerate(daily_times):
+                if day_start + 86_400 <= candle["time"]:
+                    day_index = index
+                else:
+                    break
+            if day_index < 0 or day_index + 1 >= len(daily_rows):
+                zones_by_candle.append(None)
+                continue
+            if day_index not in zones_cache:
+                history = [{"time": int(row[0] // 1000), "close": float(row[4])} for row in daily_rows[:day_index + 2]]
+                zones_cache[day_index] = calculate_zones(symbol, history)
+            zones_by_candle.append(zones_cache[day_index])
+
+        generated = build_reversal_signals(
+            symbol, interval, candles, zones_by_candle,
+            min_sigma=1.0, min_score=50, cooldown=10, volume_enabled=True,
+        )
+        fee_and_slippage_bps = 2 * (fee_bps + slippage_bps)
+        outcomes: list[dict[str, Any]] = []
+        expired = 0
+        index_by_time = {candle["time"]: index for index, candle in enumerate(candles)}
+        for signal in generated["signals"]:
+            signal_index = index_by_time.get(signal["time"])
+            if signal_index is None or signal_index + lookahead >= len(candles):
+                expired += 1
+                continue
+            entry = candles[signal_index + 1]["open"]
+            exit_price = candles[signal_index + lookahead]["close"]
+            if entry <= 0 or exit_price <= 0:
+                continue
+            gross_bps = ((exit_price / entry) - 1) * 10_000
+            if signal["direction"] == "SELL":
+                gross_bps = -gross_bps
+            net_bps = gross_bps - fee_and_slippage_bps
+            outcomes.append({
+                "time": signal["time"], "direction": signal["direction"], "signalPrice": signal["price"],
+                "entryPrice": entry, "exitPrice": exit_price, "grossBps": round(gross_bps, 2),
+                "estimatedRoundTripCostsBps": round(fee_and_slippage_bps, 2), "netBps": round(net_bps, 2),
+                "win": net_bps > 0,
+            })
+        net_returns = sorted(item["netBps"] for item in outcomes)
+        count = len(net_returns)
+        median = (net_returns[(count - 1) // 2] + net_returns[count // 2]) / 2 if count else None
+        summary = {
+            "generatedSignals": len(generated["signals"]), "evaluatedSignals": count, "notMaturedSignals": expired,
+            "wins": sum(1 for value in net_returns if value > 0),
+            "winRatePercent": round(sum(1 for value in net_returns if value > 0) / count * 100, 2) if count else None,
+            "averageNetBps": round(sum(net_returns) / count, 2) if count else None,
+            "medianNetBps": round(median, 2) if median is not None else None,
+        }
+        return {
+            "symbol": symbol, "market": market, "interval": interval,
+            "settings": {"minSigma": 1.0, "minScore": 50, "cooldown": 10, "volumeEnabled": True, "lookaheadCandles": lookahead, "feeBpsPerSide": fee_bps, "slippageBpsPerSide": slippage_bps},
+            "summary": summary, "outcomes": outcomes,
+            "source": "Binance Spot OHLCV; entry is next candle open and exit is close after the lookahead horizon",
+            "limitations": ["Only the most recent 40 qualified signals are evaluated.", "Overlapping signals are counted independently.", "Fees and slippage are user-supplied estimates; funding, spread, market impact and execution failures are excluded.", "This is a retrospective estimate, not a live signal or a promise of future results."],
+            "receivedAt": int(time.time() * 1000),
+        }
+    except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
+        raise HTTPException(502, f"Unable to evaluate reversal signals: {error}") from error
 
 @app.get("/api/volatility")
 async def volatility(symbol: str = Query("BTCUSDT"), market: str = Query("spot")):

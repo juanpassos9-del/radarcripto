@@ -32,6 +32,10 @@ services:
         value: https://nexus-terminal-web.onrender.com
       - key: NEXUS_MARKET_MODE
         value: spot
+      - key: FLOW_RETENTION_HOURS
+        value: "1"
+      - key: FLOW_AGG_RETENTION_DAYS
+        value: "30"
       - key: BINANCE_SPOT_REST_URL
         value: https://data-api.binance.vision
       - key: BINANCE_SPOT_WS_URL
