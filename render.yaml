@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: nexus-terminal-web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: NEXUS_API_ORIGIN
+        fromService:
+          type: web
+          name: nexus-terminal-api
+          property: url
+      - key: NEXT_PUBLIC_MARKET_WS_URL
+        value: wss://nexus-terminal-api.onrender.com/ws/market
+
+  - type: web
+    name: nexus-terminal-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: CORS_ORIGINS
+        value: https://nexus-terminal-web.onrender.com
+      - key: LOG_LEVEL
+        value: INFO
