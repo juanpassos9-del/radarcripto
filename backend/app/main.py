@@ -39,6 +39,10 @@ class MarketService:
     def __init__(self) -> None:
         self.client = httpx.AsyncClient(headers={"User-Agent": "NexusCryptoTerminal/0.1"}, timeout=12)
         self.request_slots = asyncio.Semaphore(5)
+        self.exchange_headers = {
+            "Origin": "https://www.binance.com",
+            "Referer": "https://www.binance.com/",
+        }
         self.books: dict[tuple[str, str], dict[str, Any]] = {}
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
 
@@ -52,7 +56,7 @@ class MarketService:
                 # Render instance has limited CPU/connections and should not fan
                 # out dozens of simultaneous Binance calls per dashboard refresh.
                 async with self.request_slots:
-                    response = await self.client.get(base + path, params=params)
+                    response = await self.client.get(base + path, params=params, headers=self.exchange_headers)
                 if response.status_code == 429 or response.status_code == 418:
                     wait = min(float(response.headers.get("Retry-After", 1)), 10)
                     await asyncio.sleep(wait)
