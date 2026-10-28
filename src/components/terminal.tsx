@@ -139,7 +139,10 @@ export default function Terminal() {
     setCandles([]); setBook(null); setTrades([]);
     setReversalData(null);
     loadAsset(true);
-    const streamUrl = process.env.NEXT_PUBLIC_MARKET_WS_URL || "ws://127.0.0.1:8001/ws/market";
+    const marketApiUrl = process.env.NEXT_PUBLIC_MARKET_API_URL;
+    const streamUrl = marketApiUrl
+      ? `${marketApiUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/+$/, "")}/ws/market`
+      : process.env.NEXT_PUBLIC_MARKET_WS_URL || "ws://127.0.0.1:8001/ws/market";
     let socket: WebSocket | null = null; let poll: number | null = null;
     const connect = () => {
       if (!active) return;

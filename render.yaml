@@ -12,8 +12,11 @@ services:
           name: nexus-terminal-api
           type: web
           envVarKey: RENDER_EXTERNAL_URL
-      - key: NEXT_PUBLIC_MARKET_WS_URL
-        value: wss://nexus-terminal-api.onrender.com/ws/market
+      - key: NEXT_PUBLIC_MARKET_API_URL
+        fromService:
+          name: nexus-terminal-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
 
   - type: web
     name: nexus-terminal-api
