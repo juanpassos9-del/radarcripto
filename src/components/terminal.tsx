@@ -23,6 +23,8 @@ export default function Terminal() {
   const [markets, setMarkets] = useState<Record<string, MarketSnapshot>>({});
   const [candles, setCandles] = useState<Candle[]>([]);
   const [book, setBook] = useState<BookData | null>(null);
+  const [bookThreshold, setBookThreshold] = useState(10_000);
+  const [showAllBookLevels, setShowAllBookLevels] = useState(false);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [reversalData, setReversalData] = useState<ReversalSignalData | null>(null);
   const [reversalError, setReversalError] = useState(false);
@@ -198,6 +200,14 @@ export default function Terminal() {
   const sigmaZone = sigmaDistance == null ? "Sem dados" : Math.abs(sigmaDistance) < 0.5 ? "Neutra" : Math.abs(sigmaDistance) < 1 ? "Moderada" : Math.abs(sigmaDistance) < 2 ? "Atenção" : Math.abs(sigmaDistance) < 3 ? "Extrema" : "Anomalia";
   const bestBid = book?.bids[0]?.price ?? null;
   const bestAsk = book?.asks[0]?.price ?? null;
+  const visibleAsks = useMemo(() => {
+    const levels = book?.asks?.slice().reverse() ?? [];
+    return (showAllBookLevels ? levels : levels.filter(level => level.price * level.quantity >= bookThreshold)).slice(0, 7);
+  }, [book, bookThreshold, showAllBookLevels]);
+  const visibleBids = useMemo(() => {
+    const levels = book?.bids ?? [];
+    return (showAllBookLevels ? levels : levels.filter(level => level.price * level.quantity >= bookThreshold)).slice(0, 7);
+  }, [book, bookThreshold, showAllBookLevels]);
   const cvd = useMemo(() => trades.reduce((sum, trade) => sum + (trade.side === "buy" ? 1 : -1) * trade.quantity, 0), [trades]);
   const buyVolume = useMemo(() => trades.filter(t => t.side === "buy").reduce((n,t) => n+t.quantity,0), [trades]);
   const sellVolume = useMemo(() => trades.filter(t => t.side === "sell").reduce((n,t) => n+t.quantity,0), [trades]);
@@ -275,10 +285,13 @@ export default function Terminal() {
         <aside className="rightstack">
           <section className="panel"><div className="panelhead"><span className="paneltitle">Spot order book</span><span className={`badge ${book?.status === "live" ? "good" : ""}`}>{book?.status === "live" ? "LIVE" : book?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div>
             <div className="booksummary"><div><span>SPREAD</span><strong className="mono">{book ? fmtPrice(book.spread, 4) : "—"}</strong></div><div style={{ textAlign: "right" }}><span>IMBALANCE</span><strong className={`mono ${book ? directionClass(book.imbalance) : ""}`}>{book ? `${book.imbalance >= 0 ? "+" : ""}${book.imbalance.toFixed(2)}` : "—"}</strong></div></div>
+            <div className="bookfilters"><label>Filtro mínimo<select value={showAllBookLevels ? "all" : String(bookThreshold)} onChange={event => { const value = event.target.value; setShowAllBookLevels(value === "all"); if (value !== "all") setBookThreshold(Number(value)); }}><option value="all">Todos os níveis</option><option value="10000">10 mil USDT</option><option value="50000">50 mil USDT</option><option value="100000">100 mil USDT</option><option value="250000">250 mil USDT</option><option value="500000">500 mil USDT</option></select></label><span>Valor visível = preço × quantidade</span></div>
             <div className="bookhead"><span>QTD.</span><span>PREÇO</span><span>TOTAL</span></div>
-            {book?.asks?.slice().reverse().slice(0, 7).map((l,i) => <div className="bookrow" key={`a${i}`}><span className="mono">{l.quantity.toFixed(4)}</span><span className="mono neg">{fmtPrice(l.price, 2)}</span><span className="mono depth" style={{ "--depth": `${Math.min(100, l.total / Math.max(...book.asks.map(x => x.total),1) * 80)}%` } as React.CSSProperties}>{fmtCompact(l.total)}</span></div>)}
+            {visibleAsks.map((l,i) => <div className="bookrow" key={`a${i}`}><span className="mono">{l.quantity.toFixed(4)}</span><span className="mono neg">{fmtPrice(l.price, 2)}</span><span className="mono depth" style={{ "--depth": `${Math.min(100, l.total / Math.max(...(book?.asks ?? []).map(x => x.total),1) * 80)}%` } as React.CSSProperties}>{fmtCompact(l.price * l.quantity)}</span></div>)}
+            {!showAllBookLevels && visibleAsks.length === 0 && <div className="bookempty">Nenhuma venda acima de {fmtCompact(bookThreshold)} USDT nesta amostra.</div>}
             <div className="midspread mono">{book && bestBid != null && bestAsk != null ? fmtPrice((bestBid + bestAsk) / 2) : "Conectando ao book…"}</div>
-            {book?.bids?.slice(0,7).map((l,i) => <div className="bookrow" key={`b${i}`}><span className="mono">{l.quantity.toFixed(4)}</span><span className="mono pos">{fmtPrice(l.price, 2)}</span><span className="mono depth bid" style={{ "--depth": `${Math.min(100, l.total / Math.max(...book.bids.map(x => x.total),1) * 80)}%` } as React.CSSProperties}>{fmtCompact(l.total)}</span></div>)}
+            {visibleBids.map((l,i) => <div className="bookrow" key={`b${i}`}><span className="mono">{l.quantity.toFixed(4)}</span><span className="mono pos">{fmtPrice(l.price, 2)}</span><span className="mono depth bid" style={{ "--depth": `${Math.min(100, l.total / Math.max(...(book?.bids ?? []).map(x => x.total),1) * 80)}%` } as React.CSSProperties}>{fmtCompact(l.price * l.quantity)}</span></div>)}
+            {!showAllBookLevels && visibleBids.length === 0 && <div className="bookempty">Nenhuma compra acima de {fmtCompact(bookThreshold)} USDT nesta amostra.</div>}
             <div className="dataerror">Profundidade atual via snapshot + deltas; histórico de liquidez começa com esta sessão.</div>
           </section>
 
