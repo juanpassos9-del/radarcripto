@@ -48,6 +48,8 @@ class MarketService:
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
         self.external_books: dict[tuple[str, str], dict[str, Any]] = {}
         self.external_trades: dict[str, deque[Trade]] = {}
+        self.external_trade_status: dict[tuple[str, str], dict[str, Any]] = {}
+        self.external_trade_ids: dict[tuple[str, str], tuple[deque[str], set[str]]] = {}
         self.external_tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
         self.external_symbol_access: dict[str, int] = {}
         self.context_cache: dict[str, Any] | None = None
@@ -67,10 +69,12 @@ class MarketService:
     async def collect_all_trades(self) -> None:
         streams = [f"{symbol.lower()}@aggTrade" for symbol in SYMBOLS]
         url = f"{SPOT_WS}?streams={'/'.join(streams)}"
+        reconnect_delay = 1.0
         while True:
             try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=2**20) as socket:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, open_timeout=12, close_timeout=5, max_size=2**20, max_queue=4096) as socket:
                     connected_at = int(time.time() * 1000)
+                    connected_since = time.monotonic()
                     for state in self.flow_quality.values():
                         if state["connectedAt"] is not None:
                             state["reconnects"] += 1
@@ -104,7 +108,7 @@ class MarketService:
                 disconnected_at = int(time.time() * 1000)
                 for state in self.flow_quality.values():
                     state.update(status="reconnecting", connected=False, lastDisconnectAt=disconnected_at)
-                await asyncio.sleep(1)
+                reconnect_delay = 1.0 if time.monotonic() - connected_since >= 20 else min(reconnect_delay * 2, 30.0)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -112,7 +116,8 @@ class MarketService:
                 log.exception("aggregate trade collector disconnected")
                 for state in self.flow_quality.values():
                     state.update(status="reconnecting", connected=False, lastDisconnectAt=disconnected_at)
-                await asyncio.sleep(2)
+                reconnect_delay = min(reconnect_delay * 2, 30.0)
+            await asyncio.sleep(reconnect_delay)
 
     async def recover_trade_gap(self, symbol: str, first_id: int, last_id: int) -> None:
         """Fill a bounded slice of a Binance aggTrade ID gap from its public REST API."""
@@ -371,25 +376,47 @@ class MarketService:
         pair = self.external_pair(symbol, venue)
         key = (symbol, venue)
         state = self.external_books.setdefault(key, {"bids": {}, "asks": {}, "status": "connecting", "eventTime": None, "receivedAt": 0})
+        trade_state = self.external_trade_status.setdefault(key, {"status": "connecting", "connected": False, "lastMessageAt": None, "lastTradeAt": None, "reconnects": 0, "error": None})
         trades = self.external_trades.setdefault(symbol, deque(maxlen=5000))
+        seen_queue, seen_ids = self.external_trade_ids.setdefault(key, (deque(maxlen=10_000), set()))
         url = "wss://ws.kraken.com/v2" if venue == "Kraken" else "wss://advanced-trade-ws.coinbase.com"
+        reconnect_delay = 1.0
         while True:
             try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=8 * 2**20) as socket:
+                state.update(status="connecting", bids={}, asks={})
+                trade_state.update(status="connecting", connected=False, error=None)
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, open_timeout=12, close_timeout=5, max_size=8 * 2**20, max_queue=2048) as socket:
+                    if trade_state.get("lastMessageAt") is not None:
+                        trade_state["reconnects"] += 1
+                    connected_since = time.monotonic()
                     if venue == "Kraken":
                         await socket.send(json.dumps({"method": "subscribe", "params": {"channel": "book", "symbol": [pair], "depth": 100, "snapshot": True}}))
-                        await socket.send(json.dumps({"method": "subscribe", "params": {"channel": "trade", "symbol": [pair], "snapshot": False}}))
+                        await socket.send(json.dumps({"method": "subscribe", "params": {"channel": "trade", "symbol": [pair], "snapshot": True}}))
                     else:
-                        for channel in ("level2", "market_trades"):
+                        # Coinbase heartbeats keep otherwise quiet subscriptions alive and
+                        # let us distinguish a healthy idle feed from a dead socket.
+                        for channel in ("level2", "market_trades", "heartbeats"):
                             await socket.send(json.dumps({"type": "subscribe", "product_ids": [pair], "channel": channel}))
                     async for raw in socket:
                         message = json.loads(raw)
                         received = int(time.time() * 1000)
+                        trade_state["lastMessageAt"] = received
                         if venue == "Kraken":
                             channel, rows, message_type = message.get("channel"), message.get("data", []), message.get("type")
-                            if message.get("success") is False or message.get("method") == "subscribe" and message.get("success") is False:
-                                state["status"] = "unavailable"
-                                log.info("Kraken pair unavailable", extra={"symbol": symbol, "error": message.get("error")})
+                            if message.get("success") is False:
+                                error = str(message.get("error", "subscription rejected"))
+                                state.update(status="unavailable", error=error)
+                                trade_state.update(status="unavailable", connected=False, error=error)
+                                log.info("Kraken spot subscription rejected", extra={"symbol": symbol, "error": error})
+                                continue
+                            if message.get("method") == "subscribe" and message.get("success") is True:
+                                result_channel = message.get("result", {}).get("channel")
+                                if result_channel == "trade":
+                                    trade_state.update(status="live", connected=True, error=None)
+                                continue
+                            if channel == "heartbeat":
+                                # A socket heartbeat proves transport health, not that
+                                # the requested product's trade subscription was accepted.
                                 continue
                             for row in rows:
                                 if channel == "book":
@@ -412,13 +439,38 @@ class MarketService:
                                     state.update(status="live", eventTime=self.exchange_time(row.get("timestamp", received)), receivedAt=received)
                                 elif channel == "trade":
                                     stamp = self.exchange_time(row["timestamp"])
-                                    trades.append(Trade(id=f"{row.get('trade_id', stamp)}", time=stamp, price=float(row["price"]), quantity=float(row["qty"]), side=row["side"], source=venue))
+                                    trade_id = str(row.get("trade_id", f"{stamp}:{row['price']}:{row['qty']}:{row['side']}"))
+                                    if trade_id in seen_ids:
+                                        continue
+                                    if len(seen_queue) == seen_queue.maxlen:
+                                        seen_ids.discard(seen_queue[0])
+                                    seen_queue.append(trade_id)
+                                    seen_ids.add(trade_id)
+                                    trades.append(Trade(id=trade_id, time=stamp, price=float(row["price"]), quantity=float(row["qty"]), side=row["side"], source=venue))
+                                    trade_state.update(status="live", connected=True, lastTradeAt=received)
                         else:
                             if message.get("type") == "error":
-                                state["status"] = "unavailable"
+                                error = str(message.get("message", "subscription rejected"))
+                                state.update(status="unavailable", error=error)
+                                trade_state.update(status="unavailable", connected=False, error=error)
                                 log.info("Coinbase pair/channel unavailable", extra={"symbol": symbol, "error": message.get("message")})
                                 continue
                             channel = message.get("channel")
+                            if channel == "subscriptions":
+                                subscriptions = message.get("events", [])
+                                active = {
+                                    channel_name
+                                    for event in subscriptions
+                                    for channel_name, products in event.get("subscriptions", {}).items()
+                                    if pair in products
+                                }
+                                if "market_trades" in active:
+                                    trade_state.update(status="live", connected=True, error=None)
+                                continue
+                            if channel == "heartbeats":
+                                # Keep the market-trade subscription status independent
+                                # from the socket heartbeat channel.
+                                continue
                             for event in message.get("events", []):
                                 if channel == "l2_data":
                                     product = event.get("product_id")
@@ -446,14 +498,28 @@ class MarketService:
                                             continue
                                         stamp = self.exchange_time(row.get("time", received))
                                         maker_side = row.get("side", "BUY").lower()
-                                        trades.append(Trade(id=str(row.get("trade_id", stamp)), time=stamp, price=float(row["price"]), quantity=float(row["size"]), side="sell" if maker_side == "buy" else "buy", source=venue))
-                state["status"] = "reconnecting"
+                                        trade_id = str(row.get("trade_id", f"{stamp}:{row['price']}:{row['size']}:{maker_side}"))
+                                        if trade_id in seen_ids:
+                                            continue
+                                        if len(seen_queue) == seen_queue.maxlen:
+                                            seen_ids.discard(seen_queue[0])
+                                        seen_queue.append(trade_id)
+                                        seen_ids.add(trade_id)
+                                        # Advanced Trade reports the maker side; invert it to
+                                        # keep the terminal's side field as aggressor direction.
+                                        trades.append(Trade(id=trade_id, time=stamp, price=float(row["price"]), quantity=float(row["size"]), side="sell" if maker_side == "buy" else "buy", source=venue))
+                                        trade_state.update(status="live", connected=True, lastTradeAt=received)
+                state.update(status="reconnecting", bids={}, asks={})
+                trade_state.update(status="reconnecting", connected=False)
+                reconnect_delay = 1.0 if time.monotonic() - connected_since >= 20 else min(reconnect_delay * 2, 30.0)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 state["status"] = "unavailable" if not state["receivedAt"] else "reconnecting"
+                trade_state.update(status="reconnecting", connected=False, error="connection interrupted")
                 log.exception("external spot stream disconnected", extra={"symbol": symbol, "venue": venue})
-            await asyncio.sleep(2)
+                reconnect_delay = min(reconnect_delay * 2, 30.0)
+            await asyncio.sleep(reconnect_delay)
 
     async def book_stream(self, market: str, symbol: str, state: dict[str, Any]) -> None:
         endpoint = SPOT_WS
@@ -805,11 +871,18 @@ async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), li
     external_rows = list(service.external_trades.get(symbol, []))
     unique = {(trade.source, str(trade.id)): trade for trade in [*binance_rows, *external_rows]}
     rows = sorted(unique.values(), key=lambda trade: (trade.time, str(trade.id)), reverse=True)[:limit]
-    sources = {"Binance": "live" if service.flow_quality[symbol]["connected"] else "reconnecting"}
+    binance_state = service.flow_quality[symbol]
+    binance_status = "live" if binance_state["connected"] else "reconnecting"
+    sources = {"Binance": binance_status}
+    trade_health = {"Binance": {"status": binance_status, "lastTradeAt": binance_state.get("lastReceivedAt")}}
     for venue in ("Kraken", "Coinbase"):
-        state = service.external_books.get((symbol, venue))
-        sources[venue] = state["status"] if state else "connecting"
-    return {"trades": [trade.model_dump() for trade in rows], "source": "Binance + Kraken + Coinbase Spot", "sources": sources, "receivedAt": int(time.time() * 1000), "coverage": "negociações públicas observadas; volumes são somados por ativo base; USD tratado como aproximadamente 1 USDT"}
+        health = service.external_trade_status.get((symbol, venue))
+        status = health["status"] if health else "connecting"
+        if health and health.get("connected") and health.get("lastMessageAt") and int(time.time() * 1000) - health["lastMessageAt"] > 30_000:
+            status = "stale"
+        sources[venue] = status
+        trade_health[venue] = {"status": status, "lastTradeAt": health.get("lastTradeAt") if health else None, "reconnects": health.get("reconnects", 0) if health else 0, "error": health.get("error") if health else None}
+    return {"trades": [trade.model_dump() for trade in rows], "source": "Binance + Kraken + Coinbase Spot", "sources": sources, "tradeHealth": trade_health, "receivedAt": int(time.time() * 1000), "coverage": "Negociações públicas observadas por exchange; não representa o mercado global. USD ≈ USDT."}
 
 @app.get("/api/flow-quality")
 async def flow_quality(symbol: str = Query("BTCUSDT")):

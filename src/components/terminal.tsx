@@ -32,6 +32,7 @@ export default function Terminal() {
   const [showAllBookLevels, setShowAllBookLevels] = useState(false);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [tradeSources, setTradeSources] = useState<Record<string, string>>({});
+  const [tradeHealth, setTradeHealth] = useState<Record<string, { status: string; lastTradeAt?: number | null; reconnects?: number; error?: string | null }>>({});
   const [flowQuality, setFlowQuality] = useState<{ status: string; connected: boolean; lastEventTime: number | null; lastLatencyMs: number | null; events: number; reconnects: number; possibleIdGaps: number; backfillRowsQueued?: number; backfillSkippedIds?: number; backfillFailures?: number; storedTrades: number; oldestTradeTime: number | null; storedFlowBars?: number; oldestFlowBarTime?: number | null; aggregateRetentionDays?: number | null; queueDropped: number; storage: string; storageBytes: number; storageDurable: boolean; rawRetentionHours: number } | null>(null);
   const [reversalData, setReversalData] = useState<ReversalSignalData | null>(null);
   const [reversalError, setReversalError] = useState(false);
@@ -79,7 +80,7 @@ export default function Terminal() {
     const [candleResult, bookResult, tradeResult] = await Promise.allSettled([
       getJson<{ candles: Candle[] }>(`/api/candles?symbol=${symbol}&interval=${interval}&market=${market}&limit=240`),
       getJson<BookData>(`/api/book?symbol=${symbol}&market=${market}&limit=16`),
-      getJson<{ trades: Trade[]; sources?: Record<string, string> }>(`/api/trades?symbol=${symbol}&market=${market}&limit=24`),
+      getJson<{ trades: Trade[]; sources?: Record<string, string>; tradeHealth?: typeof tradeHealth }>(`/api/trades?symbol=${symbol}&market=${market}&limit=24`),
     ]);
     if (selectedKeyRef.current !== requestKey) return;
     if (candleResult.status === "fulfilled") setCandles(candleResult.value.candles);
@@ -89,9 +90,31 @@ export default function Terminal() {
     if (tradeResult.status === "fulfilled") {
       setTrades(tradeResult.value.trades);
       setTradeSources(tradeResult.value.sources ?? {});
+      setTradeHealth(tradeResult.value.tradeHealth ?? {});
     }
     if (isFirst) setLoading(false);
   }, [symbol, interval, market]);
+
+  // External venue feeds are collected by the API process. Refresh their shared
+  // samples and health independently while Binance remains on the browser WS.
+  useEffect(() => {
+    let active = true;
+    const refresh = () => getJson<{ trades: Trade[]; sources?: Record<string, string>; tradeHealth?: typeof tradeHealth }>(`/api/trades?symbol=${symbol}&market=${market}&limit=60`)
+      .then(data => {
+        if (!active) return;
+        setTradeSources(data.sources ?? {});
+        setTradeHealth(data.tradeHealth ?? {});
+        setTrades(current => {
+          const unique = new Map<string, Trade>();
+          for (const trade of [...current, ...data.trades]) unique.set(`${trade.source ?? "Binance"}:${trade.id}`, trade);
+          return [...unique.values()].sort((a, b) => b.time - a.time).slice(0, 60);
+        });
+      })
+      .catch(() => undefined);
+    void refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [symbol, market]);
 
   const loadReversalSignals = useCallback(async () => {
     const requestId = ++reversalRequestRef.current;
@@ -180,7 +203,8 @@ export default function Terminal() {
             const message = JSON.parse(event.data) as { type: string; data: unknown; closed?: boolean };
           if (message.type === "trade") {
             const trade = message.data as Trade;
-            setTrades(current => [trade, ...current.filter(t => t.id !== trade.id)].slice(0, 60));
+            const tradeKey = `${trade.source ?? "Binance"}:${trade.id}`;
+            setTrades(current => [trade, ...current.filter(t => `${t.source ?? "Binance"}:${t.id}` !== tradeKey)].slice(0, 60));
           } else if (message.type === "book") setBook(message.data as BookData);
           else if (message.type === "market") {
             const snapshot = message.data as MarketSnapshot;
@@ -272,7 +296,7 @@ export default function Terminal() {
     }
     return outliers;
   }, [trades]);
-  const coverage = Math.min(100, Math.round((trades.length / 24) * 100));
+  const coverage = Math.min(100, Math.round((trades.length / 60) * 100));
   const directionClass = (value: number | null | undefined) => value != null && value >= 0 ? "pos" : "neg";
 
   return <main className="shell">
@@ -352,7 +376,7 @@ export default function Terminal() {
       </div>
 
       <div className="bottomgrid" id="flow">
-        <section className="panel"><div className="panelhead"><span className="paneltitle">Times & trades agregado</span><span className={`badge ${Object.values(tradeSources).filter(status => status === "live").length === 3 ? "good" : ""}`}>{["Binance", "Kraken", "Coinbase"].map(venue => `${venue}: ${(tradeSources[venue] ?? "connecting").toUpperCase()}`).join(" · ")}</span></div>
+        <section className="panel"><div className="panelhead"><span className="paneltitle">Times & trades agregado</span><span className={`badge ${Object.values(tradeSources).filter(status => status === "live").length === 3 ? "good" : ""}`} title={["Binance", "Kraken", "Coinbase"].map(venue => { const health = tradeHealth[venue]; return `${venue}: ${health?.status ?? tradeSources[venue] ?? "connecting"}; último trade ${health?.lastTradeAt ? fmtTime(health.lastTradeAt) : "sem trade recebido"}${health?.reconnects ? `; reconexões ${health.reconnects}` : ""}${health?.error ? `; ${health.error}` : ""}`; }).join("\n")}>{["Binance", "Kraken", "Coinbase"].map(venue => `${venue}: ${(tradeSources[venue] ?? "connecting").toUpperCase()}`).join(" · ")}</span></div>
           <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. / VALOR</span><span>LADO AGRESSOR</span><span>ORIGEM</span></div>
             {trades.slice(0,18).map((trade,i)=>{const source=trade.source??"Binance";const id=`${source}:${trade.id}`;const anomaly=tradeOutliers.get(id);const notional=trade.price*trade.quantity;return <div className={`taperow ${anomaly?"trade-outlier":""}`} key={`${id}-${i}`} title={anomaly?`Valor ≈ $${fmtCompact(anomaly.notional)} · ${anomaly.ratio.toFixed(1)}× mediana de ${source} (janela de até 24 trades)`:undefined}><span className="mono" style={{ color: "#8290a0" }}>{fmtTime(trade.time)}</span><span className={`mono ${trade.side === "buy" ? "pos" : "neg"}`}>{fmtPrice(trade.price, 2)}</span><span className="trade-quantity"><strong className="mono">{trade.quantity.toFixed(5)}</strong><small>≈ ${fmtCompact(notional)}</small></span><span style={{ textAlign: "right", color: trade.side === "buy" ? "#44d49a" : "#ff667c" }}>{trade.side === "buy" ? "▲ COMPRA" : "▼ VENDA"}</span><span className="trade-origin"><span>{source}</span>{anomaly&&<b className="trade-anomaly">ALTO · {anomaly.ratio.toFixed(0)}×</b>}</span></div>})}
             {trades.length === 0 && <div className="loading">Aguardando negociações observadas…</div>}
@@ -360,7 +384,7 @@ export default function Terminal() {
         </section>
 
         <section className="panel" id="data"><div className="panelhead"><span className="paneltitle">Fluxo observado</span><Database size={13} color="#8794a2"/></div>
-          <div className="coverage"><div className="coverrow"><span>CVD SPOT · AMOSTRA VISÍVEL</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · spot</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · spot</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades na fita</span><span className="mono">{trades.length} / 24</span></div><div className="coverrow"><span>Coletor Binance</span><span className={`mono ${flowQuality?.connected ? "pos" : "neg"}`}>{flowQuality?.connected ? "AO VIVO" : flowQuality?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div><div className="coverrow"><span>Último evento · latência</span><span className="mono">{flowQuality?.lastEventTime ? `${fmtTime(flowQuality.lastEventTime)} · ${flowQuality.lastLatencyMs ?? "—"} ms` : "—"}</span></div><div className="coverrow"><span>Eventos · reconexões</span><span className="mono">{flowQuality?.events ?? 0} · {flowQuality?.reconnects ?? 0}</span></div><div className="coverrow"><span>Saltos · trades recuperados · falhas</span><span className="mono">{flowQuality?.possibleIdGaps ?? 0} · {flowQuality?.backfillRowsQueued ?? 0} · {flowQuality?.backfillFailures ?? 0}</span></div><div className="coverrow"><span>Trades brutos · retenção</span><span className="mono">{flowQuality?.storedTrades ?? 0} · {flowQuality?.rawRetentionHours ?? "—"} h</span></div><div className="coverrow"><span>Barras de fluxo · retenção</span><span className="mono">{flowQuality?.storedFlowBars ?? 0} · {flowQuality?.aggregateRetentionDays ?? "—"} d</span></div><div className="coverrow"><span>Armazenamento</span><span className="mono">{flowQuality ? `${flowQuality.storage.toUpperCase()} · ${(flowQuality.storageBytes / 1048576).toFixed(1)} MB` : "—"}</span></div><div className="coverrow"><span>Fila descartada</span><span className={`mono ${flowQuality?.queueDropped ? "neg" : "pos"}`}>{flowQuality?.queueDropped ?? 0}</span></div>{flowQuality?.storage === "sqlite" && !flowQuality.storageDurable && <div className="dataerror">SQLite no disco local do serviço: no Render sem volume persistente, o histórico pode sumir em reinícios ou deploys.</div>}{flowQuality?.storage === "postgres" && flowQuality.storageBytes >= 400 * 1024 * 1024 && <div className="dataerror">Banco próximo da cota gratuita de 500 MB. Reduza a retenção em FLOW_RETENTION_HOURS e FLOW_AGG_RETENTION_DAYS.</div>}
+          <div className="coverage"><div className="coverrow"><span>CVD SPOT · AMOSTRA VISÍVEL</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · spot</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · spot</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades na fita</span><span className="mono">{trades.length} / 60</span></div><div className="coverrow"><span>Coletor Binance</span><span className={`mono ${flowQuality?.connected ? "pos" : "neg"}`}>{flowQuality?.connected ? "AO VIVO" : flowQuality?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div><div className="coverrow"><span>Último evento · latência</span><span className="mono">{flowQuality?.lastEventTime ? `${fmtTime(flowQuality.lastEventTime)} · ${flowQuality.lastLatencyMs ?? "—"} ms` : "—"}</span></div><div className="coverrow"><span>Eventos · reconexões</span><span className="mono">{flowQuality?.events ?? 0} · {flowQuality?.reconnects ?? 0}</span></div><div className="coverrow"><span>Saltos · trades recuperados · falhas</span><span className="mono">{flowQuality?.possibleIdGaps ?? 0} · {flowQuality?.backfillRowsQueued ?? 0} · {flowQuality?.backfillFailures ?? 0}</span></div><div className="coverrow"><span>Trades brutos · retenção</span><span className="mono">{flowQuality?.storedTrades ?? 0} · {flowQuality?.rawRetentionHours ?? "—"} h</span></div><div className="coverrow"><span>Barras de fluxo · retenção</span><span className="mono">{flowQuality?.storedFlowBars ?? 0} · {flowQuality?.aggregateRetentionDays ?? "—"} d</span></div><div className="coverrow"><span>Armazenamento</span><span className="mono">{flowQuality ? `${flowQuality.storage.toUpperCase()} · ${(flowQuality.storageBytes / 1048576).toFixed(1)} MB` : "—"}</span></div><div className="coverrow"><span>Fila descartada</span><span className={`mono ${flowQuality?.queueDropped ? "neg" : "pos"}`}>{flowQuality?.queueDropped ?? 0}</span></div>{flowQuality?.storage === "sqlite" && !flowQuality.storageDurable && <div className="dataerror">SQLite no disco local do serviço: no Render sem volume persistente, o histórico pode sumir em reinícios ou deploys.</div>}{flowQuality?.storage === "postgres" && flowQuality.storageBytes >= 400 * 1024 * 1024 && <div className="dataerror">Banco próximo da cota gratuita de 500 MB. Reduza a retenção em FLOW_RETENTION_HOURS e FLOW_AGG_RETENTION_DAYS.</div>}
             <hr style={{ border: 0, borderTop: "1px solid #202833", margin: "9px 0" }}/>
             <div className="coverrow"><span>Sentimento · Fear & Greed</span><strong className="mono" style={{ color: fear?.value != null ? "#d5c080" : "#8996a5" }}>{fear?.value != null ? `${fear.value} · ${fear.label}` : "Indisponível"}</strong></div>
             <div className="coverrow"><span>Mercado</span><span className="mono">À vista · sem alavancagem</span></div><div className="coverrow"><span>Preço de referência spot</span><span className="mono">{fmtPrice(marketInfo?.price)}</span></div>
