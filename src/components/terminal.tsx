@@ -233,6 +233,32 @@ export default function Terminal() {
   const cvd = useMemo(() => trades.reduce((sum, trade) => sum + (trade.side === "buy" ? 1 : -1) * trade.quantity, 0), [trades]);
   const buyVolume = useMemo(() => trades.filter(t => t.side === "buy").reduce((n,t) => n+t.quantity,0), [trades]);
   const sellVolume = useMemo(() => trades.filter(t => t.side === "sell").reduce((n,t) => n+t.quantity,0), [trades]);
+  const tradeOutliers = useMemo(() => {
+    const notionalsBySource = new Map<string, number[]>();
+    for (const trade of trades) {
+      const source = trade.source ?? "Binance";
+      const values = notionalsBySource.get(source) ?? [];
+      values.push(trade.price * trade.quantity);
+      notionalsBySource.set(source, values);
+    }
+    const medians = new Map<string, number>();
+    for (const [source, values] of notionalsBySource) {
+      if (values.length < 5) continue;
+      const sorted = values.slice().sort((a, b) => a - b);
+      const middle = Math.floor(sorted.length / 2);
+      medians.set(source, sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2);
+    }
+    const outliers = new Map<string, { notional: number; median: number; ratio: number }>();
+    for (const trade of trades) {
+      const source = trade.source ?? "Binance";
+      const median = medians.get(source);
+      const notional = trade.price * trade.quantity;
+      if (median == null || median <= 0) continue;
+      const threshold = Math.max(10_000, median * 5);
+      if (notional >= threshold) outliers.set(`${source}:${trade.id}`, { notional, median, ratio: notional / median });
+    }
+    return outliers;
+  }, [trades]);
   const coverage = Math.min(100, Math.round((trades.length / 24) * 100));
   const directionClass = (value: number | null | undefined) => value != null && value >= 0 ? "pos" : "neg";
 
@@ -340,10 +366,10 @@ export default function Terminal() {
 
       <div className="bottomgrid" id="flow">
         <section className="panel"><div className="panelhead"><span className="paneltitle">Times & trades agregado</span><span className={`badge ${Object.values(tradeSources).filter(status => status === "live").length === 3 ? "good" : ""}`}>{["Binance", "Kraken", "Coinbase"].map(venue => `${venue}: ${(tradeSources[venue] ?? "connecting").toUpperCase()}`).join(" · ")}</span></div>
-          <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. {nameOf(symbol)}</span><span>LADO AGRESSOR</span><span>ORIGEM</span></div>
-            {trades.slice(0,18).map((trade,i)=><div className="taperow" key={`${trade.source}-${trade.id}-${i}`}><span className="mono" style={{ color: "#8290a0" }}>{fmtTime(trade.time)}</span><span className={`mono ${trade.side === "buy" ? "pos" : "neg"}`}>{fmtPrice(trade.price, 2)}</span><span className="mono" style={{ textAlign: "right" }}>{trade.quantity.toFixed(5)}</span><span style={{ textAlign: "right", color: trade.side === "buy" ? "#44d49a" : "#ff667c" }}>{trade.side === "buy" ? "▲ COMPRA" : "▼ VENDA"}</span><span style={{ textAlign: "right", color: "#91a0af" }}>{trade.source ?? "Binance"}</span></div>)}
+          <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. / VALOR</span><span>LADO AGRESSOR</span><span>ORIGEM</span></div>
+            {trades.slice(0,18).map((trade,i)=>{const source=trade.source??"Binance";const id=`${source}:${trade.id}`;const anomaly=tradeOutliers.get(id);const notional=trade.price*trade.quantity;return <div className={`taperow ${anomaly?"trade-outlier":""}`} key={`${id}-${i}`} title={anomaly?`Valor ≈ $${fmtCompact(anomaly.notional)} · ${anomaly.ratio.toFixed(1)}× mediana de ${source} (janela de até 24 trades)`:undefined}><span className="mono" style={{ color: "#8290a0" }}>{fmtTime(trade.time)}</span><span className={`mono ${trade.side === "buy" ? "pos" : "neg"}`}>{fmtPrice(trade.price, 2)}</span><span className="trade-quantity"><strong className="mono">{trade.quantity.toFixed(5)}</strong><small>≈ ${fmtCompact(notional)}</small></span><span style={{ textAlign: "right", color: trade.side === "buy" ? "#44d49a" : "#ff667c" }}>{trade.side === "buy" ? "▲ COMPRA" : "▼ VENDA"}</span><span className="trade-origin"><span>{source}</span>{anomaly&&<b className="trade-anomaly">ALTO · {anomaly.ratio.toFixed(0)}×</b>}</span></div>})}
             {trades.length === 0 && <div className="loading">Aguardando negociações observadas…</div>}
-          </div><div className="disclaimer">A fita ordena execuções observadas e preserva a corretora de origem. USD é tratado como aproximadamente 1 USDT; CVD soma quantidades por ativo base, não volume em cotação.</div>
+          </div><div className="disclaimer">ALTO = notional ≥5× mediana da corretora e ≥US$ 10 mil, usando até 24 trades recentes (mínimo de 5 por corretora). USD ≈ USDT. É um destaque estatístico de execução, não identifica participante ou intenção.</div>
         </section>
 
         <section className="panel" id="data"><div className="panelhead"><span className="paneltitle">Fluxo observado</span><Database size={13} color="#8794a2"/></div>
