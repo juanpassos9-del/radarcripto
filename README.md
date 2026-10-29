@@ -36,6 +36,9 @@ Copie `.env.example` para `.env.local` se precisar trocar a URL do WebSocket. AP
 - Funding, mark/index e open interest de Futures destacados como dados centrais do contrato. Fear & Greed via Alternative.me, com estado indisponível em falhas.
 - Alertas de preço no navegador, armazenados localmente e sem serviço push.
 - Avaliação retrospectiva acessível em `/api/reversal-evaluation`: aplica os parâmetros padrão dos sinais a candles fechados recentes, entra na abertura do candle seguinte e estima resultado após horizonte configurável, descontando taxas e slippage estimados pelo usuário.
+- Scanner Spot para os 25 pares USDT, ordenável por variação, volume cotado em USDT, CVD nocional e ritmo de fluxo de 15 minutos. O fluxo usa apenas aggTrades Binance persistidos; o ritmo fica indisponível até observar três blocos anteriores e parte suficiente do bloco atual.
+- Alertas locais configuráveis para preço, variação de 24h, volume cotado, ritmo de fluxo e CVD nocional. Regras, estado e cooldown de 15 minutos ficam no armazenamento do navegador; as notificações só são verificadas enquanto o terminal está aberto.
+- Painel de contexto com amplitude da watchlist, Fear & Greed da Alternative.me e TVL/oferta circulante de stablecoins agregados pela DefiLlama. Consultas à DefiLlama são armazenadas em cache por uma hora e cada valor expõe fonte e horário.
 - Dashboard responsivo, tema escuro, fuso America/Sao_Paulo e atribuição requerida pela licença de Lightweight Charts.
 
 ## Limites desta versão
@@ -48,6 +51,8 @@ Copie `.env.example` para `.env.local` se precisar trocar a URL do WebSocket. AP
 - Sem `DATABASE_URL`, SQLite mantém os trades enquanto o arquivo existir. Configure `FLOW_DB_PATH` para escolher o caminho e `FLOW_STORAGE_DURABLE=true` somente se estiver em disco persistente. O Render gratuito não preserva esse arquivo entre reinícios/deploys.
 - Para persistir sem custo recorrente, o backend aceita `DATABASE_URL` de um Postgres como o Supabase Free. Crie um projeto, copie no painel Supabase a URL **Session pooler** e cadastre-a como variável secreta `DATABASE_URL` no serviço `nexus-terminal-api` do Render; não coloque a senha no repositório. A API passa a indicar `storage=postgres` e `storageDurable=true`. O plano Supabase Free tem 500 MB e pode pausar projetos após uma semana com baixa atividade; monitore o uso exibido no painel.
 - Não há usuário, login, cobrança, planos ou autorização por assinatura. O dashboard local valida experiência e dados antes da construção dessas partes.
+- Alertas são específicos deste navegador e desta instalação, dependem de a página estar aberta e não sincronizam entre dispositivos. Scanner e histórico de CVD são limitados ao fluxo Binance agregado observado desde o início da coleta; barras ausentes não permitem distinguir minuto sem negócios de falha de coleta. Ritmo relativo exige três blocos anteriores não vazios.
+- TVL e oferta de stablecoins são indicadores on-chain de baixa frequência, atualizados tipicamente por hora pela DefiLlama; não medem liquidez nem fluxo de ordens Spot. Preserve a atribuição ao exibir Fear & Greed (Alternative.me) e DefiLlama.
 - A avaliação retrospectiva é uma estimativa simples sobre OHLCV, não paper trading nem prova de desempenho futuro. Não simula fills intrabar, funding ou execução financeira.
 - REST pública está sujeita a rate limits, disponibilidade regional e alterações da exchange. A aplicação reporta erros e não fabrica dados.
 

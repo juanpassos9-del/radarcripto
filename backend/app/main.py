@@ -50,6 +50,9 @@ class MarketService:
         self.external_trades: dict[str, deque[Trade]] = {}
         self.external_tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
         self.external_symbol_access: dict[str, int] = {}
+        self.context_cache: dict[str, Any] | None = None
+        self.context_cache_expires = 0.0
+        self.context_lock = asyncio.Lock()
         self.gap_recovery_locks = {symbol: asyncio.Lock() for symbol in SYMBOLS}
         self.recovery_tasks: set[asyncio.Task[Any]] = set()
         self.flow_store: FlowStore | None = None
@@ -189,7 +192,58 @@ class MarketService:
         received = int(time.time() * 1000)
         row = await self.request(base, path, {"symbol": symbol})
         event = int(row["closeTime"])
-        return MarketSnapshot(symbol=symbol, price=float(row["lastPrice"]), change24h=float(row["priceChangePercent"]), volume24h=float(row["volume"]), high24h=float(row["highPrice"]), low24h=float(row["lowPrice"]), source=self.market_source(market), eventTime=event, receivedAt=received, latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale")
+        return MarketSnapshot(symbol=symbol, price=float(row["lastPrice"]), change24h=float(row["priceChangePercent"]), volume24h=float(row["volume"]), quoteVolume24h=float(row["quoteVolume"]), high24h=float(row["highPrice"]), low24h=float(row["lowPrice"]), source=self.market_source(market), eventTime=event, receivedAt=received, latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale")
+
+    async def market_context(self) -> dict[str, Any]:
+        now = time.monotonic()
+        if self.context_cache and now < self.context_cache_expires:
+            return self.context_cache
+        async with self.context_lock:
+            now = time.monotonic()
+            if self.context_cache and now < self.context_cache_expires:
+                return self.context_cache
+
+            async def fetch_json(url: str) -> Any:
+                try:
+                    response = await self.client.get(url, timeout=12)
+                    response.raise_for_status()
+                    return response.json()
+                except (httpx.HTTPError, ValueError) as error:
+                    log.warning("market context source unavailable: %s", error)
+                    return None
+
+            fear_data, tvl_data, stablecoin_data = await asyncio.gather(
+                fetch_json("https://api.alternative.me/fng/?limit=2"),
+                fetch_json("https://api.llama.fi/v2/historicalChainTvl"),
+                fetch_json("https://stablecoins.llama.fi/stablecoincharts/all"),
+            )
+            received_at = int(time.time() * 1000)
+
+            fear_rows = fear_data.get("data", []) if isinstance(fear_data, dict) else []
+            fear = None
+            if fear_rows:
+                row = fear_rows[0]
+                fear = {"value": int(row["value"]), "label": str(row["value_classification"]), "timestamp": int(row["timestamp"]) * 1000, "source": "Alternative.me", "status": "live"}
+
+            tvl = None
+            if isinstance(tvl_data, list) and tvl_data:
+                latest = tvl_data[-1]
+                previous = next((item for item in reversed(tvl_data[:-1]) if int(latest["date"]) - int(item["date"]) >= 20 * 3600), None)
+                current_value = float(latest["tvl"])
+                previous_value = float(previous["tvl"]) if previous else None
+                tvl = {"value": current_value, "change24hPct": ((current_value / previous_value) - 1) * 100 if previous_value else None, "timestamp": int(latest["date"]) * 1000, "source": "DefiLlama", "status": "live"}
+
+            stablecoin_supply = None
+            if isinstance(stablecoin_data, list) and stablecoin_data:
+                latest = stablecoin_data[-1]
+                previous = next((item for item in reversed(stablecoin_data[:-1]) if int(latest["date"]) - int(item["date"]) >= 20 * 3600), None)
+                current_value = float(latest.get("totalCirculatingUSD", {}).get("peggedUSD", 0))
+                previous_value = float(previous.get("totalCirculatingUSD", {}).get("peggedUSD", 0)) if previous else None
+                stablecoin_supply = {"value": current_value, "change24hPct": ((current_value / previous_value) - 1) * 100 if previous_value else None, "timestamp": int(latest["date"]) * 1000, "source": "DefiLlama", "status": "live"}
+
+            self.context_cache = {"fearAndGreed": fear, "tvl": tvl, "stablecoinSupply": stablecoin_supply, "receivedAt": received_at}
+            self.context_cache_expires = time.monotonic() + 3600
+            return self.context_cache
 
     @staticmethod
     def market_source(market: str) -> str:
@@ -555,6 +609,51 @@ async def markets(market: str = Query("spot")):
             log.warning("market ticker unavailable", extra={"symbol": SYMBOLS[index], "market": market, "error": str(item)})
             unavailable.append({"symbol": SYMBOLS[index], "reason": str(item) or type(item).__name__})
     return {"markets": [item.model_dump() for item in results if isinstance(item, MarketSnapshot)], "unavailable": unavailable}
+
+@app.get("/api/scanner-flow")
+async def scanner_flow():
+    """Observed Binance notional flow for the 25 supported Spot assets."""
+    store = service.flow_store
+    now_ms = int(time.time() * 1000)
+    bucket_ms = 15 * 60_000
+    current_bucket = (now_ms // bucket_ms) * bucket_ms
+    if store is None:
+        raise HTTPException(503, "Flow storage is not ready")
+    grouped = await asyncio.to_thread(store.scanner_flow, current_bucket - 3 * bucket_ms, now_ms)
+    assets: dict[str, dict[str, Any]] = {}
+    elapsed = max(0, now_ms - current_bucket)
+    for symbol in SYMBOLS:
+        buckets = {int(item["time"]): item for item in grouped.get(symbol, [])}
+        current = buckets.get(current_bucket)
+        current_notional = current["buyNotional"] + current["sellNotional"] if current else None
+        cvd_notional = current["buyNotional"] - current["sellNotional"] if current else None
+        previous = [buckets.get(current_bucket - index * bucket_ms) for index in (1, 2, 3)]
+        relative_flow = None
+        if elapsed >= 120_000 and current_notional is not None and all(item is not None for item in previous):
+            baseline = sum(item["buyNotional"] + item["sellNotional"] for item in previous if item is not None) / 3
+            expected = baseline * min(1.0, elapsed / bucket_ms)
+            if expected > 0:
+                relative_flow = current_notional / expected
+        latest_bucket = max(buckets, default=None)
+        assets[symbol] = {
+            "symbol": symbol,
+            "notional15m": current_notional,
+            "cvdNotional15m": cvd_notional,
+            "relativeFlow15m": relative_flow,
+            "observedBuckets": len(buckets),
+            "lastObservedBucket": latest_bucket,
+        }
+    return {
+        "assets": assets,
+        "bucketStartedAt": current_bucket,
+        "source": "Binance Spot aggTrades persistidos",
+        "receivedAt": now_ms,
+        "relativeFlowMethod": "Fluxo nocional do bloco UTC de 15m em andamento, ajustado pelo tempo decorrido, versus média dos 3 blocos anteriores. Requer 3 blocos anteriores observados e pelo menos 2 minutos do bloco atual.",
+    }
+
+@app.get("/api/context")
+async def market_context():
+    return await service.market_context()
 
 @app.get("/api/candles")
 async def candles(symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"), limit: int = Query(240, ge=10, le=500)):

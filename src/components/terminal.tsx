@@ -3,7 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, CircleHelp, Crosshair, Database, Maximize2, Radio, Search, Settings2, Wifi } from "lucide-react";
 import MarketChart from "@/components/market-chart";
 import FlowHistory from "@/components/flow-history";
-import { fmtCompact, fmtPrice, fmtTime, getJson, marketDataLabel, type BookData, type Candle, type ChartOverlays, type MarketSnapshot, type ReversalSignalData, type Trade, type VolatilityZones } from "@/lib/market";
+import MarketScanner from "@/components/market-scanner";
+import MarketAlerts from "@/components/market-alerts";
+import MarketContext from "@/components/market-context";
+import { fmtCompact, fmtPrice, fmtTime, getJson, marketDataLabel, type BookData, type Candle, type ChartOverlays, type MarketSnapshot, type ReversalSignalData, type ScannerFlowSnapshot, type Trade, type VolatilityZones } from "@/lib/market";
 
 const assets = [
   "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
@@ -22,6 +25,7 @@ export default function Terminal() {
   const selectedKeyRef = useRef("");
   selectedKeyRef.current = `${symbol}|${interval}|${market}`;
   const [markets, setMarkets] = useState<Record<string, MarketSnapshot>>({});
+  const [scannerFlow, setScannerFlow] = useState<ScannerFlowSnapshot | null>(null);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [book, setBook] = useState<BookData | null>(null);
   const [bookThreshold, setBookThreshold] = useState(10_000);
@@ -54,7 +58,6 @@ export default function Terminal() {
   const [clock, setClock] = useState<number | null>(null);
   const [apiState, setApiState] = useState<"checking" | "connected" | "error">("checking");
   const [apiMessage, setApiMessage] = useState("");
-  const [alertsOn, setAlertsOn] = useState(false);
 
   useEffect(() => {
     const updateClock = () => setClock(Date.now());
@@ -137,6 +140,16 @@ export default function Terminal() {
     const id = window.setInterval(loadMarkets, 15000);
     return () => window.clearInterval(id);
   }, [loadMarkets]);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => getJson<ScannerFlowSnapshot>("/api/scanner-flow")
+      .then(data => { if (active) setScannerFlow(data); })
+      .catch(() => { if (active) setScannerFlow(null); });
+    void refresh();
+    const timer = window.setInterval(refresh, 15_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -262,41 +275,10 @@ export default function Terminal() {
   const coverage = Math.min(100, Math.round((trades.length / 24) * 100));
   const directionClass = (value: number | null | undefined) => value != null && value >= 0 ? "pos" : "neg";
 
-  const createPriceAlert = async () => {
-    if (current?.price == null) return;
-    if ("Notification" in window && Notification.permission === "default") {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") return;
-    }
-    const thresholdText = window.prompt(`Preço de ${nameOf(symbol)} para alertar (ex.: ${current.price * 1.01})`);
-    if (!thresholdText) return;
-    const threshold = Number(thresholdText);
-    if (!Number.isFinite(threshold) || threshold <= 0) { window.alert("Informe um preço válido."); return; }
-    const key = `nexus-alert-${market}-${symbol}`;
-    window.localStorage.setItem(key, JSON.stringify({ symbol, market, threshold, createdAt: Date.now() }));
-    setAlertsOn(true);
-    window.alert(`Alerta local criado para ${symbol} em ${fmtPrice(threshold)}.`);
-  };
-
-  useEffect(() => {
-    if (!current?.price || !alertsOn || typeof window === "undefined") return;
-    for (const asset of assets) {
-      const m = markets[asset]; if (!m?.price) continue;
-      const key = `nexus-alert-${market}-${asset}`; const raw = window.localStorage.getItem(key); if (!raw) continue;
-      try {
-        const alert = JSON.parse(raw) as { threshold: number };
-        if (asset === symbol && m.price >= alert.threshold) {
-          if ("Notification" in window && Notification.permission === "granted") new Notification(`NEXUS Spot · ${asset}`, { body: `Preço ${fmtPrice(m.price)} atingiu ${fmtPrice(alert.threshold)}.` });
-          window.localStorage.removeItem(key);
-        }
-      } catch { window.localStorage.removeItem(key); }
-    }
-  }, [markets, alertsOn, market, symbol, current?.price]);
-
   return <main className="shell">
     <header className="topbar">
       <div className="brand"><div className="logo">N</div><div><strong>NEXUS</strong><small>MARKET FLOW TERMINAL</small></div></div>
-      <nav className="nav"><button className="active">Terminal</button><button onClick={() => document.getElementById("flow")?.scrollIntoView({ behavior: "smooth" })}>Fluxo</button><button onClick={() => document.getElementById("data")?.scrollIntoView({ behavior: "smooth" })}>Dados</button></nav>
+      <nav className="nav"><button className="active" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>Terminal</button><button onClick={() => document.getElementById("scanner")?.scrollIntoView({ behavior: "smooth" })}>Scanner</button><button onClick={() => document.getElementById("alerts")?.scrollIntoView({ behavior: "smooth" })}>Alertas</button><button onClick={() => document.getElementById("context")?.scrollIntoView({ behavior: "smooth" })}>Contexto</button><button onClick={() => document.getElementById("flow")?.scrollIntoView({ behavior: "smooth" })}>Fluxo</button><button onClick={() => document.getElementById("data")?.scrollIntoView({ behavior: "smooth" })}>Dados</button></nav>
       <div className="topright"><div className="live"><span className={`dot ${apiState === "error" ? "neg" : ""}`} />{apiState === "connected" ? "STREAM AO VIVO" : apiState === "error" ? "API OFFLINE" : "CONECTANDO"}</div><span className="exchange">{marketDataLabel}</span><button className="iconbtn" title="Pesquisar ativo"><Search size={16}/></button><button className="iconbtn" title="Configurações"><Settings2 size={16}/></button></div>
     </header>
 
@@ -364,6 +346,11 @@ export default function Terminal() {
         </aside>
       </div>
 
+      <div className="scanner-insights">
+        <MarketScanner symbols={assets} markets={markets} flow={scannerFlow} selectedSymbol={symbol} onSelect={setSymbol}/>
+        <div className="insights-grid"><MarketAlerts symbols={assets} markets={markets} flow={scannerFlow}/><MarketContext markets={markets}/></div>
+      </div>
+
       <div className="bottomgrid" id="flow">
         <section className="panel"><div className="panelhead"><span className="paneltitle">Times & trades agregado</span><span className={`badge ${Object.values(tradeSources).filter(status => status === "live").length === 3 ? "good" : ""}`}>{["Binance", "Kraken", "Coinbase"].map(venue => `${venue}: ${(tradeSources[venue] ?? "connecting").toUpperCase()}`).join(" · ")}</span></div>
           <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. / VALOR</span><span>LADO AGRESSOR</span><span>ORIGEM</span></div>
@@ -383,8 +370,7 @@ export default function Terminal() {
         </section>
       </div>
 
-      <div className="statusbar"><span><Wifi size={11} color={apiState === "connected" ? "#44d49a" : "#f0bd61"}/> {apiState === "connected" ? "API conectada" : apiState === "error" ? "API indisponível" : "Conectando API"}</span><span>{marketDataLabel}</span><span>Snapshot {fmtTime(current?.receivedAt)}</span><span>Latência {current?.latencyMs != null ? `${current.latencyMs} ms` : "—"}</span>{apiMessage && <span className="neg" title={apiMessage}>{apiMessage.slice(0, 85)}</span>}<button className={`alertbutton ${alertsOn ? "enabled" : ""}`} onClick={async () => { if (!alertsOn && "Notification" in window) { const permission = await Notification.requestPermission(); if (permission !== "granted") return; } setAlertsOn(v => !v); }}><Bell size={11}/>{alertsOn ? "Alertas ativos" : "Ativar alertas"}</button><span className="right">SOMENTE ANÁLISE · NÃO ENVIA ORDENS</span><CircleHelp size={12}/></div>
-      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}><button className="tinybtn" onClick={createPriceAlert}><Bell size={11} style={{ display: "inline", verticalAlign: "-2px" }}/> &nbsp;Criar alerta de preço · {fmtPrice(current?.price)}</button></div>
+      <div className="statusbar"><span><Wifi size={11} color={apiState === "connected" ? "#44d49a" : "#f0bd61"}/> {apiState === "connected" ? "API conectada" : apiState === "error" ? "API indisponível" : "Conectando API"}</span><span>{marketDataLabel}</span><span>Snapshot {fmtTime(current?.receivedAt)}</span><span>Latência {current?.latencyMs != null ? `${current.latencyMs} ms` : "—"}</span>{apiMessage && <span className="neg" title={apiMessage}>{apiMessage.slice(0, 85)}</span>}<button className="alertbutton" onClick={() => document.getElementById("alerts")?.scrollIntoView({ behavior: "smooth" })}><Bell size={11}/>Configurar alertas</button><span className="right">SOMENTE ANÁLISE · NÃO ENVIA ORDENS</span><CircleHelp size={12}/></div>
     </div>
   </main>;
 }

@@ -334,6 +334,38 @@ class FlowStore:
                 current["close"] = float(row[9])
         return list(grouped.values())
 
+    def scanner_flow(self, start_ms: int, end_ms: int) -> dict[str, list[dict[str, Any]]]:
+        """Return observed Binance flow grouped into 15-minute buckets for all assets."""
+        bucket_ms = 15 * 60_000
+        if self.storage == "postgres":
+            with self.db_lock, self.pg_connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT symbol, (bucket_time_ms / %s) * %s AS bucket_time_ms, "
+                    "SUM(trade_count), SUM(buy_notional), SUM(sell_notional) "
+                    "FROM flow_minute_bars WHERE bucket_time_ms >= %s AND bucket_time_ms < %s "
+                    "GROUP BY 1, 2 ORDER BY 1, 2",
+                    (bucket_ms, bucket_ms, start_ms, end_ms),
+                )
+                rows = cursor.fetchall()
+        else:
+            if not self.path.exists():
+                return {}
+            with sqlite3.connect(self.path, timeout=5) as connection:
+                rows = connection.execute(
+                    "SELECT symbol, (bucket_time_ms / ?) * ? AS bucket_time_ms, "
+                    "SUM(trade_count), SUM(buy_notional), SUM(sell_notional) "
+                    "FROM flow_minute_bars WHERE bucket_time_ms >= ? AND bucket_time_ms < ? "
+                    "GROUP BY 1, 2 ORDER BY 1, 2",
+                    (bucket_ms, bucket_ms, start_ms, end_ms),
+                ).fetchall()
+        result: dict[str, list[dict[str, Any]]] = {}
+        for symbol, bucket, count, buy, sell in rows:
+            result.setdefault(str(symbol), []).append({
+                "time": int(bucket), "tradeCount": int(count),
+                "buyNotional": float(buy), "sellNotional": float(sell),
+            })
+        return result
+
     def close(self) -> None:
         if self.pg_connection is not None:
             with self.db_lock:

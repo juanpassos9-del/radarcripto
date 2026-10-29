@@ -8,6 +8,7 @@ class MarketSnapshot(BaseModel):
     price: float | None
     change24h: float | None
     volume24h: float | None
+    quoteVolume24h: float | None = None
     high24h: float | None
     low24h: float | None
     source: str

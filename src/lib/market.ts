@@ -10,9 +10,13 @@ export type Trade = { id: number | string; time: number; price: number; quantity
 export type Level = { price: number; quantity: number; total: number; sources?: string[] };
 export type MarketSnapshot = {
   symbol: string; price: number | null; change24h: number | null; volume24h: number | null;
-  high24h: number | null; low24h: number | null; source: string; eventTime: number | null;
+  quoteVolume24h?: number | null; high24h: number | null; low24h: number | null; source: string; eventTime: number | null;
   receivedAt: number; latencyMs: number | null; status: "live" | "stale" | "unavailable";
 };
+export type ScannerFlowAsset = { symbol: string; notional15m: number | null; cvdNotional15m: number | null; relativeFlow15m: number | null; observedBuckets: number; lastObservedBucket: number | null };
+export type ScannerFlowSnapshot = { assets: Record<string, ScannerFlowAsset>; bucketStartedAt: number; source: string; receivedAt: number; relativeFlowMethod: string };
+export type ContextMetric = { value: number; change24hPct: number | null; timestamp: number; source: string; status: string } | null;
+export type MarketContextData = { fearAndGreed: ({ value: number; label: string; timestamp: number; source: string; status: string } | null); tvl: ContextMetric; stablecoinSupply: ContextMetric; receivedAt: number };
 export type BookData = { bids: Level[]; asks: Level[]; spread: number; imbalance: number; eventTime: number | null; receivedAt: number; status: string; source?: string; sources?: Record<string, string> };
 export type ReversalSignal = {
   time: number; symbol: string; interval: string; direction: "BUY" | "SELL"; price: number; bandPrice: number;
