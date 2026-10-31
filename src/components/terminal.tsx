@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bell, CircleHelp, Crosshair, Database, Maximize2, Radio, Search, Settings2, Wifi } from "lucide-react";
+import { Bell, CircleHelp, Crosshair, Database, LogOut, Maximize2, Radio, Search, Settings2, Wifi } from "lucide-react";
 import MarketChart from "@/components/market-chart";
 import FlowHistory from "@/components/flow-history";
 import MarketScanner from "@/components/market-scanner";
@@ -59,6 +59,11 @@ export default function Terminal() {
   const [clock, setClock] = useState<number | null>(null);
   const [apiState, setApiState] = useState<"checking" | "connected" | "error">("checking");
   const [apiMessage, setApiMessage] = useState("");
+
+  const logout = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.replace("/login");
+  };
 
   useEffect(() => {
     const updateClock = () => setClock(Date.now());
@@ -303,7 +308,7 @@ export default function Terminal() {
     <header className="topbar">
       <div className="brand"><div className="logo">N</div><div><strong>NEXUS</strong><small>MARKET FLOW TERMINAL</small></div></div>
       <nav className="nav"><button className="active" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>Terminal</button><button onClick={() => document.getElementById("scanner")?.scrollIntoView({ behavior: "smooth" })}>Scanner</button><button onClick={() => document.getElementById("alerts")?.scrollIntoView({ behavior: "smooth" })}>Alertas</button><button onClick={() => document.getElementById("context")?.scrollIntoView({ behavior: "smooth" })}>Contexto</button><button onClick={() => document.getElementById("flow")?.scrollIntoView({ behavior: "smooth" })}>Fluxo</button><button onClick={() => document.getElementById("data")?.scrollIntoView({ behavior: "smooth" })}>Dados</button></nav>
-      <div className="topright"><div className="live"><span className={`dot ${apiState === "error" ? "neg" : ""}`} />{apiState === "connected" ? "STREAM AO VIVO" : apiState === "error" ? "API OFFLINE" : "CONECTANDO"}</div><span className="exchange">{marketDataLabel}</span><button className="iconbtn" title="Pesquisar ativo"><Search size={16}/></button><button className="iconbtn" title="Configurações"><Settings2 size={16}/></button></div>
+      <div className="topright"><div className="live"><span className={`dot ${apiState === "error" ? "neg" : ""}`} />{apiState === "connected" ? "STREAM AO VIVO" : apiState === "error" ? "API OFFLINE" : "CONECTANDO"}</div><span className="exchange">{marketDataLabel}</span><button className="iconbtn" title="Pesquisar ativo"><Search size={16}/></button><button className="iconbtn" title="Configurações"><Settings2 size={16}/></button><button className="iconbtn" title="Sair" aria-label="Sair" onClick={logout}><LogOut size={16}/></button></div>
     </header>
 
     <div className="wrap">

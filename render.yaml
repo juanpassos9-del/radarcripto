@@ -19,6 +19,8 @@ services:
           envVarKey: RENDER_EXTERNAL_URL
       - key: NEXT_PUBLIC_MARKET_MODE
         value: spot
+      - key: AUTH_SECRET
+        generateValue: true
 
   - type: web
     name: nexus-terminal-api

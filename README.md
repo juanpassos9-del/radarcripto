@@ -58,6 +58,10 @@ Copie `.env.example` para `.env.local` se precisar trocar a URL do WebSocket. AP
 
 ## Publicação e assinaturas
 
+### Acesso privado por e-mail e senha
+
+O frontend oferece login sem cadastro público. Para liberar uma conta, defina `AUTH_USERS` no serviço `nexus-terminal-web` do Render como uma lista JSON, por exemplo `[ {"email":"pessoa@exemplo.com","password":"senha-forte-com-12-caracteres"} ]`. Cada senha precisa ter pelo menos 12 caracteres. O usuário e a senha são comparados no servidor; a sessão é assinada com `AUTH_SECRET` e armazenada em cookie HTTP-only por sete dias. O Blueprint gera `AUTH_SECRET` automaticamente. Para cadastrar ou remover usuários, atualize a variável `AUTH_USERS` e salve no Render. Não coloque credenciais reais no repositório. Este primeiro acesso privado usa credenciais definidas pelo administrador, sem recuperação de senha e sem gerenciamento de usuários pela interface.
+
 Trate o app atual como versão de validação local. Antes de disponibilizar dados em serviço pago, confirme por escrito os direitos de uso e redistribuição comercial dos endpoints, streams e datasets de cada exchange; dados acessíveis publicamente não significam automaticamente licença para redistribuição. Consulte também retenção, privacidade, termos de uso e obrigações locais. O repositório não oferece aconselhamento jurídico.
 
 ### Protótipo gratuito no Render
