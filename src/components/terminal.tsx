@@ -125,7 +125,7 @@ export default function Terminal() {
       })
       .catch(() => undefined);
     void refresh();
-    const timer = window.setInterval(refresh, 5000);
+    const timer = window.setInterval(refresh, 15_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [symbol, market]);
 
@@ -162,7 +162,7 @@ export default function Terminal() {
   useEffect(() => {
     setBreakoutData(null);
     void loadBreakoutSignals();
-    const timer = window.setInterval(() => void loadBreakoutSignals(), 30_000);
+    const timer = window.setInterval(() => void loadBreakoutSignals(), 60_000);
     return () => window.clearInterval(timer);
   }, [loadBreakoutSignals]);
 
@@ -194,7 +194,7 @@ export default function Terminal() {
   useEffect(() => {
     loadMarkets();
     getJson<{ value: number | null; label: string; status: string; source: string }>("/api/sentiment").then(setFear).catch(() => setFear({ value: null, label: "Indisponível", status: "unavailable", source: "Alternative.me" }));
-    const id = window.setInterval(loadMarkets, 15000);
+    const id = window.setInterval(loadMarkets, 30_000);
     return () => window.clearInterval(id);
   }, [loadMarkets]);
 
@@ -204,7 +204,7 @@ export default function Terminal() {
       .then(data => { if (active) setScannerFlow(data); })
       .catch(() => { if (active) setScannerFlow(null); });
     void refresh();
-    const timer = window.setInterval(refresh, 15_000);
+    const timer = window.setInterval(refresh, 30_000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
 
@@ -212,7 +212,7 @@ export default function Terminal() {
     let active = true;
     const refresh = () => getJson<NonNullable<typeof flowQuality>>(`/api/flow-quality?symbol=${symbol}`).then(data => { if (active) setFlowQuality(data); }).catch(() => { if (active) setFlowQuality(null); });
     void refresh();
-    const timer = window.setInterval(refresh, 5000);
+    const timer = window.setInterval(refresh, 15_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [symbol]);
 
@@ -241,7 +241,7 @@ export default function Terminal() {
           if (!active || polling) return;
           polling = true;
           void loadAsset().finally(() => { polling = false; });
-        }, 3000);
+        }, 15_000);
         return;
       }
       socket.onmessage = (event) => {
@@ -275,7 +275,7 @@ export default function Terminal() {
           if (!active || polling) return;
           polling = true;
           void loadAsset().finally(() => { polling = false; });
-        }, 3000);
+        }, 15_000);
       };
     };
     connect();
@@ -285,7 +285,7 @@ export default function Terminal() {
   useEffect(() => {
     let live = true;
     const refresh = () => getJson<typeof marketInfo>(`/api/market-info?symbol=${symbol}&market=${market}`).then(data => { if (live) setMarketInfo(data); }).catch(() => { if (live) setMarketInfo(null); });
-    refresh(); const timer = window.setInterval(refresh, 10000);
+    refresh(); const timer = window.setInterval(refresh, 30_000);
     return () => { live = false; window.clearInterval(timer); };
   }, [symbol, market]);
 
