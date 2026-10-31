@@ -1171,6 +1171,7 @@ async def reversal_evaluation(
 async def breakout_signals(
     symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"),
     compression_percentile: float = Query(20, ge=1, le=50), volume_multiple: float = Query(1.5, ge=1, le=10),
+    breakout_atr_multiple: float = Query(0.15, ge=0, le=2),
     range_lookback: int = Query(20, ge=5, le=100), volume_lookback: int = Query(20, ge=5, le=100),
     cooldown: int = Query(10, ge=0, le=500), buy_enabled: bool = Query(True), sell_enabled: bool = Query(True),
 ):
@@ -1188,7 +1189,7 @@ async def breakout_signals(
         return build_breakout_signals(
             symbol, interval, candles, compression_percentile=compression_percentile,
             range_lookback=range_lookback, volume_lookback=volume_lookback,
-            volume_multiple=volume_multiple, cooldown=cooldown,
+            volume_multiple=volume_multiple, breakout_atr_multiple=breakout_atr_multiple, cooldown=cooldown,
             buy_enabled=buy_enabled, sell_enabled=sell_enabled,
         )
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:

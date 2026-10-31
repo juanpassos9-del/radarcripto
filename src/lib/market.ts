@@ -31,13 +31,14 @@ export type ReversalSignalData = {
 };
 export type BreakoutSignal = {
   time: number; symbol: string; interval: string; direction: "BUY" | "SELL"; price: number;
-  rangeHigh: number; rangeLow: number; volumeRatio: number; compressionPercentile: number;
+  rangeHigh: number; rangeLow: number; atr: number; atrPeriod: number; atrMultiple: number; distanceAtr: number;
+  volumeRatio: number; volumeMedian: number; compressionPercentile: number;
   qualified: boolean; compressedAt: number; reasons: string[];
 };
 export type BreakoutSignalData = {
   symbol: string; interval: string; status: string; requiredCandles?: number; observedCandles?: number;
   signals: BreakoutSignal[]; latest: BreakoutSignal | null; lastCandidate?: BreakoutSignal | null;
-  settings: { bbPeriod: number; compressionLookback: number; compressionPercentile: number; compressionRecentBars: number; rangeLookback: number; volumeLookback: number; volumeMultiple: number; cooldown: number; buyEnabled: boolean; sellEnabled: boolean };
+  settings: { bbPeriod: number; compressionLookback: number; compressionPercentile: number; compressionRecentBars: number; rangeLookback: number; volumeLookback: number; volumeMultiple: number; breakoutAtrMultiple: number; atrPeriod: number; cooldown: number; buyEnabled: boolean; sellEnabled: boolean };
 };
 export type VolatilityZones = {
   symbol: string; status: string; source?: string; reference?: number; referenceMode?: string; asOf?: number; receivedAt?: number; observations?: number; required?: number;

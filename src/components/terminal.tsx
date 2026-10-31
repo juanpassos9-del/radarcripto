@@ -41,6 +41,7 @@ export default function Terminal() {
   const [breakoutSellEnabled, setBreakoutSellEnabled] = useState(true);
   const [breakoutPercentile, setBreakoutPercentile] = useState(20);
   const [breakoutVolumeMultiple, setBreakoutVolumeMultiple] = useState(1.5);
+  const [breakoutAtrMultiple, setBreakoutAtrMultiple] = useState(0.15);
   const breakoutRequestRef = useRef(0);
   const [reversalError, setReversalError] = useState(false);
   const [buyEnabled, setBuyEnabled] = useState(true);
@@ -149,7 +150,8 @@ export default function Terminal() {
     const requestId = ++breakoutRequestRef.current;
     const params = new URLSearchParams({
       symbol, interval, market, compression_percentile: String(breakoutPercentile),
-      volume_multiple: String(breakoutVolumeMultiple), buy_enabled: String(breakoutBuyEnabled), sell_enabled: String(breakoutSellEnabled),
+      volume_multiple: String(breakoutVolumeMultiple), breakout_atr_multiple: String(breakoutAtrMultiple),
+      buy_enabled: String(breakoutBuyEnabled), sell_enabled: String(breakoutSellEnabled),
     });
     try {
       const data = await getJson<BreakoutSignalData>(`/api/breakout-signals?${params}`);
@@ -157,7 +159,7 @@ export default function Terminal() {
     } catch {
       if (requestId === breakoutRequestRef.current) { setBreakoutData(null); setBreakoutError(true); }
     }
-  }, [symbol, interval, market, breakoutPercentile, breakoutVolumeMultiple, breakoutBuyEnabled, breakoutSellEnabled]);
+  }, [symbol, interval, market, breakoutPercentile, breakoutVolumeMultiple, breakoutAtrMultiple, breakoutBuyEnabled, breakoutSellEnabled]);
 
   useEffect(() => {
     setBreakoutData(null);
@@ -449,10 +451,10 @@ export default function Terminal() {
 
           <section className="panel" id="breakout-signals"><div className="panelhead"><span className="paneltitle">Rompimento · {nameOf(symbol)}</span><span className={`badge ${latestBreakout?.direction === "BUY" ? "good" : latestBreakout?.direction === "SELL" ? "neg" : ""}`}>{breakoutError ? "INDISPONÍVEL" : latestBreakout ? `ÚLTIMO ${latestBreakout.direction}` : "SEM SINAL"}</span></div>
             <div className="reversal-body">
-              {breakoutError ? <div className="loading">Estratégia de rompimento indisponível no momento.</div> : breakoutData?.status === "insufficient_history" ? <div className="loading compact">Histórico insuficiente: {breakoutData.observedCandles ?? 0}/{breakoutData.requiredCandles ?? 0} candles necessários.</div> : latestBreakout ? <><div className={`reversal-score ${latestBreakout.direction === "BUY" ? "pos" : "neg"}`}><strong>{latestBreakout.direction === "BUY" ? "ROMPIMENTO ↑" : "ROMPIMENTO ↓"}</strong><span>VOLUME {latestBreakout.volumeRatio.toFixed(2)}×</span></div><div className="reversal-description">Fechamento {fmtPrice(latestBreakout.price)} · faixa {fmtPrice(latestBreakout.rangeLow)}—{fmtPrice(latestBreakout.rangeHigh)}</div><div className="reversal-description">Compressão confirmada · candle {fmtTime(latestBreakout.time * 1000)}</div></> : <div className="loading compact">Aguardando compressão recente, fechamento além da faixa e volume confirmado.</div>}
+              {breakoutError ? <div className="loading">Estratégia de rompimento indisponível no momento.</div> : breakoutData?.status === "insufficient_history" ? <div className="loading compact">Histórico insuficiente: {breakoutData.observedCandles ?? 0}/{breakoutData.requiredCandles ?? 0} candles necessários.</div> : latestBreakout ? <><div className={`reversal-score ${latestBreakout.direction === "BUY" ? "pos" : "neg"}`}><strong>{latestBreakout.direction === "BUY" ? "ROMPIMENTO ↑" : "ROMPIMENTO ↓"}</strong><span>VOLUME {latestBreakout.volumeRatio.toFixed(2)}× MEDIANA</span></div><div className="reversal-description">Fechamento {fmtPrice(latestBreakout.price)} · faixa {fmtPrice(latestBreakout.rangeLow)}—{fmtPrice(latestBreakout.rangeHigh)}</div><div className="reversal-description">Distância {latestBreakout.distanceAtr.toFixed(2)} ATR · ATR(14) {fmtPrice(latestBreakout.atr)}</div><div className="reversal-description">Compressão confirmada · candle {fmtTime(latestBreakout.time * 1000)}</div></> : <div className="loading compact">Aguardando compressão recente, rompimento com força e volume confirmado.</div>}
               <div className="signal-toggles"><button className={`signal-toggle buy ${breakoutBuyEnabled ? "active" : ""}`} onClick={() => setBreakoutBuyEnabled(value => !value)}>BUY</button><button className={`signal-toggle sell ${breakoutSellEnabled ? "active" : ""}`} onClick={() => setBreakoutSellEnabled(value => !value)}>SELL</button></div>
-              <div className="signal-config"><label>Compressão · percentil<input type="number" min="1" max="50" step="1" value={breakoutPercentile} onChange={event => setBreakoutPercentile(Math.min(50, Math.max(1, Number(event.target.value) || 20)))}/></label><label>Volume mínimo · × média<input type="number" min="1" max="10" step="0.1" value={breakoutVolumeMultiple} onChange={event => setBreakoutVolumeMultiple(Math.min(10, Math.max(1, Number(event.target.value) || 1.5)))}/></label></div>
-              <div className="reversal-foot">BB(20) comprimida no percentil {breakoutPercentile} dos últimos 100 candles · rompimento da faixa de 20 candles · volume ≥{breakoutVolumeMultiple.toFixed(1)}× média dos 20 anteriores · cooldown 10 candles. Regra independente da reversão; análise spot, sem ordens.</div>
+              <div className="signal-config"><label>Compressão · percentil<input type="number" min="1" max="50" step="1" value={breakoutPercentile} onChange={event => setBreakoutPercentile(Math.min(50, Math.max(1, Number(event.target.value) || 20)))}/></label><label>Volume mínimo · × mediana<input type="number" min="1" max="10" step="0.1" value={breakoutVolumeMultiple} onChange={event => setBreakoutVolumeMultiple(Math.min(10, Math.max(1, Number(event.target.value) || 1.5)))}/></label><label>Margem além da faixa · ATR<input type="number" min="0" max="2" step="0.05" value={breakoutAtrMultiple} onChange={event => setBreakoutAtrMultiple(Math.min(2, Math.max(0, Number(event.target.value) || 0)))}/></label></div>
+              <div className="reversal-foot">BB(20) comprimida no percentil {breakoutPercentile} dos últimos 100 candles · fechamento além da faixa de 20 candles por ≥{breakoutAtrMultiple.toFixed(2)} ATR(14) · volume ≥{breakoutVolumeMultiple.toFixed(1)}× mediana dos 20 anteriores · cooldown 10 candles. Regra independente da reversão; análise spot, sem ordens.</div>
             </div>
           </section>
 
