@@ -59,6 +59,7 @@ export default function Terminal() {
   const [clock, setClock] = useState<number | null>(null);
   const [apiState, setApiState] = useState<"checking" | "connected" | "error">("checking");
   const [apiMessage, setApiMessage] = useState("");
+  const [betaLimitMessage, setBetaLimitMessage] = useState("");
 
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -234,9 +235,13 @@ export default function Terminal() {
           }
         } catch { /* invalid event is ignored; REST refresh continues */ }
       };
-      socket.onopen = () => { if (poll) { window.clearInterval(poll); poll = null; } };
+      socket.onopen = () => { setBetaLimitMessage(""); if (poll) { window.clearInterval(poll); poll = null; } };
       socket.onerror = () => socket?.close();
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (event.code === 1013) {
+          setBetaLimitMessage("Limite de sessões ao vivo do beta atingido. Tente novamente mais tarde.");
+          return;
+        }
         if (!active || poll) return;
         poll = window.setInterval(() => {
           if (!active || polling) return;
@@ -417,7 +422,7 @@ export default function Terminal() {
         <div className="insights-grid"><MarketAlerts symbols={assets} markets={markets} flow={scannerFlow}/><MarketContext markets={markets}/></div>
       </div>
 
-      <div className="statusbar"><span><Wifi size={11} color={apiState === "connected" ? "#44d49a" : "#f0bd61"}/> {apiState === "connected" ? "API conectada" : apiState === "error" ? "API indisponível" : "Conectando API"}</span><span>{marketDataLabel}</span><span>Snapshot {fmtTime(current?.receivedAt)}</span><span>Latência {current?.latencyMs != null ? `${current.latencyMs} ms` : "—"}</span>{apiMessage && <span className="neg" title={apiMessage}>{apiMessage.slice(0, 85)}</span>}<button className="alertbutton" onClick={() => document.getElementById("alerts")?.scrollIntoView({ behavior: "smooth" })}><Bell size={11}/>Configurar alertas</button><span className="right">SOMENTE ANÁLISE · NÃO ENVIA ORDENS</span><CircleHelp size={12}/></div>
+      <div className="statusbar"><span><Wifi size={11} color={apiState === "connected" ? "#44d49a" : "#f0bd61"}/> {apiState === "connected" ? "API conectada" : apiState === "error" ? "API indisponível" : "Conectando API"}</span><span>{marketDataLabel}</span><span>Snapshot {fmtTime(current?.receivedAt)}</span><span>Latência {current?.latencyMs != null ? `${current.latencyMs} ms` : "—"}</span>{(betaLimitMessage || apiMessage) && <span className="neg" title={betaLimitMessage || apiMessage}>{(betaLimitMessage || apiMessage).slice(0, 85)}</span>}<button className="alertbutton" onClick={() => document.getElementById("alerts")?.scrollIntoView({ behavior: "smooth" })}><Bell size={11}/>Configurar alertas</button><span className="right">SOMENTE ANÁLISE · NÃO ENVIA ORDENS</span><CircleHelp size={12}/></div>
     </div>
   </main>;
 }

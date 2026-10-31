@@ -38,6 +38,14 @@ SYMBOLS = [
 ]
 INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"}
 
+def positive_int_setting(name: str, default: int, maximum: int) -> int:
+    try:
+        return max(1, min(maximum, int(os.getenv(name, str(default)))))
+    except ValueError:
+        return default
+
+api_request_windows: dict[str, deque[float]] = {}
+
 class MarketService:
     def __init__(self) -> None:
         self.client = httpx.AsyncClient(headers={"User-Agent": "NexusCryptoTerminal/0.1"}, timeout=12)
@@ -60,6 +68,8 @@ class MarketService:
         self.gap_recovery_locks = {symbol: asyncio.Lock() for symbol in SYMBOLS}
         self.recovery_tasks: set[asyncio.Task[Any]] = set()
         self.flow_store: FlowStore | None = None
+        self.active_market_sessions = 0
+        self.market_sessions_lock = asyncio.Lock()
         self.flow_quality: dict[str, dict[str, Any]] = {
             symbol: {"status": "starting", "connected": False, "sessionStartedAt": int(time.time() * 1000), "connectedAt": None, "lastEventTime": None, "lastReceivedAt": None, "lastLatencyMs": None, "events": 0, "reconnects": 0, "possibleIdGaps": 0, "backfillRowsFetched": 0, "backfillRowsQueued": 0, "backfillSkippedIds": 0, "backfillFailures": 0, "lastBackfillAt": None, "lastTradeId": None, "lastDisconnectAt": None}
             for symbol in SYMBOLS
@@ -67,6 +77,19 @@ class MarketService:
 
     async def close(self) -> None:
         await self.client.aclose()
+
+    async def try_open_market_session(self) -> tuple[bool, int]:
+        async with self.market_sessions_lock:
+            limit = positive_int_setting("BETA_MAX_CONCURRENT_SESSIONS", 10, 100)
+            if self.active_market_sessions >= limit:
+                return False, self.active_market_sessions
+            self.active_market_sessions += 1
+            return True, self.active_market_sessions
+
+    async def close_market_session(self) -> int:
+        async with self.market_sessions_lock:
+            self.active_market_sessions = max(0, self.active_market_sessions - 1)
+            return self.active_market_sessions
 
     async def collect_all_trades(self) -> None:
         streams = [f"{symbol.lower()}@aggTrade" for symbol in SYMBOLS]
@@ -647,17 +670,29 @@ async def lifespan(_: FastAPI):
     await service.close()
 
 app = FastAPI(title="NEXUS Market API", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","), allow_credentials=False, allow_methods=["GET"], allow_headers=["*"])
 
-def verify_market_token(token: str, expected_use: str) -> bool:
+def decode_market_token(token: str, expected_use: str) -> dict[str, Any] | None:
     secret = os.getenv("NEXUS_MARKET_TOKEN_SECRET", "")
     if len(secret) < 32:
-        return False
+        return None
     try:
         claims = jwt.decode(token, secret, algorithms=["HS256"], issuer="nexus-terminal-web", audience="nexus-market-api")
-        return claims.get("token_use") == expected_use and isinstance(claims.get("email"), str)
+        return claims if claims.get("token_use") == expected_use and isinstance(claims.get("email"), str) else None
     except jwt.PyJWTError:
+        return None
+
+def verify_market_token(token: str, expected_use: str) -> bool:
+    return decode_market_token(token, expected_use) is not None
+
+def allow_api_request(email: str, now: float | None = None) -> bool:
+    current = time.monotonic() if now is None else now
+    window = api_request_windows.setdefault(email, deque())
+    while window and current - window[0] >= 60:
+        window.popleft()
+    if len(window) >= positive_int_setting("BETA_API_REQUESTS_PER_MINUTE", 60, 600):
         return False
+    window.append(current)
+    return True
 
 @app.middleware("http")
 async def require_market_auth(request: Request, call_next):
@@ -667,9 +702,14 @@ async def require_market_auth(request: Request, call_next):
         return JSONResponse(status_code=503, content={"detail": "Market API authentication is not configured"})
     authorization = request.headers.get("authorization", "")
     scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token or not verify_market_token(token, "api"):
+    claims = decode_market_token(token, "api") if scheme.lower() == "bearer" and token else None
+    if claims is None:
         return JSONResponse(status_code=401, content={"detail": "Valid market API token required"})
+    if not allow_api_request(str(claims["email"])):
+        return JSONResponse(status_code=429, content={"detail": "Beta API limit reached; retry shortly"}, headers={"Retry-After": "15"})
     return await call_next(request)
+
+app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","), allow_credentials=False, allow_methods=["GET"], allow_headers=["*"])
 
 def validate_symbol(symbol: str) -> str:
     symbol = symbol.upper()
@@ -1181,10 +1221,16 @@ async def market_ws(socket: WebSocket):
     if symbol not in SYMBOLS or interval not in INTERVALS:
         await socket.close(code=1008, reason="Unsupported symbol, market or interval")
         return
-    await socket.accept(subprotocol="nexus-market-v1")
-    consumer = asyncio.create_task(_consume_market(socket, symbol, market, interval))
-    producer = asyncio.create_task(_produce_book(socket, symbol, market))
+    admitted, active_sessions = await service.try_open_market_session()
+    if not admitted:
+        await socket.close(code=1013, reason="Beta live session limit reached")
+        return
+    log.info("beta market session opened", extra={"active_sessions": active_sessions, "symbol": symbol})
+    consumer = producer = None
     try:
+        await socket.accept(subprotocol="nexus-market-v1")
+        consumer = asyncio.create_task(_consume_market(socket, symbol, market, interval))
+        producer = asyncio.create_task(_produce_book(socket, symbol, market))
         while True:
             try:
                 await asyncio.wait_for(socket.receive_text(), timeout=30)
@@ -1193,8 +1239,13 @@ async def market_ws(socket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        consumer.cancel()
-        producer.cancel()
+        tasks = [task for task in (consumer, producer) if task]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        active_sessions = await service.close_market_session()
+        log.info("beta market session closed", extra={"active_sessions": active_sessions, "symbol": symbol})
 
 async def _consume_market(socket: WebSocket, symbol: str, market: str, interval: str):
     async for event in service.event_stream(market, symbol, interval):

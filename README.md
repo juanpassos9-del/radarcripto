@@ -76,6 +76,10 @@ As rotas `/api/*` e o WebSocket `/ws/market` exigem tokens assinados de curta du
 
 O login aplica um limite em memória de dez falhas por combinação de IP e e-mail em 15 minutos. Como os serviços gratuitos podem reiniciar e não compartilham memória, isso é uma barreira inicial, não proteção completa contra abuso distribuído.
 
+### Piloto fechado
+
+O piloto controlado começa com até dez contas na allowlist `AUTH_USERS` (`BETA_MAX_USERS=10`), dez WebSockets ao vivo simultâneos (`BETA_MAX_CONCURRENT_SESSIONS=10`) e 60 chamadas de API por minuto por conta (`BETA_API_REQUESTS_PER_MINUTE=60`). Se a lista tiver mais contas, apenas as primeiras dez autenticam; mantenha os convidados ativos no início da lista. A interface informa quando o limite simultâneo de WebSockets foi atingido. O limite HTTP fica acima do uso normal da interface (aproximadamente 40 chamadas/minuto por navegador) e retorna `429` quando excedido. Os contadores são em memória e reiniciam com a API; são limites para um piloto, não substituem teste de carga nem infraestrutura de produção. Para aumentar o número de convidados, altere `BETA_MAX_USERS` após revisar os outros limites e medir a capacidade.
+
 Depois do primeiro deploy, confirme no painel que os domínios públicos correspondem aos nomes definidos, que `/health` da API retorna saudável e que `CORS_ORIGINS` contém a origem real do frontend. Em caso de renomeação, corrija `CORS_ORIGINS` e `NEXT_PUBLIC_MARKET_WS_URL` e faça novo deploy.
 
 Arquitetura sugerida para evolução: separar coletores por exchange, normalização e persistência, API pública autenticada e frontend. Adicionar PostgreSQL para usuários, preferências, watchlists e alertas; fila/cache apenas quando carga exigir; serviço de identidade e provedor de cobrança com webhooks idempotentes; controle de entitlement/limites no backend; observabilidade, gestão de segredos e deploy. Planos devem vender recursos/limites, não promessa de retorno.

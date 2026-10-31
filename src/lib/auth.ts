@@ -4,6 +4,12 @@ const COOKIE_NAME = "nexus_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 7;
 const MARKET_TOKEN_ISSUER = "nexus-terminal-web";
 const MARKET_TOKEN_AUDIENCE = "nexus-market-api";
+const DEFAULT_BETA_MAX_USERS = 10;
+
+export function getBetaMaxUsers() {
+  const configured = Number.parseInt(process.env.BETA_MAX_USERS ?? String(DEFAULT_BETA_MAX_USERS), 10);
+  return Number.isFinite(configured) ? Math.max(1, Math.min(100, configured)) : DEFAULT_BETA_MAX_USERS;
+}
 
 function secretKey() {
   const secret = process.env.AUTH_SECRET;
@@ -31,6 +37,10 @@ export function getConfiguredUsers() {
   }
 }
 
+export function getBetaUsers() {
+  return getConfiguredUsers().slice(0, getBetaMaxUsers());
+}
+
 export async function createSession(email: string) {
   return new SignJWT({ email }).setProtectedHeader({ alg: "HS256" }).setIssuedAt()
     .setExpirationTime(`${SESSION_SECONDS}s`).sign(secretKey());
@@ -39,7 +49,8 @@ export async function createSession(email: string) {
 export async function verifySession(token: string) {
   try {
     const { payload } = await jwtVerify(token, secretKey());
-    return typeof payload.email === "string" ? payload.email : null;
+    if (typeof payload.email !== "string") return null;
+    return getBetaUsers().some((user) => user.email === payload.email) ? payload.email : null;
   } catch {
     return null;
   }

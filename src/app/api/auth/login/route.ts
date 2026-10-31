@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createSession, COOKIE_NAME, getConfiguredUsers, SESSION_SECONDS } from "@/lib/auth";
+import { createSession, COOKIE_NAME, getBetaUsers, SESSION_SECONDS } from "@/lib/auth";
 
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 10;
@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     if (state && state.expiresAt > now && state.count >= MAX_ATTEMPTS) {
       return NextResponse.json({ error: "Muitas tentativas. Aguarde 15 minutos e tente novamente." }, { status: 429 });
     }
-    const match = getConfiguredUsers().find((user) => user.email === normalizedEmail && user.password === password);
+    const match = getBetaUsers().find((user) => user.email === normalizedEmail && user.password === password);
     if (!match) {
       attempts.set(key, { count: state && state.expiresAt > now ? state.count + 1 : 1, expiresAt: state && state.expiresAt > now ? state.expiresAt : now + WINDOW_MS });
       return NextResponse.json({ error: "E-mail ou senha inválidos." }, { status: 401 });

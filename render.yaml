@@ -28,6 +28,8 @@ services:
         value: spot
       - key: AUTH_SECRET
         generateValue: true
+      - key: BETA_MAX_USERS
+        value: "10"
 
   - type: web
     name: nexus-terminal-api
@@ -42,6 +44,10 @@ services:
         value: https://nexus-terminal-web.onrender.com
       - key: NEXUS_MARKET_MODE
         value: spot
+      - key: BETA_MAX_CONCURRENT_SESSIONS
+        value: "10"
+      - key: BETA_API_REQUESTS_PER_MINUTE
+        value: "60"
       - key: FLOW_RETENTION_HOURS
         value: "1"
       - key: FLOW_AGG_RETENTION_DAYS
