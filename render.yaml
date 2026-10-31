@@ -1,3 +1,9 @@
+envVarGroups:
+  - name: nexus-market-auth
+    envVars:
+      - key: NEXUS_MARKET_TOKEN_SECRET
+        generateValue: true
+
 services:
   - type: web
     name: nexus-terminal-web
@@ -7,6 +13,7 @@ services:
     dockerContext: .
     healthCheckPath: /
     envVars:
+      - fromGroup: nexus-market-auth
       - key: NEXUS_API_ORIGIN
         fromService:
           name: nexus-terminal-api
@@ -30,6 +37,7 @@ services:
     dockerContext: .
     healthCheckPath: /health
     envVars:
+      - fromGroup: nexus-market-auth
       - key: CORS_ORIGINS
         value: https://nexus-terminal-web.onrender.com
       - key: NEXUS_MARKET_MODE

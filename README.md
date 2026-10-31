@@ -50,7 +50,7 @@ Copie `.env.example` para `.env.local` se precisar trocar a URL do WebSocket. AP
 - A recuperação de lacunas é limitada e sujeita à disponibilidade/limite REST da Binance; IDs omitidos e falhas são expostos em `/api/flow-quality`. As barras históricas começam na implantação desta versão; não há importação retroativa de fluxo. A cobertura estimada não consegue distinguir um minuto sem negócios de uma lacuna do coletor. A avaliação de sinais usa até 40 sinais recentes e candles da Binance; resultados sobrepostos são independentes e não incluem funding, spread, impacto ou falhas de execução.
 - Sem `DATABASE_URL`, SQLite mantém os trades enquanto o arquivo existir. Configure `FLOW_DB_PATH` para escolher o caminho e `FLOW_STORAGE_DURABLE=true` somente se estiver em disco persistente. O Render gratuito não preserva esse arquivo entre reinícios/deploys.
 - Para persistir sem custo recorrente, o backend aceita `DATABASE_URL` de um Postgres como o Supabase Free. Crie um projeto, copie no painel Supabase a URL **Session pooler** e cadastre-a como variável secreta `DATABASE_URL` no serviço `nexus-terminal-api` do Render; não coloque a senha no repositório. A API passa a indicar `storage=postgres` e `storageDurable=true`. O plano Supabase Free tem 500 MB e pode pausar projetos após uma semana com baixa atividade; monitore o uso exibido no painel.
-- Não há usuário, login, cobrança, planos ou autorização por assinatura. O dashboard local valida experiência e dados antes da construção dessas partes.
+- Há login privado por e-mail/senha e proteção de curta duração para a API de mercado, mas ainda não há cadastro/gestão de contas no banco, cobrança, planos ou autorização por assinatura. O acesso dos usuários continua administrado manualmente em `AUTH_USERS`.
 - Alertas são específicos deste navegador e desta instalação, dependem de a página estar aberta e não sincronizam entre dispositivos. Scanner e histórico de CVD são limitados ao fluxo Binance agregado observado desde o início da coleta; barras ausentes não permitem distinguir minuto sem negócios de falha de coleta. Ritmo relativo exige três blocos anteriores não vazios.
 - TVL e oferta de stablecoins são indicadores on-chain de baixa frequência, atualizados tipicamente por hora pela DefiLlama; não medem liquidez nem fluxo de ordens Spot. Preserve a atribuição ao exibir Fear & Greed (Alternative.me) e DefiLlama.
 - A avaliação retrospectiva é uma estimativa simples sobre OHLCV, não paper trading nem prova de desempenho futuro. Não simula fills intrabar, funding ou execução financeira.
@@ -70,13 +70,19 @@ O arquivo `render.yaml` descreve dois Web Services Docker gratuitos: `nexus-term
 
 O Next.js lê `NEXUS_API_ORIGIN` durante o build, então a URL da API precisa estar disponível na criação/build do Blueprint. O serviço FastAPI responde na porta `PORT` do Render. A URL WebSocket pública usa `wss://`. Os serviços gratuitos podem dormir após 15 minutos sem tráfego recebido, demorar aproximadamente um minuto para acordar e não têm armazenamento persistente; são adequados para demonstração, não para disponibilidade prometida a assinantes. O Render pode suspender serviços sem forma de pagamento se os limites incluídos de uso ou tráfego forem excedidos.
 
+### Proteção das rotas de mercado
+
+As rotas `/api/*` e o WebSocket `/ws/market` exigem tokens assinados de curta duração emitidos pelo frontend somente após validar a sessão HTTP-only do usuário. O frontend guarda os tokens apenas em memória; a credencial WebSocket é enviada no cabeçalho de subprotocolos, não na URL. `/health` permanece público para o health check do Render; documentação OpenAPI foi desativada. O Blueprint compartilha `NEXUS_MARKET_TOKEN_SECRET` entre os dois serviços por um Environment Group e o Render gera o valor; não reutilize `AUTH_SECRET` nem publique esse segredo. Em desenvolvimento local, configure o mesmo valor aleatório (mínimo de 32 caracteres) nos processos web e API. Se o segredo não estiver configurado no Render, a API falha fechada e os dados do terminal não carregam.
+
+O login aplica um limite em memória de dez falhas por combinação de IP e e-mail em 15 minutos. Como os serviços gratuitos podem reiniciar e não compartilham memória, isso é uma barreira inicial, não proteção completa contra abuso distribuído.
+
 Depois do primeiro deploy, confirme no painel que os domínios públicos correspondem aos nomes definidos, que `/health` da API retorna saudável e que `CORS_ORIGINS` contém a origem real do frontend. Em caso de renomeação, corrija `CORS_ORIGINS` e `NEXT_PUBLIC_MARKET_WS_URL` e faça novo deploy.
 
 Arquitetura sugerida para evolução: separar coletores por exchange, normalização e persistência, API pública autenticada e frontend. Adicionar PostgreSQL para usuários, preferências, watchlists e alertas; fila/cache apenas quando carga exigir; serviço de identidade e provedor de cobrança com webhooks idempotentes; controle de entitlement/limites no backend; observabilidade, gestão de segredos e deploy. Planos devem vender recursos/limites, não promessa de retorno.
 
 ## Próximas etapas
 
-1. **Identidade e preferências:** autenticação e isolamento por conta antes de persistir watchlists, regras de alerta e configurações no servidor.
+1. **Identidade e preferências:** migrar a lista manual de usuários para identidade persistente e adicionar isolamento por conta antes de salvar watchlists, regras de alerta e configurações no servidor.
 2. **Produto para assinantes:** limites e permissões aplicados no backend, provedor de cobrança, webhooks idempotentes, privacidade e monitoramento.
 3. **Mais análise de fluxo:** avaliar retenção e uso real das barras agregadas; persistir dados adicionais do book somente após medir volume e capacidade.
 4. **Expansão:** Bybit e outras fontes após revisar APIs, limites e licenças de redistribuição.

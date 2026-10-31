@@ -39,9 +39,35 @@ export type VolatilityZones = {
 export async function getJson<T>(path: string): Promise<T> {
   const apiOrigin = process.env.NEXT_PUBLIC_MARKET_API_URL?.replace(/\/+$/, "");
   const url = apiOrigin ? new URL(path, apiOrigin).toString() : path;
-  const response = await fetch(url, { cache: "no-store" });
+  const response = await authorizedFetch(url);
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json() as Promise<T>;
+}
+
+const apiTokens = new Map<string, { token: string; expiresAt: number }>();
+
+async function getMarketToken(use: "api" | "ws", forceRefresh = false): Promise<string> {
+  const cached = apiTokens.get(use);
+  if (!forceRefresh && cached && cached.expiresAt > Date.now() + 5000) return cached.token;
+  const response = await fetch(`/api/auth/market-token?use=${use}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Não foi possível autenticar na API de mercado (${response.status}).`);
+  const data = await response.json() as { token: string; expiresIn: number };
+  apiTokens.set(use, { token: data.token, expiresAt: Date.now() + data.expiresIn * 1000 });
+  return data.token;
+}
+
+async function authorizedFetch(url: string): Promise<Response> {
+  let token = await getMarketToken("api");
+  let response = await fetch(url, { cache: "no-store", headers: { Authorization: `Bearer ${token}` } });
+  if (response.status === 401) {
+    token = await getMarketToken("api", true);
+    response = await fetch(url, { cache: "no-store", headers: { Authorization: `Bearer ${token}` } });
+  }
+  return response;
+}
+
+export function getMarketWsToken() {
+  return getMarketToken("ws");
 }
 export const marketDataLabel = "BINANCE SPOT · USDT";
 export const fmtPrice = (value: number | null | undefined, digits = 2) => value == null ? "—" : new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);

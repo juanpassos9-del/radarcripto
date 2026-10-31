@@ -11,9 +11,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+import jwt
 import websockets
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .schemas import BookSnapshot, Candle, Level, MarketSnapshot, Trade
 from .flow_store import FlowStore
@@ -644,8 +646,30 @@ async def lifespan(_: FastAPI):
             task.cancel()
     await service.close()
 
-app = FastAPI(title="NEXUS Market API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="NEXUS Market API", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","), allow_credentials=False, allow_methods=["GET"], allow_headers=["*"])
+
+def verify_market_token(token: str, expected_use: str) -> bool:
+    secret = os.getenv("NEXUS_MARKET_TOKEN_SECRET", "")
+    if len(secret) < 32:
+        return False
+    try:
+        claims = jwt.decode(token, secret, algorithms=["HS256"], issuer="nexus-terminal-web", audience="nexus-market-api")
+        return claims.get("token_use") == expected_use and isinstance(claims.get("email"), str)
+    except jwt.PyJWTError:
+        return False
+
+@app.middleware("http")
+async def require_market_auth(request: Request, call_next):
+    if not request.url.path.startswith("/api/") or request.method == "OPTIONS":
+        return await call_next(request)
+    if len(os.getenv("NEXUS_MARKET_TOKEN_SECRET", "")) < 32:
+        return JSONResponse(status_code=503, content={"detail": "Market API authentication is not configured"})
+    authorization = request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token or not verify_market_token(token, "api"):
+        return JSONResponse(status_code=401, content={"detail": "Valid market API token required"})
+    return await call_next(request)
 
 def validate_symbol(symbol: str) -> str:
     symbol = symbol.upper()
@@ -1140,6 +1164,13 @@ async def sentiment():
 
 @app.websocket("/ws/market")
 async def market_ws(socket: WebSocket):
+    allowed_origins = {origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()}
+    origin = socket.headers.get("origin")
+    protocols = [value.strip() for value in socket.headers.get("sec-websocket-protocol", "").split(",") if value.strip()]
+    market_token = protocols[1] if len(protocols) == 2 and protocols[0] == "nexus-market-v1" else ""
+    if (origin and origin not in allowed_origins) or not verify_market_token(market_token, "ws"):
+        await socket.close(code=4401, reason="Authentication required")
+        return
     symbol = socket.query_params.get("symbol", "BTCUSDT").upper()
     requested_market = socket.query_params.get("market", "spot")
     market = os.getenv("NEXUS_MARKET_MODE", "spot").strip().lower()
@@ -1150,7 +1181,7 @@ async def market_ws(socket: WebSocket):
     if symbol not in SYMBOLS or interval not in INTERVALS:
         await socket.close(code=1008, reason="Unsupported symbol, market or interval")
         return
-    await socket.accept()
+    await socket.accept(subprotocol="nexus-market-v1")
     consumer = asyncio.create_task(_consume_market(socket, symbol, market, interval))
     producer = asyncio.create_task(_produce_book(socket, symbol, market))
     try:

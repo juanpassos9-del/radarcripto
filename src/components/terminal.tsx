@@ -6,7 +6,7 @@ import FlowHistory from "@/components/flow-history";
 import MarketScanner from "@/components/market-scanner";
 import MarketAlerts from "@/components/market-alerts";
 import MarketContext from "@/components/market-context";
-import { fmtCompact, fmtPrice, fmtTime, getJson, marketDataLabel, type BookData, type Candle, type ChartOverlays, type MarketSnapshot, type ReversalSignalData, type ScannerFlowSnapshot, type Trade, type VolatilityZones } from "@/lib/market";
+import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken, marketDataLabel, type BookData, type Candle, type ChartOverlays, type MarketSnapshot, type ReversalSignalData, type ScannerFlowSnapshot, type Trade, type VolatilityZones } from "@/lib/market";
 
 const assets = [
   "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
@@ -199,9 +199,22 @@ export default function Terminal() {
       ? `${marketApiUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/+$/, "")}/ws/market`
       : process.env.NEXT_PUBLIC_MARKET_WS_URL || "ws://127.0.0.1:8001/ws/market";
     let socket: WebSocket | null = null; let poll: number | null = null;
-    const connect = () => {
+    const connect = async () => {
       if (!active) return;
-      socket = new WebSocket(`${streamUrl}?symbol=${symbol}&market=${market}&interval=${interval}`);
+      try {
+        const token = await getMarketWsToken();
+        if (!active) return;
+        const params = new URLSearchParams({ symbol, market, interval });
+        socket = new WebSocket(`${streamUrl}?${params}`, ["nexus-market-v1", token]);
+      } catch {
+        if (!active || poll) return;
+        poll = window.setInterval(() => {
+          if (!active || polling) return;
+          polling = true;
+          void loadAsset().finally(() => { polling = false; });
+        }, 3000);
+        return;
+      }
       socket.onmessage = (event) => {
         if (!active || selectedKeyRef.current !== `${symbol}|${interval}|${market}`) return;
         try {
