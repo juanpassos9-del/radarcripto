@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from .schemas import BookSnapshot, Candle, Level, MarketSnapshot, Trade
 from .flow_store import FlowStore
 from .reversal_engine import build_reversal_signals
+from .breakout_engine import build_breakout_signals
 from .volatility import calculate_zones
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -1165,6 +1166,33 @@ async def reversal_evaluation(
         }
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
         raise HTTPException(502, f"Unable to evaluate reversal signals: {error}") from error
+
+@app.get("/api/breakout-signals")
+async def breakout_signals(
+    symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"),
+    compression_percentile: float = Query(20, ge=1, le=50), volume_multiple: float = Query(1.5, ge=1, le=10),
+    range_lookback: int = Query(20, ge=5, le=100), volume_lookback: int = Query(20, ge=5, le=100),
+    cooldown: int = Query(10, ge=0, le=500), buy_enabled: bool = Query(True), sell_enabled: bool = Query(True),
+):
+    """Independent closed-candle squeeze breakout signals for Spot OHLCV."""
+    symbol, market = validate_symbol(symbol), validate_market(market)
+    if interval not in INTERVALS:
+        raise HTTPException(400, "Unsupported candle interval")
+    base, path = service.base_and_path(market, "klines")
+    try:
+        rows = await service.request(base, path, {"symbol": symbol, "interval": interval, "limit": 500})
+        candles = [
+            {"time": int(row[0] // 1000), "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5])}
+            for row in rows[:-1]
+        ]
+        return build_breakout_signals(
+            symbol, interval, candles, compression_percentile=compression_percentile,
+            range_lookback=range_lookback, volume_lookback=volume_lookback,
+            volume_multiple=volume_multiple, cooldown=cooldown,
+            buy_enabled=buy_enabled, sell_enabled=sell_enabled,
+        )
+    except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
+        raise HTTPException(502, f"Unable to calculate breakout signals: {error}") from error
 
 @app.get("/api/volatility")
 async def volatility(symbol: str = Query("BTCUSDT"), market: str = Query("spot")):

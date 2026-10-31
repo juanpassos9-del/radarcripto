@@ -29,6 +29,16 @@ export type ReversalSignalData = {
   settings: { minSigma: number; touchTolerance: number; volumeMultiple: number; volumeLookback: number; minScore: number; cooldown: number; buyEnabled: boolean; sellEnabled: boolean; garchEnabled: boolean; hvEnabled: boolean; volumeEnabled: boolean };
   scoreRules: Record<string, string | number>;
 };
+export type BreakoutSignal = {
+  time: number; symbol: string; interval: string; direction: "BUY" | "SELL"; price: number;
+  rangeHigh: number; rangeLow: number; volumeRatio: number; compressionPercentile: number;
+  qualified: boolean; compressedAt: number; reasons: string[];
+};
+export type BreakoutSignalData = {
+  symbol: string; interval: string; status: string; requiredCandles?: number; observedCandles?: number;
+  signals: BreakoutSignal[]; latest: BreakoutSignal | null; lastCandidate?: BreakoutSignal | null;
+  settings: { bbPeriod: number; compressionLookback: number; compressionPercentile: number; compressionRecentBars: number; rangeLookback: number; volumeLookback: number; volumeMultiple: number; cooldown: number; buyEnabled: boolean; sellEnabled: boolean };
+};
 export type VolatilityZones = {
   symbol: string; status: string; source?: string; reference?: number; referenceMode?: string; asOf?: number; receivedAt?: number; observations?: number; required?: number;
   garch?: { dailyVol: number; annualizedVol: number; bands: Record<string, { upper: number; lower: number }> };
