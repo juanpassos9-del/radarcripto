@@ -24,17 +24,20 @@ function marketSecretKey() {
 }
 
 export function getConfiguredUsers() {
-  const source = process.env.AUTH_USERS;
-  if (!source) return [] as Array<{ email: string; password: string }>;
-  try {
-    const parsed: unknown = JSON.parse(source);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((user): user is { email: string; password: string } =>
-      typeof user?.email === "string" && typeof user?.password === "string" && user.password.length >= 12,
-    ).map((user) => ({ email: user.email.trim().toLowerCase(), password: user.password }));
-  } catch {
-    return [];
-  }
+  const parseUsers = (source: string | undefined) => {
+    if (!source) return [] as Array<{ email: string; password: string }>;
+    try {
+      const parsed: unknown = JSON.parse(source);
+      if (!Array.isArray(parsed)) return [] as Array<{ email: string; password: string }>;
+      return parsed.filter((user): user is { email: string; password: string } =>
+        typeof user?.email === "string" && typeof user?.password === "string" && user.password.length >= 12,
+      ).map((user) => ({ email: user.email.trim().toLowerCase(), password: user.password }));
+    } catch {
+      return [] as Array<{ email: string; password: string }>;
+    }
+  };
+  const users = [...parseUsers(process.env.AUTH_USERS), ...parseUsers(process.env.AUTH_ADDITIONAL_USERS)];
+  return [...new Map(users.map((user) => [user.email, user])).values()];
 }
 
 export function getBetaUsers() {
