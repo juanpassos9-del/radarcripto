@@ -51,11 +51,17 @@ class MarketService:
     def __init__(self) -> None:
         self.client = httpx.AsyncClient(headers={"User-Agent": "NexusCryptoTerminal/0.1"}, timeout=12)
         self.request_slots = asyncio.Semaphore(5)
+        self.response_cache: dict[str, tuple[float, Any]] = {}
+        self.response_inflight: dict[str, asyncio.Task[Any]] = {}
         self.exchange_headers = {
             "Origin": "https://www.binance.com",
             "Referer": "https://www.binance.com/",
         }
         self.books: dict[tuple[str, str], dict[str, Any]] = {}
+        self.book_init_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self.book_payload_cache: dict[tuple[str, int], tuple[tuple[Any, ...], BookSnapshot]] = {}
+        self.market_subscribers: dict[tuple[str, str, str], set[asyncio.Queue[dict[str, Any]]]] = {}
+        self.market_stream_tasks: dict[tuple[str, str, str], asyncio.Task[Any]] = {}
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
         self.external_books: dict[tuple[str, str], dict[str, Any]] = {}
         self.external_trades: dict[str, deque[Trade]] = {}
@@ -199,6 +205,71 @@ class MarketService:
                 log.exception("Binance trade gap recovery failed", extra={"symbol": symbol, "from_id": cursor_id, "to_id": last_id})
 
     async def request(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
+        ttl = self._request_cache_ttl(base, path, params or {})
+        if ttl <= 0:
+            return await self._request_uncached(base, path, params)
+        key = f"{base}{path}?{json.dumps(params or {}, sort_keys=True, separators=(',', ':'))}"
+        return await self.cache_value(key, ttl, lambda: self._request_uncached(base, path, params))
+
+    async def cache_value(self, key: str, ttl: float, factory: Any) -> Any:
+        now = time.monotonic()
+        cached = self.response_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+        task = self.response_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(factory())
+            self.response_inflight[key] = task
+            task.add_done_callback(lambda completed: self._cache_completed(key, ttl, completed))
+        try:
+            value = await asyncio.shield(task)
+        except BaseException:
+            if task.done() and self.response_inflight.get(key) is task:
+                self.response_inflight.pop(key, None)
+            raise
+        self.response_cache[key] = (time.monotonic() + ttl, value)
+        if self.response_inflight.get(key) is task:
+            self.response_inflight.pop(key, None)
+        if len(self.response_cache) > 1024:
+            expired = [cache_key for cache_key, (expires, _) in self.response_cache.items() if expires <= time.monotonic()]
+            for cache_key in expired:
+                self.response_cache.pop(cache_key, None)
+            if len(self.response_cache) > 1024:
+                oldest = sorted(self.response_cache, key=lambda cache_key: self.response_cache[cache_key][0])
+                for cache_key in oldest[:len(self.response_cache) - 768]:
+                    self.response_cache.pop(cache_key, None)
+        return value
+
+    def _cache_completed(self, key: str, ttl: float, task: asyncio.Task[Any]) -> None:
+        if self.response_inflight.get(key) is task:
+            self.response_inflight.pop(key, None)
+        if task.cancelled():
+            return
+        try:
+            value = task.result()
+        except BaseException:
+            return
+        self.response_cache[key] = (time.monotonic() + ttl, value)
+
+    @staticmethod
+    def _request_cache_ttl(base: str, path: str, params: dict[str, Any]) -> float:
+        if base != SPOT_DATA:
+            return 0
+        if path == "/api/v3/ticker/24hr":
+            return 20
+        if path == "/api/v3/ticker/price":
+            return 5
+        if path == "/api/v3/klines":
+            if "startTime" in params:
+                return 30 if "endTime" not in params else 300
+            return {
+                "1m": 3, "3m": 4, "5m": 5, "15m": 8, "30m": 10,
+                "1h": 15, "2h": 20, "4h": 30, "6h": 30,
+                "12h": 45, "1d": 60, "1w": 120, "1M": 120,
+            }.get(str(params.get("interval", "")), 0)
+        return 0
+
+    async def _request_uncached(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
         for attempt in range(4):
             try:
                 # Keep concurrent exchange requests within a small bound. The free
@@ -294,31 +365,85 @@ class MarketService:
     async def book(self, symbol: str, market: str, limit: int) -> BookSnapshot:
         self.ensure_external_collectors(symbol)
         key = (market, symbol)
-        state = self.books.get(key)
-        if state:
-            if state["status"] == "live" and int(time.time() * 1000) - state["receivedAt"] < 15_000:
-                return self.book_payload(symbol, state, limit)
-            task = state.get("task")
-            if task and not task.done():
-                # Never replace an in-progress snapshot/stream; callers share one book collector per symbol.
-                return self.book_payload(symbol, state, limit)
-        base, path = self.base_and_path(market, "depth")
-        # Fetch enough levels for Spot snapshot/diff synchronization; trim in the response.
-        snapshot_limit = 1000
-        snapshot = await self.request(base, path, {"symbol": symbol, "limit": snapshot_limit})
-        bids = {float(price): float(qty) for price, qty in snapshot["bids"] if float(qty) > 0}
-        asks = {float(price): float(qty) for price, qty in snapshot["asks"] if float(qty) > 0}
-        state = {"bids": bids, "asks": asks, "lastUpdateId": int(snapshot["lastUpdateId"]), "status": "syncing", "eventTime": None, "receivedAt": int(time.time() * 1000), "buffer": [], "lock": asyncio.Lock(), "task": None}
-        state["market"] = market
-        self.books[key] = state
-        state["task"] = asyncio.create_task(self.book_stream(market, symbol, state))
-        return self.book_payload(symbol, state, limit)
+        init_lock = self.book_init_locks.setdefault(key, asyncio.Lock())
+        async with init_lock:
+            state = self.books.get(key)
+            if state:
+                if state["status"] == "live" and int(time.time() * 1000) - state["receivedAt"] < 15_000:
+                    return self.book_payload(symbol, state, limit)
+                task = state.get("task")
+                if task and not task.done():
+                    return self.book_payload(symbol, state, limit)
+            base, path = self.base_and_path(market, "depth")
+            # Fetch enough levels for Spot snapshot/diff synchronization; trim in the response.
+            snapshot = await self.request(base, path, {"symbol": symbol, "limit": 1000})
+            bids = {float(price): float(qty) for price, qty in snapshot["bids"] if float(qty) > 0}
+            asks = {float(price): float(qty) for price, qty in snapshot["asks"] if float(qty) > 0}
+            state = {"bids": bids, "asks": asks, "lastUpdateId": int(snapshot["lastUpdateId"]), "status": "syncing", "eventTime": None, "receivedAt": int(time.time() * 1000), "buffer": [], "lock": asyncio.Lock(), "task": None}
+            state["market"] = market
+            self.books[key] = state
+            state["task"] = asyncio.create_task(self.book_stream(market, symbol, state))
+            return self.book_payload(symbol, state, limit)
+
+    async def subscribe_market(self, market: str, symbol: str, interval: str) -> tuple[tuple[str, str, str], asyncio.Queue[dict[str, Any]]]:
+        key = (market, symbol, interval)
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
+        subscribers = self.market_subscribers.setdefault(key, set())
+        subscribers.add(queue)
+        task = self.market_stream_tasks.get(key)
+        if task is None or task.done():
+            self.market_stream_tasks[key] = asyncio.create_task(self._broadcast_market(key))
+        return key, queue
+
+    async def unsubscribe_market(self, key: tuple[str, str, str], queue: asyncio.Queue[dict[str, Any]]) -> None:
+        subscribers = self.market_subscribers.get(key)
+        if subscribers is None:
+            return
+        subscribers.discard(queue)
+        if subscribers:
+            return
+        self.market_subscribers.pop(key, None)
+        task = self.market_stream_tasks.pop(key, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _broadcast_market(self, key: tuple[str, str, str]) -> None:
+        market, symbol, interval = key
+        current_task = asyncio.current_task()
+        try:
+            async for event in self.event_stream(market, symbol, interval):
+                for queue in tuple(self.market_subscribers.get(key, ())):
+                    if queue.full():
+                        try:
+                            queue.get_nowait()
+                            queue.task_done()
+                        except asyncio.QueueEmpty:
+                            pass
+                    try:
+                        queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        continue
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self.market_stream_tasks.get(key) is current_task:
+                self.market_stream_tasks.pop(key, None)
 
     def book_payload(self, symbol: str, state: dict[str, Any], limit: int) -> BookSnapshot:
-        bids = sorted(state["bids"].items(), reverse=True)[:limit]
-        asks = sorted(state["asks"].items())[:limit]
         now_ms = int(time.time() * 1000)
         external = [self.external_books.get((symbol, venue)) for venue in ("Kraken", "Coinbase")]
+        version = (
+            state.get("lastUpdateId"), state.get("receivedAt"), state.get("status"),
+            tuple((item.get("status"), item.get("receivedAt")) if item else None for item in external),
+            now_ms // 1000,
+        )
+        cache_key = (symbol, limit)
+        cached = self.book_payload_cache.get(cache_key)
+        if cached and cached[0] == version:
+            return cached[1]
+        bids = sorted(state["bids"].items(), reverse=True)[:limit]
+        asks = sorted(state["asks"].items())[:limit]
         venue_states = {"Binance": "stale" if state["status"] == "live" and now_ms - int(state["receivedAt"]) > 15_000 else state["status"]}
         for venue, other in zip(("Kraken", "Coinbase"), external):
             status = other["status"] if other else "connecting"
@@ -361,7 +486,9 @@ class MarketService:
         imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume) if bid_volume + ask_volume else 0.0
         live_sources = [name for name, status in venue_states.items() if status == "live"]
         event_times = [item.get("eventTime") for item in [state, *[x for x in external if x]] if item.get("eventTime")]
-        return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=ask_rows[0][0] - bid_rows[0][0] if ask_rows and bid_rows else 0, imbalance=imbalance, eventTime=max(event_times) if event_times else None, receivedAt=now_ms, status="live" if live_sources else "connecting", source=" + ".join(live_sources) or "Nenhuma fonte ao vivo", sources=venue_states)
+        payload = BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=ask_rows[0][0] - bid_rows[0][0] if ask_rows and bid_rows else 0, imbalance=imbalance, eventTime=max(event_times) if event_times else None, receivedAt=now_ms, status="live" if live_sources else "connecting", source=" + ".join(live_sources) or "Nenhuma fonte ao vivo", sources=venue_states)
+        self.book_payload_cache[cache_key] = (version, payload)
+        return payload
 
     def ensure_external_collectors(self, symbol: str) -> None:
         # Keep a small LRU of requested symbols to bound public sockets on free hosting.
@@ -616,12 +743,6 @@ class MarketService:
                         received = int(time.time() * 1000)
                         if "aggTrade" in stream or "aggTrade" in data:
                             trade = Trade(id=int(data["a"]), time=int(data["T"]), price=float(data["p"]), quantity=float(data["q"]), side="sell" if data["m"] else "buy")
-                            key = (market, symbol)
-                            sample = self.samples.setdefault(key, deque(maxlen=5000))
-                            if not sample or sample[-1].id != trade.id:
-                                sample.append(trade)
-                            if self.flow_store:
-                                self.flow_store.enqueue(symbol, trade, received)
                             yield {"type": "trade", "data": trade.model_dump()}
                         elif "kline" in stream or "kline" in data:
                             row = data["k"]
@@ -649,6 +770,10 @@ async def lifespan(_: FastAPI):
     collector_task = asyncio.create_task(service.collect_all_trades())
     yield
     collector_task.cancel()
+    market_tasks = list(service.market_stream_tasks.values())
+    for task in market_tasks:
+        task.cancel()
+    await asyncio.gather(*market_tasks, return_exceptions=True)
     for task in service.external_tasks.values():
         task.cancel()
     await asyncio.gather(*service.external_tasks.values(), return_exceptions=True)
@@ -744,43 +869,45 @@ async def markets(market: str = Query("spot")):
 @app.get("/api/scanner-flow")
 async def scanner_flow():
     """Observed Binance notional flow for the 25 supported Spot assets."""
-    store = service.flow_store
-    now_ms = int(time.time() * 1000)
-    bucket_ms = 15 * 60_000
-    current_bucket = (now_ms // bucket_ms) * bucket_ms
-    if store is None:
-        raise HTTPException(503, "Flow storage is not ready")
-    grouped = await asyncio.to_thread(store.scanner_flow, current_bucket - 3 * bucket_ms, now_ms)
-    assets: dict[str, dict[str, Any]] = {}
-    elapsed = max(0, now_ms - current_bucket)
-    for symbol in SYMBOLS:
-        buckets = {int(item["time"]): item for item in grouped.get(symbol, [])}
-        current = buckets.get(current_bucket)
-        current_notional = current["buyNotional"] + current["sellNotional"] if current else None
-        cvd_notional = current["buyNotional"] - current["sellNotional"] if current else None
-        previous = [buckets.get(current_bucket - index * bucket_ms) for index in (1, 2, 3)]
-        relative_flow = None
-        if elapsed >= 120_000 and current_notional is not None and all(item is not None for item in previous):
-            baseline = sum(item["buyNotional"] + item["sellNotional"] for item in previous if item is not None) / 3
-            expected = baseline * min(1.0, elapsed / bucket_ms)
-            if expected > 0:
-                relative_flow = current_notional / expected
-        latest_bucket = max(buckets, default=None)
-        assets[symbol] = {
-            "symbol": symbol,
-            "notional15m": current_notional,
-            "cvdNotional15m": cvd_notional,
-            "relativeFlow15m": relative_flow,
-            "observedBuckets": len(buckets),
-            "lastObservedBucket": latest_bucket,
+    async def build() -> dict[str, Any]:
+        store = service.flow_store
+        now_ms = int(time.time() * 1000)
+        bucket_ms = 15 * 60_000
+        current_bucket = (now_ms // bucket_ms) * bucket_ms
+        if store is None:
+            raise HTTPException(503, "Flow storage is not ready")
+        grouped = await asyncio.to_thread(store.scanner_flow, current_bucket - 3 * bucket_ms, now_ms)
+        assets: dict[str, dict[str, Any]] = {}
+        elapsed = max(0, now_ms - current_bucket)
+        for symbol in SYMBOLS:
+            buckets = {int(item["time"]): item for item in grouped.get(symbol, [])}
+            current = buckets.get(current_bucket)
+            current_notional = current["buyNotional"] + current["sellNotional"] if current else None
+            cvd_notional = current["buyNotional"] - current["sellNotional"] if current else None
+            previous = [buckets.get(current_bucket - index * bucket_ms) for index in (1, 2, 3)]
+            relative_flow = None
+            if elapsed >= 120_000 and current_notional is not None and all(item is not None for item in previous):
+                baseline = sum(item["buyNotional"] + item["sellNotional"] for item in previous if item is not None) / 3
+                expected = baseline * min(1.0, elapsed / bucket_ms)
+                if expected > 0:
+                    relative_flow = current_notional / expected
+            latest_bucket = max(buckets, default=None)
+            assets[symbol] = {
+                "symbol": symbol,
+                "notional15m": current_notional,
+                "cvdNotional15m": cvd_notional,
+                "relativeFlow15m": relative_flow,
+                "observedBuckets": len(buckets),
+                "lastObservedBucket": latest_bucket,
+            }
+        return {
+            "assets": assets,
+            "bucketStartedAt": current_bucket,
+            "source": "Binance Spot aggTrades persistidos",
+            "receivedAt": now_ms,
+            "relativeFlowMethod": "Fluxo nocional do bloco UTC de 15m em andamento, ajustado pelo tempo decorrido, versus média dos 3 blocos anteriores. Requer 3 blocos anteriores observados e pelo menos 2 minutos do bloco atual.",
         }
-    return {
-        "assets": assets,
-        "bucketStartedAt": current_bucket,
-        "source": "Binance Spot aggTrades persistidos",
-        "receivedAt": now_ms,
-        "relativeFlowMethod": "Fluxo nocional do bloco UTC de 15m em andamento, ajustado pelo tempo decorrido, versus média dos 3 blocos anteriores. Requer 3 blocos anteriores observados e pelo menos 2 minutos do bloco atual.",
-    }
+    return await service.cache_value("scanner-flow", 15, build)
 
 @app.get("/api/context")
 async def market_context():
@@ -953,7 +1080,11 @@ async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), li
 async def flow_quality(symbol: str = Query("BTCUSDT")):
     symbol = validate_symbol(symbol)
     state = service.flow_quality[symbol].copy()
-    summary = await asyncio.to_thread(service.flow_store.summary, symbol) if service.flow_store else {"storedTrades": 0, "oldestTradeTime": None, "newestTradeTime": None}
+    async def load_summary() -> dict[str, Any]:
+        if service.flow_store:
+            return await asyncio.to_thread(service.flow_store.summary, symbol)
+        return {"storedTrades": 0, "oldestTradeTime": None, "newestTradeTime": None}
+    summary = await service.cache_value(f"flow-summary:{symbol}", 15, load_summary)
     store = service.flow_store
     return {
         "symbol": symbol,
@@ -1256,9 +1387,12 @@ async def market_ws(socket: WebSocket):
         return
     log.info("beta market session opened", extra={"active_sessions": active_sessions, "symbol": symbol})
     consumer = producer = None
+    subscription_key: tuple[str, str, str] | None = None
+    market_queue: asyncio.Queue[dict[str, Any]] | None = None
     try:
         await socket.accept(subprotocol="nexus-market-v1")
-        consumer = asyncio.create_task(_consume_market(socket, symbol, market, interval))
+        subscription_key, market_queue = await service.subscribe_market(market, symbol, interval)
+        consumer = asyncio.create_task(_consume_market(socket, market_queue))
         producer = asyncio.create_task(_produce_book(socket, symbol, market))
         while True:
             try:
@@ -1273,12 +1407,18 @@ async def market_ws(socket: WebSocket):
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if subscription_key is not None and market_queue is not None:
+            await service.unsubscribe_market(subscription_key, market_queue)
         active_sessions = await service.close_market_session()
         log.info("beta market session closed", extra={"active_sessions": active_sessions, "symbol": symbol})
 
-async def _consume_market(socket: WebSocket, symbol: str, market: str, interval: str):
-    async for event in service.event_stream(market, symbol, interval):
-        await socket.send_json(event)
+async def _consume_market(socket: WebSocket, queue: asyncio.Queue[dict[str, Any]]):
+    while True:
+        event = await queue.get()
+        try:
+            await socket.send_json(event)
+        finally:
+            queue.task_done()
 
 async def _produce_book(socket: WebSocket, symbol: str, market: str):
     key = (market, symbol)

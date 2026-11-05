@@ -62,7 +62,6 @@ export default function Terminal() {
   const [showAnchoredVwaps, setShowAnchoredVwaps] = useState(true);
   const [showPreviousLevels, setShowPreviousLevels] = useState(true);
   const [fear, setFear] = useState<{ value: number | null; label: string; status: string; source: string } | null>(null);
-  const [marketInfo, setMarketInfo] = useState<{ market: string; source: string; price: number | null; markPrice: number | null; indexPrice: number | null; fundingRate: number | null; openInterest: number | null; nextFundingTime: number | null; receivedAt: number; status: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [clock, setClock] = useState<number | null>(null);
   const [apiState, setApiState] = useState<"checking" | "connected" | "error">("checking");
@@ -91,28 +90,29 @@ export default function Terminal() {
 
   const loadAsset = useCallback(async (isFirst = false) => {
     const requestKey = `${symbol}|${interval}|${market}`;
-    const [candleResult, bookResult, tradeResult] = await Promise.allSettled([
-      getJson<{ candles: Candle[] }>(`/api/candles?symbol=${symbol}&interval=${interval}&market=${market}&limit=240`),
-      getJson<BookData>(`/api/book?symbol=${symbol}&market=${market}&limit=16`),
-      getJson<{ trades: Trade[]; sources?: Record<string, string>; tradeHealth?: typeof tradeHealth }>(`/api/trades?symbol=${symbol}&market=${market}&limit=24`),
-    ]);
-    if (selectedKeyRef.current !== requestKey) return;
-    if (candleResult.status === "fulfilled") setCandles(candleResult.value.candles);
-    else setApiMessage(`Candles: ${candleResult.reason instanceof Error ? candleResult.reason.message : "indisponíveis"}`);
-    if (bookResult.status === "fulfilled") setBook(bookResult.value);
-    else setBook(null);
-    if (tradeResult.status === "fulfilled") {
-      setTrades(tradeResult.value.trades);
-      setTradeSources(tradeResult.value.sources ?? {});
-      setTradeHealth(tradeResult.value.tradeHealth ?? {});
-    }
-    if (isFirst) setLoading(false);
+    const candlesTask = getJson<{ candles: Candle[] }>(`/api/candles?symbol=${symbol}&interval=${interval}&market=${market}&limit=240`)
+      .then(data => {
+        if (selectedKeyRef.current !== requestKey) return;
+        setCandles(data.candles);
+        setApiMessage("");
+        if (isFirst) setLoading(false);
+      })
+      .catch(error => {
+        if (selectedKeyRef.current !== requestKey) return;
+        setApiMessage(`Candles: ${error instanceof Error ? error.message : "indisponíveis"}`);
+        if (isFirst) setLoading(false);
+      });
+    const bookTask = getJson<BookData>(`/api/book?symbol=${symbol}&market=${market}&limit=16`)
+      .then(data => { if (selectedKeyRef.current === requestKey) setBook(data); })
+      .catch(() => { if (selectedKeyRef.current === requestKey) setBook(null); });
+    await Promise.allSettled([candlesTask, bookTask]);
   }, [symbol, interval, market]);
 
   // External venue feeds are collected by the API process. Refresh their shared
   // samples and health independently while Binance remains on the browser WS.
   useEffect(() => {
     let active = true;
+    let refreshing = false;
     const refresh = () => getJson<{ trades: Trade[]; sources?: Record<string, string>; tradeHealth?: typeof tradeHealth }>(`/api/trades?symbol=${symbol}&market=${market}&limit=60`)
       .then(data => {
         if (!active) return;
@@ -125,8 +125,13 @@ export default function Terminal() {
         });
       })
       .catch(() => undefined);
-    void refresh();
-    const timer = window.setInterval(refresh, 15_000);
+    const guardedRefresh = () => {
+      if (!active || refreshing || document.visibilityState !== "visible") return;
+      refreshing = true;
+      void refresh().finally(() => { refreshing = false; });
+    };
+    guardedRefresh();
+    const timer = window.setInterval(guardedRefresh, 30_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [symbol, market]);
 
@@ -164,7 +169,7 @@ export default function Terminal() {
   useEffect(() => {
     setBreakoutData(null);
     void loadBreakoutSignals();
-    const timer = window.setInterval(() => void loadBreakoutSignals(), 60_000);
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void loadBreakoutSignals(); }, 60_000);
     return () => window.clearInterval(timer);
   }, [loadBreakoutSignals]);
 
@@ -189,14 +194,14 @@ export default function Terminal() {
       .then(value => { if (active) setChartOverlays(value); })
       .catch(() => { if (active) setChartOverlays(null); });
     void refresh();
-    const timer = window.setInterval(refresh, 60_000);
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 60_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [symbol, interval, market]);
 
   useEffect(() => {
     loadMarkets();
     getJson<{ value: number | null; label: string; status: string; source: string }>("/api/sentiment").then(setFear).catch(() => setFear({ value: null, label: "Indisponível", status: "unavailable", source: "Alternative.me" }));
-    const id = window.setInterval(loadMarkets, 30_000);
+    const id = window.setInterval(() => { if (document.visibilityState === "visible") void loadMarkets(); }, 30_000);
     return () => window.clearInterval(id);
   }, [loadMarkets]);
 
@@ -206,7 +211,7 @@ export default function Terminal() {
       .then(data => { if (active) setScannerFlow(data); })
       .catch(() => { if (active) setScannerFlow(null); });
     void refresh();
-    const timer = window.setInterval(refresh, 30_000);
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 60_000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
 
@@ -214,7 +219,7 @@ export default function Terminal() {
     let active = true;
     const refresh = () => getJson<NonNullable<typeof flowQuality>>(`/api/flow-quality?symbol=${symbol}`).then(data => { if (active) setFlowQuality(data); }).catch(() => { if (active) setFlowQuality(null); });
     void refresh();
-    const timer = window.setInterval(refresh, 15_000);
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 60_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [symbol]);
 
@@ -269,7 +274,13 @@ export default function Terminal() {
       socket.onerror = () => socket?.close();
       socket.onclose = (event) => {
         if (event.code === 1013) {
-          setBetaLimitMessage("Limite de sessões ao vivo do beta atingido. Tente novamente mais tarde.");
+          setBetaLimitMessage("Limite de sessões ao vivo atingido; dados em atualização periódica de reserva.");
+          if (!active || poll) return;
+          poll = window.setInterval(() => {
+            if (!active || polling || document.visibilityState !== "visible") return;
+            polling = true;
+            void loadAsset().finally(() => { polling = false; });
+          }, 30_000);
           return;
         }
         if (!active || poll) return;
@@ -283,13 +294,6 @@ export default function Terminal() {
     connect();
     return () => { active = false; socket?.close(); if (poll) window.clearInterval(poll); };
   }, [symbol, interval, market, loadAsset, loadReversalSignals, loadBreakoutSignals]);
-
-  useEffect(() => {
-    let live = true;
-    const refresh = () => getJson<typeof marketInfo>(`/api/market-info?symbol=${symbol}&market=${market}`).then(data => { if (live) setMarketInfo(data); }).catch(() => { if (live) setMarketInfo(null); });
-    refresh(); const timer = window.setInterval(refresh, 30_000);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [symbol, market]);
 
   const current = markets[symbol];
   const latestReversal = reversalData?.latest ?? null;
@@ -392,7 +396,7 @@ export default function Terminal() {
           <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
           <div className="chart-overlay-strip"><div className="chart-overlay-legend">{showAnchoredVwaps && <><span><i style={{ background: "#f0bd61" }}/>VWAP D</span><span><i style={{ background: "#4d9bff" }}/>VWAP S</span><span><i style={{ background: "#bd82ff" }}/>VWAP M</span></>}{showPreviousLevels && <><span><i style={{ background: "linear-gradient(90deg,#ff667c 50%,#44d49a 50%)" }}/>D−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#ff9a58 50%,#28d6c5 50%)" }}/>S−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#e86cff 50%,#7aa2ff 50%)" }}/>M−1 H/L</span></>}</div></div>
           <div className="chartarea"><span className="chartlabel">{symbol} · {interval} · OHLCV SPOT · BINANCE · UTC</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} signals={chartSignals} breakoutSignals={chartBreakoutSignals}/> : <div className="chartfallback">Candles indisponíveis · verifique a conexão com a API local</div>}</div>
-          <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">PREÇO SPOT</div><div className="statvalue mono">{fmtPrice(marketInfo?.price)}</div></div></div>
+          <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">PREÇO SPOT</div><div className="statvalue mono">{fmtPrice(current?.price)}</div></div></div>
         </section>
 
       <div className="bottomgrid" id="flow">
@@ -407,7 +411,7 @@ export default function Terminal() {
           <div className="coverage"><div className="coverrow"><span>CVD SPOT · AMOSTRA VISÍVEL</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · spot</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · spot</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades na fita</span><span className="mono">{trades.length} / 60</span></div><div className="coverrow"><span>Coletor Binance</span><span className={`mono ${flowQuality?.connected ? "pos" : "neg"}`}>{flowQuality?.connected ? "AO VIVO" : flowQuality?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div><div className="coverrow"><span>Último evento · latência</span><span className="mono">{flowQuality?.lastEventTime ? `${fmtTime(flowQuality.lastEventTime)} · ${flowQuality.lastLatencyMs ?? "—"} ms` : "—"}</span></div><div className="coverrow"><span>Eventos · reconexões</span><span className="mono">{flowQuality?.events ?? 0} · {flowQuality?.reconnects ?? 0}</span></div><div className="coverrow"><span>Saltos · trades recuperados · falhas</span><span className="mono">{flowQuality?.possibleIdGaps ?? 0} · {flowQuality?.backfillRowsQueued ?? 0} · {flowQuality?.backfillFailures ?? 0}</span></div><div className="coverrow"><span>Trades brutos · retenção</span><span className="mono">{flowQuality?.storedTrades ?? 0} · {flowQuality?.rawRetentionHours ?? "—"} h</span></div><div className="coverrow"><span>Barras de fluxo · retenção</span><span className="mono">{flowQuality?.storedFlowBars ?? 0} · {flowQuality?.aggregateRetentionDays ?? "—"} d</span></div><div className="coverrow"><span>Armazenamento</span><span className="mono">{flowQuality ? `${flowQuality.storage.toUpperCase()} · ${(flowQuality.storageBytes / 1048576).toFixed(1)} MB` : "—"}</span></div><div className="coverrow"><span>Fila descartada</span><span className={`mono ${flowQuality?.queueDropped ? "neg" : "pos"}`}>{flowQuality?.queueDropped ?? 0}</span></div>{flowQuality?.storage === "sqlite" && !flowQuality.storageDurable && <div className="dataerror">SQLite no disco local do serviço: no Render sem volume persistente, o histórico pode sumir em reinícios ou deploys.</div>}{flowQuality?.storage === "postgres" && flowQuality.storageBytes >= 400 * 1024 * 1024 && <div className="dataerror">Banco próximo da cota gratuita de 500 MB. Reduza a retenção em FLOW_RETENTION_HOURS e FLOW_AGG_RETENTION_DAYS.</div>}
             <hr style={{ border: 0, borderTop: "1px solid #202833", margin: "9px 0" }}/>
             <div className="coverrow"><span>Sentimento · Fear & Greed</span><strong className="mono" style={{ color: fear?.value != null ? "#d5c080" : "#8996a5" }}>{fear?.value != null ? `${fear.value} · ${fear.label}` : "Indisponível"}</strong></div>
-            <div className="coverrow"><span>Mercado</span><span className="mono">À vista · sem alavancagem</span></div><div className="coverrow"><span>Preço de referência spot</span><span className="mono">{fmtPrice(marketInfo?.price)}</span></div>
+            <div className="coverrow"><span>Mercado</span><span className="mono">À vista · sem alavancagem</span></div><div className="coverrow"><span>Preço de referência spot</span><span className="mono">{fmtPrice(current?.price)}</span></div>
             <div className="footnote">{book?.status === "live" ? `Book recebido ${fmtTime(book.receivedAt)} · ${book.eventTime ? `${Math.max(0, book.receivedAt-book.eventTime)} ms de latência` : "sem timestamp de exchange"}` : "Book aguardando conexão"}</div>
           </div>
           <FlowHistory symbol={symbol}/>

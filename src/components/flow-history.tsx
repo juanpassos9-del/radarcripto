@@ -21,6 +21,7 @@ export default function FlowHistory({ symbol }: { symbol: string }) {
   useEffect(() => {
     let active = true;
     const load = async () => {
+      if (document.visibilityState !== "visible") return;
       const end = Date.now();
       const start = end - hours * 60 * 60_000;
       try {
@@ -32,7 +33,9 @@ export default function FlowHistory({ symbol }: { symbol: string }) {
     };
     void load();
     const timer = window.setInterval(() => void load(), 60_000);
-    return () => { active = false; window.clearInterval(timer); };
+    const onVisibility = () => { if (document.visibilityState === "visible") void load(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => { active = false; window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisibility); };
   }, [symbol, hours, interval]);
 
   const chart = useMemo(() => {

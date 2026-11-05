@@ -11,6 +11,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
   const chartRef = useRef<ReturnType<typeof createChart> | null>(null);
   const candleRef = useRef<ReturnType<ReturnType<typeof createChart>["addSeries"]> | null>(null);
   const volumeRef = useRef<ReturnType<ReturnType<typeof createChart>["addSeries"]> | null>(null);
+  const renderedDataRef = useRef<{ key: string; first: number; last: number; length: number; anomalies: boolean } | null>(null);
   const zoneSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const referenceSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
@@ -56,10 +57,10 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
   }, [signals, breakoutSignals]);
 
   useEffect(() => {
-    const candleSeries = candleRef.current as { setData: (data: unknown[]) => void } | null;
-    const volumeSeries = volumeRef.current as { setData: (data: unknown[]) => void } | null;
+    const candleSeries = candleRef.current as { setData: (data: unknown[]) => void; update: (data: unknown) => void } | null;
+    const volumeSeries = volumeRef.current as { setData: (data: unknown[]) => void; update: (data: unknown) => void } | null;
     if (!candleSeries || !volumeSeries || candles.length === 0) return;
-    const mapped = candles.map((c, index) => {
+    const mapCandle = (c: Candle, index: number) => {
       const previous = candles.slice(Math.max(0, index - 20), index);
       const averageVolume = previous.length === 20 ? previous.reduce((sum, item) => sum + item.volume, 0) / 20 : null;
       const ratio = averageVolume && averageVolume > 0 ? c.volume / averageVolume : null;
@@ -70,11 +71,28 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
         candle: { time: c.time as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close, color, borderColor: color, wickColor: color },
         volume: { time: c.time as UTCTimestamp, value: c.volume, color: bullish ? (anomaly ? "#44d49a" : "#44d49a35") : (anomaly ? "#ff667c" : "#ff667c35") },
       };
-    });
-    candleSeries.setData(mapped.map(item => item.candle));
-    volumeSeries.setData(mapped.map(item => item.volume));
-    chartRef.current?.timeScale().fitContent();
-  }, [candles, symbol, showVolumeAnomalies]);
+    };
+    const key = `${symbol}:${interval}`;
+    const first = candles[0].time;
+    const last = candles[candles.length - 1].time;
+    const previous = renderedDataRef.current;
+    const reset = !previous || previous.key !== key || previous.first !== first || previous.anomalies !== showVolumeAnomalies || candles.length < previous.length || candles.length > previous.length + 1;
+    if (reset) {
+      const mapped = candles.map(mapCandle);
+      candleSeries.setData(mapped.map(item => item.candle));
+      volumeSeries.setData(mapped.map(item => item.volume));
+      chartRef.current?.timeScale().fitContent();
+    } else if (last === previous.last || candles.length === previous.length + 1) {
+      const mapped = mapCandle(candles[candles.length - 1], candles.length - 1);
+      candleSeries.update(mapped.candle);
+      volumeSeries.update(mapped.volume);
+    } else {
+      const mapped = candles.map(mapCandle);
+      candleSeries.setData(mapped.map(item => item.candle));
+      volumeSeries.setData(mapped.map(item => item.volume));
+    }
+    renderedDataRef.current = { key, first, last, length: candles.length, anomalies: showVolumeAnomalies };
+  }, [candles, symbol, interval, showVolumeAnomalies]);
 
   useEffect(() => {
     const chart = chartRef.current;
