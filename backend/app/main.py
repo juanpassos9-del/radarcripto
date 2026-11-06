@@ -484,9 +484,16 @@ class MarketService:
         bid_volume = sum(item["quantity"] for item in combined_bids.values())
         ask_volume = sum(item["quantity"] for item in combined_asks.values())
         imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume) if bid_volume + ask_volume else 0.0
+        midpoint = reference_price
+        liquidity_bands = {}
+        for label, fraction in (("0.1%", 0.001), ("0.5%", 0.005)):
+            bid_notional = sum(price * item["quantity"] for price, item in combined_bids.items() if midpoint * (1 - fraction) <= price <= midpoint)
+            ask_notional = sum(price * item["quantity"] for price, item in combined_asks.items() if midpoint <= price <= midpoint * (1 + fraction))
+            liquidity_bands[f"bid{label}"] = bid_notional
+            liquidity_bands[f"ask{label}"] = ask_notional
         live_sources = [name for name, status in venue_states.items() if status == "live"]
         event_times = [item.get("eventTime") for item in [state, *[x for x in external if x]] if item.get("eventTime")]
-        payload = BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=ask_rows[0][0] - bid_rows[0][0] if ask_rows and bid_rows else 0, imbalance=imbalance, eventTime=max(event_times) if event_times else None, receivedAt=now_ms, status="live" if live_sources else "connecting", source=" + ".join(live_sources) or "Nenhuma fonte ao vivo", sources=venue_states)
+        payload = BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=ask_rows[0][0] - bid_rows[0][0] if ask_rows and bid_rows else 0, imbalance=imbalance, eventTime=max(event_times) if event_times else None, receivedAt=now_ms, status="live" if live_sources else "connecting", source=" + ".join(live_sources) or "Nenhuma fonte ao vivo", sources=venue_states, liquidityBands=liquidity_bands)
         self.book_payload_cache[cache_key] = (version, payload)
         return payload
 
@@ -876,7 +883,9 @@ async def scanner_flow():
         current_bucket = (now_ms // bucket_ms) * bucket_ms
         if store is None:
             raise HTTPException(503, "Flow storage is not ready")
-        grouped = await asyncio.to_thread(store.scanner_flow, current_bucket - 3 * bucket_ms, now_ms)
+        # One shared query supplies both the existing 15m pace and longer
+        # observed-flow context to every scanner client.
+        grouped = await asyncio.to_thread(store.scanner_flow, current_bucket - 16 * bucket_ms, now_ms)
         assets: dict[str, dict[str, Any]] = {}
         elapsed = max(0, now_ms - current_bucket)
         for symbol in SYMBOLS:
@@ -892,6 +901,16 @@ async def scanner_flow():
                 if expected > 0:
                     relative_flow = current_notional / expected
             latest_bucket = max(buckets, default=None)
+            def window_flow(count: int) -> tuple[float | None, float | None, int]:
+                window = [buckets.get(current_bucket - index * bucket_ms) for index in range(count)]
+                observed = [item for item in window if item is not None]
+                if not observed:
+                    return None, None, 0
+                notional = sum(item["buyNotional"] + item["sellNotional"] for item in observed)
+                cvd = sum(item["buyNotional"] - item["sellNotional"] for item in observed)
+                return notional, cvd, len(observed)
+            notional_1h, cvd_1h, buckets_1h = window_flow(4)
+            notional_4h, cvd_4h, buckets_4h = window_flow(16)
             assets[symbol] = {
                 "symbol": symbol,
                 "notional15m": current_notional,
@@ -899,13 +918,19 @@ async def scanner_flow():
                 "relativeFlow15m": relative_flow,
                 "observedBuckets": len(buckets),
                 "lastObservedBucket": latest_bucket,
+                "notional1h": notional_1h,
+                "cvdNotional1h": cvd_1h,
+                "observedBuckets1h": buckets_1h,
+                "notional4h": notional_4h,
+                "cvdNotional4h": cvd_4h,
+                "observedBuckets4h": buckets_4h,
             }
         return {
             "assets": assets,
             "bucketStartedAt": current_bucket,
             "source": "Binance Spot aggTrades persistidos",
             "receivedAt": now_ms,
-            "relativeFlowMethod": "Fluxo nocional do bloco UTC de 15m em andamento, ajustado pelo tempo decorrido, versus média dos 3 blocos anteriores. Requer 3 blocos anteriores observados e pelo menos 2 minutos do bloco atual.",
+            "relativeFlowMethod": "Ritmo de 15m compara o bloco atual, ajustado pelo tempo decorrido, com os 3 anteriores. CVD de 1h e 4h soma compra menos venda observadas em aggTrades da Binance, somente em blocos com trades.",
         }
     return await service.cache_value("scanner-flow", 15, build)
 

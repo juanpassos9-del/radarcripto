@@ -36,6 +36,7 @@ class BookSnapshot(BaseModel):
     status: str
     source: str = "Binance"
     sources: dict[str, str] = Field(default_factory=dict)
+    liquidityBands: dict[str, float] = Field(default_factory=dict)
 
 
 class Trade(BaseModel):
