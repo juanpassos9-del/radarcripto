@@ -1,7 +1,28 @@
 "use client";
 import { useEffect, useRef } from "react";
-import { CandlestickSeries, ColorType, createChart, createSeriesMarkers, CrosshairMode, HistogramSeries, LineSeries, LineStyle, type ISeriesApi, type ISeriesMarkersPluginApi, type Time, type UTCTimestamp } from "lightweight-charts";
+import { CandlestickSeries, ColorType, createChart, createSeriesMarkers, CrosshairMode, HistogramSeries, LineSeries, LineStyle, TickMarkType, type ISeriesApi, type ISeriesMarkersPluginApi, type Time, type UTCTimestamp } from "lightweight-charts";
 import type { BreakoutSignal, Candle, ChartOverlays, ReversalSignal, VolatilityZones } from "@/lib/market";
+
+const CHART_TIME_ZONE = "America/Sao_Paulo";
+const chartDate = (time: Time): Date => typeof time === "number"
+  ? new Date(time * 1000)
+  : typeof time === "string"
+    ? new Date(`${time}T00:00:00Z`)
+    : new Date(Date.UTC(time.year, time.month - 1, time.day));
+const formatChartTick = (time: Time, tickType: TickMarkType): string => {
+  const date = chartDate(time);
+  if (tickType === TickMarkType.Year) return new Intl.DateTimeFormat("pt-BR", { year: "numeric", timeZone: CHART_TIME_ZONE }).format(date);
+  if (tickType === TickMarkType.Month) return new Intl.DateTimeFormat("pt-BR", { month: "short", timeZone: CHART_TIME_ZONE }).format(date).replace(".", "");
+  if (tickType === TickMarkType.DayOfMonth) return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", timeZone: CHART_TIME_ZONE }).format(date);
+  const options: Intl.DateTimeFormatOptions = tickType === TickMarkType.TimeWithSeconds
+    ? { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZone: CHART_TIME_ZONE }
+    : { hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: CHART_TIME_ZONE };
+  return new Intl.DateTimeFormat("pt-BR", options).format(date);
+};
+const formatChartCrosshairTime = (time: Time) => new Intl.DateTimeFormat("pt-BR", {
+  timeZone: CHART_TIME_ZONE, day: "2-digit", month: "2-digit", year: "numeric",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+}).format(chartDate(time));
 
 export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, signals, breakoutSignals }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[] }) {
   const host = useRef<HTMLDivElement>(null);
@@ -21,8 +42,9 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
     const chart = createChart(host.current, {
       width: host.current.clientWidth, height: host.current.clientHeight,
       layout: { background: { type: ColorType.Solid, color: "#0d1219" }, textColor: "#778596", fontFamily: "DM Mono, monospace", fontSize: 10 },
+      localization: { locale: "pt-BR", timeFormatter: formatChartCrosshairTime },
       grid: { vertLines: { color: "#17202a" }, horzLines: { color: "#17202a" } },
-      crosshair: { mode: CrosshairMode.Normal }, rightPriceScale: { borderColor: "#27313c", scaleMargins: { top: 0.08, bottom: 0.2 } }, timeScale: { borderColor: "#27313c", timeVisible: true, secondsVisible: false, rightOffset: 16 },
+      crosshair: { mode: CrosshairMode.Normal }, rightPriceScale: { borderColor: "#27313c", scaleMargins: { top: 0.08, bottom: 0.2 } }, timeScale: { borderColor: "#27313c", timeVisible: true, secondsVisible: false, rightOffset: 16, tickMarkFormatter: formatChartTick },
     });
     const candle = chart.addSeries(CandlestickSeries, { upColor: "#44d49a", downColor: "#ff667c", borderUpColor: "#44d49a", borderDownColor: "#ff667c", wickUpColor: "#44d49a", wickDownColor: "#ff667c", priceLineColor: "#28d6c5" });
     const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume" });
