@@ -8,9 +8,6 @@ export type ChartOverlays = {
 };
 export type Trade = { id: number | string; time: number; price: number; quantity: number; side: "buy" | "sell"; source?: string };
 export type Level = { price: number; quantity: number; total: number; sources?: string[] };
-export type FootprintLevel = { price: number; buyQuantity: number; sellQuantity: number; buyNotional: number; sellNotional: number; delta: number; totalNotional: number; tradeCount: number };
-export type FootprintCandle = { time: number; open: number; high: number; low: number; close: number; buyNotional: number; sellNotional: number; deltaNotional: number; totalNotional: number; tradeCount: number; poc: number; vah: number; val: number; levels: FootprintLevel[] };
-export type FootprintData = { symbol: string; intervalMinutes: number; limit: number; tickSize: number; tickCount: number; priceStep: number; candles: FootprintCandle[]; source: string; coverage: { observedCandles: number; expectedCandles: number; estimatedPercent: number; retentionDays: number; interpretation: string }; receivedAt: number };
 export type MarketSnapshot = {
   symbol: string; price: number | null; change24h: number | null; volume24h: number | null;
   quoteVolume24h?: number | null; high24h: number | null; low24h: number | null; source: string; eventTime: number | null;

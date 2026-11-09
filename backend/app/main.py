@@ -1175,43 +1175,6 @@ async def flow_history(
         "receivedAt": now_ms,
     }
 
-@app.get("/api/footprint")
-async def footprint(
-    symbol: str = Query("BTCUSDT"),
-    interval: int = Query(5, ge=1, le=15),
-    limit: int = Query(24, ge=12, le=60),
-    tick_count: int = Query(5, ge=1, le=10),
-):
-    """Return observed Spot footprint levels for candles captured while viewed."""
-    symbol = validate_symbol(symbol)
-    if interval not in {1, 5, 15} or tick_count not in {1, 2, 5, 10}:
-        raise HTTPException(400, "Interval must be 1, 5 or 15 minutes; price grouping must be 1, 2, 5 or 10 ticks")
-    store = service.flow_store
-    if store is None:
-        raise HTTPException(503, "Flow storage is not ready")
-    try:
-        await asyncio.to_thread(store.activate_footprint, symbol)
-        info = await service.cache_value(f"exchange-info:{symbol}", 3600, lambda: service._request_uncached(SPOT_DATA, "/api/v3/exchangeInfo", {"symbol": symbol}))
-        filters = info.get("symbols", [{}])[0].get("filters", [])
-        price_filter = next((item for item in filters if item.get("filterType") == "PRICE_FILTER"), None)
-        tick_size = float(price_filter["tickSize"]) if price_filter else 0.01
-        price_step = tick_size * tick_count
-        end_ms = int(time.time() * 1000)
-        start_ms = end_ms - limit * interval * 60_000
-        candles = await asyncio.to_thread(store.footprint_history, symbol, start_ms, end_ms, interval, price_step)
-    except Exception as error:
-        log.exception("footprint query failed", extra={"symbol": symbol})
-        raise HTTPException(503, "Footprint temporariamente indisponível") from error
-    expected = limit
-    return {"symbol": symbol, "intervalMinutes": interval, "limit": limit, "tickSize": tick_size,
-            "tickCount": tick_count, "priceStep": price_step, "candles": candles,
-            "source": "Binance Spot aggTrades observados enquanto esta seção está ativa",
-            "coverage": {"observedCandles": len(candles), "expectedCandles": expected,
-                         "estimatedPercent": round(min(100, len(candles) / expected * 100), 2) if expected else 0,
-                         "retentionDays": store.footprint_retention_days,
-                         "interpretation": "A cobertura cresce a partir da primeira visualização; intervalos sem trades e falhas do coletor podem parecer iguais."},
-            "receivedAt": end_ms}
-
 @app.get("/api/reversal-signals")
 async def reversal_signals(
     symbol: str = Query("BTCUSDT"),
