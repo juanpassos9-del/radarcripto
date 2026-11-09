@@ -21,6 +21,7 @@ class FlowStore:
         self.path = Path(os.getenv("FLOW_DB_PATH", str(default_path))).expanduser()
         self.retention_hours = max(1, int(os.getenv("FLOW_RETENTION_HOURS", "1")))
         self.aggregate_retention_days = max(7, int(os.getenv("FLOW_AGG_RETENTION_DAYS", "30")))
+        self.footprint_retention_days = max(1, int(os.getenv("FLOW_FOOTPRINT_RETENTION_DAYS", "1")))
         configured_durable = os.getenv("FLOW_STORAGE_DURABLE", "false").lower() in {"1", "true", "yes"}
         self.durable = self.storage == "postgres" or configured_durable
         self.pg_connection: Any = None
@@ -76,6 +77,9 @@ class FlowStore:
                     )
                 """)
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_flow_minute_bars_symbol_time ON flow_minute_bars(symbol, bucket_time_ms DESC)")
+                cursor.execute("CREATE TABLE IF NOT EXISTS footprint_active_symbols (symbol TEXT PRIMARY KEY, active_until_ms BIGINT NOT NULL)")
+                cursor.execute("CREATE TABLE IF NOT EXISTS flow_footprint_levels (symbol TEXT NOT NULL, minute_bucket_ms BIGINT NOT NULL, price DOUBLE PRECISION NOT NULL, buy_quantity DOUBLE PRECISION NOT NULL, sell_quantity DOUBLE PRECISION NOT NULL, buy_notional DOUBLE PRECISION NOT NULL, sell_notional DOUBLE PRECISION NOT NULL, trade_count BIGINT NOT NULL, PRIMARY KEY(symbol, minute_bucket_ms, price))")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_footprint_symbol_time ON flow_footprint_levels(symbol, minute_bucket_ms DESC)")
                 cursor.execute("""
                     CREATE OR REPLACE FUNCTION nexus_update_flow_minute_bar() RETURNS trigger AS $$
                     BEGIN
@@ -105,6 +109,20 @@ class FlowStore:
                             close_price = CASE WHEN (EXCLUDED.close_time_ms, EXCLUDED.close_trade_id) > (flow_minute_bars.close_time_ms, flow_minute_bars.close_trade_id) THEN EXCLUDED.close_price ELSE flow_minute_bars.close_price END,
                             close_time_ms = GREATEST(flow_minute_bars.close_time_ms, EXCLUDED.close_time_ms),
                             close_trade_id = CASE WHEN (EXCLUDED.close_time_ms, EXCLUDED.close_trade_id) > (flow_minute_bars.close_time_ms, flow_minute_bars.close_trade_id) THEN EXCLUDED.close_trade_id ELSE flow_minute_bars.close_trade_id END;
+                        IF EXISTS (SELECT 1 FROM footprint_active_symbols WHERE symbol = NEW.symbol AND active_until_ms > (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT) THEN
+                            INSERT INTO flow_footprint_levels(symbol, minute_bucket_ms, price, buy_quantity, sell_quantity, buy_notional, sell_notional, trade_count)
+                            VALUES (NEW.symbol, (NEW.event_time_ms / 60000) * 60000, NEW.price,
+                                CASE WHEN NEW.side = 'buy' THEN NEW.quantity ELSE 0 END,
+                                CASE WHEN NEW.side = 'sell' THEN NEW.quantity ELSE 0 END,
+                                CASE WHEN NEW.side = 'buy' THEN NEW.price * NEW.quantity ELSE 0 END,
+                                CASE WHEN NEW.side = 'sell' THEN NEW.price * NEW.quantity ELSE 0 END, 1)
+                            ON CONFLICT(symbol, minute_bucket_ms, price) DO UPDATE SET
+                                buy_quantity = flow_footprint_levels.buy_quantity + EXCLUDED.buy_quantity,
+                                sell_quantity = flow_footprint_levels.sell_quantity + EXCLUDED.sell_quantity,
+                                buy_notional = flow_footprint_levels.buy_notional + EXCLUDED.buy_notional,
+                                sell_notional = flow_footprint_levels.sell_notional + EXCLUDED.sell_notional,
+                                trade_count = flow_footprint_levels.trade_count + 1;
+                        END IF;
                         RETURN NEW;
                     END;
                     $$ LANGUAGE plpgsql
@@ -153,6 +171,9 @@ class FlowStore:
                 )
             """)
             connection.execute("CREATE INDEX IF NOT EXISTS idx_flow_minute_bars_symbol_time ON flow_minute_bars(symbol, bucket_time_ms DESC)")
+            connection.execute("CREATE TABLE IF NOT EXISTS footprint_active_symbols (symbol TEXT PRIMARY KEY, active_until_ms INTEGER NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS flow_footprint_levels (symbol TEXT NOT NULL, minute_bucket_ms INTEGER NOT NULL, price REAL NOT NULL, buy_quantity REAL NOT NULL, sell_quantity REAL NOT NULL, buy_notional REAL NOT NULL, sell_notional REAL NOT NULL, trade_count INTEGER NOT NULL, PRIMARY KEY(symbol, minute_bucket_ms, price))")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_footprint_symbol_time ON flow_footprint_levels(symbol, minute_bucket_ms DESC)")
             connection.execute("DROP TRIGGER IF EXISTS trg_flow_trade_minute_bar")
             connection.execute("""
                 CREATE TRIGGER trg_flow_trade_minute_bar AFTER INSERT ON flow_trades BEGIN
@@ -182,12 +203,28 @@ class FlowStore:
                         close_price = CASE WHEN (excluded.close_time_ms, excluded.close_trade_id) > (close_time_ms, close_trade_id) THEN excluded.close_price ELSE close_price END,
                         close_time_ms = max(close_time_ms, excluded.close_time_ms),
                         close_trade_id = CASE WHEN (excluded.close_time_ms, excluded.close_trade_id) > (close_time_ms, close_trade_id) THEN excluded.close_trade_id ELSE close_trade_id END;
+                    INSERT INTO flow_footprint_levels(symbol, minute_bucket_ms, price, buy_quantity, sell_quantity, buy_notional, sell_notional, trade_count)
+                    SELECT NEW.symbol, (NEW.event_time_ms / 60000) * 60000, NEW.price,
+                        CASE WHEN NEW.side = 'buy' THEN NEW.quantity ELSE 0 END,
+                        CASE WHEN NEW.side = 'sell' THEN NEW.quantity ELSE 0 END,
+                        CASE WHEN NEW.side = 'buy' THEN NEW.price * NEW.quantity ELSE 0 END,
+                        CASE WHEN NEW.side = 'sell' THEN NEW.price * NEW.quantity ELSE 0 END, 1
+                    WHERE EXISTS (SELECT 1 FROM footprint_active_symbols WHERE symbol = NEW.symbol AND active_until_ms > CAST(strftime('%s','now') AS INTEGER) * 1000)
+                    ON CONFLICT(symbol, minute_bucket_ms, price) DO UPDATE SET
+                        buy_quantity = buy_quantity + excluded.buy_quantity,
+                        sell_quantity = sell_quantity + excluded.sell_quantity,
+                        buy_notional = buy_notional + excluded.buy_notional,
+                        sell_notional = sell_notional + excluded.sell_notional,
+                        trade_count = trade_count + 1;
                 END
             """)
             cutoff = int(time.time() * 1000) - self.retention_hours * 3_600_000
             connection.execute("DELETE FROM flow_trades WHERE event_time_ms < ?", (cutoff,))
             aggregate_cutoff = int(time.time() * 1000) - self.aggregate_retention_days * 86_400_000
             connection.execute("DELETE FROM flow_minute_bars WHERE bucket_time_ms < ?", (aggregate_cutoff,))
+            footprint_cutoff = int(time.time() * 1000) - self.footprint_retention_days * 86_400_000
+            connection.execute("DELETE FROM flow_footprint_levels WHERE minute_bucket_ms < ?", (footprint_cutoff,))
+            connection.execute("DELETE FROM footprint_active_symbols WHERE active_until_ms < ?", (int(time.time() * 1000),))
             connection.execute("PRAGMA incremental_vacuum(10000)")
             connection.commit()
 
@@ -198,10 +235,14 @@ class FlowStore:
             with self.db_lock, self.pg_connection.cursor() as cursor:
                 cursor.execute("DELETE FROM flow_trades WHERE event_time_ms < %s", (cutoff,))
                 cursor.execute("DELETE FROM flow_minute_bars WHERE bucket_time_ms < %s", (aggregate_cutoff,))
+                cursor.execute("DELETE FROM flow_footprint_levels WHERE minute_bucket_ms < %s", (int(time.time() * 1000) - self.footprint_retention_days * 86_400_000,))
+                cursor.execute("DELETE FROM footprint_active_symbols WHERE active_until_ms < %s", (int(time.time() * 1000),))
             return
         with sqlite3.connect(self.path, timeout=10) as connection:
             connection.execute("DELETE FROM flow_trades WHERE event_time_ms < ?", (cutoff,))
             connection.execute("DELETE FROM flow_minute_bars WHERE bucket_time_ms < ?", (aggregate_cutoff,))
+            connection.execute("DELETE FROM flow_footprint_levels WHERE minute_bucket_ms < ?", (int(time.time() * 1000) - self.footprint_retention_days * 86_400_000,))
+            connection.execute("DELETE FROM footprint_active_symbols WHERE active_until_ms < ?", (int(time.time() * 1000),))
             connection.execute("PRAGMA incremental_vacuum(10000)")
             connection.commit()
 
@@ -333,6 +374,67 @@ class FlowStore:
                 current["low"] = min(current["low"], float(row[8]))
                 current["close"] = float(row[9])
         return list(grouped.values())
+
+    def activate_footprint(self, symbol: str, ttl_seconds: int = 120) -> None:
+        until = int(time.time() * 1000) + ttl_seconds * 1000
+        if self.storage == "postgres":
+            with self.db_lock, self.pg_connection.cursor() as cursor:
+                cursor.execute("INSERT INTO footprint_active_symbols(symbol, active_until_ms) VALUES (%s, %s) ON CONFLICT(symbol) DO UPDATE SET active_until_ms = GREATEST(footprint_active_symbols.active_until_ms, EXCLUDED.active_until_ms)", (symbol, until))
+            return
+        with sqlite3.connect(self.path, timeout=5) as connection:
+            connection.execute("INSERT INTO footprint_active_symbols(symbol, active_until_ms) VALUES (?, ?) ON CONFLICT(symbol) DO UPDATE SET active_until_ms = max(active_until_ms, excluded.active_until_ms)", (symbol, until))
+            connection.commit()
+
+    def footprint_history(self, symbol: str, start_ms: int, end_ms: int, interval_minutes: int, price_step: float) -> list[dict[str, Any]]:
+        """Build footprint candles from observed trades captured while a symbol was active."""
+        if self.storage == "postgres":
+            with self.db_lock, self.pg_connection.cursor() as cursor:
+                cursor.execute("SELECT minute_bucket_ms, price, buy_quantity, sell_quantity, buy_notional, sell_notional, trade_count FROM flow_footprint_levels WHERE symbol = %s AND minute_bucket_ms >= %s AND minute_bucket_ms < %s ORDER BY minute_bucket_ms, price", (symbol, start_ms, end_ms))
+                levels = cursor.fetchall()
+                cursor.execute("SELECT bucket_time_ms, open_price, high_price, low_price, close_price FROM flow_minute_bars WHERE symbol = %s AND bucket_time_ms >= %s AND bucket_time_ms < %s ORDER BY bucket_time_ms", (symbol, start_ms, end_ms))
+                bars = cursor.fetchall()
+        else:
+            if not self.path.exists():
+                return []
+            with sqlite3.connect(self.path, timeout=5) as connection:
+                levels = connection.execute("SELECT minute_bucket_ms, price, buy_quantity, sell_quantity, buy_notional, sell_notional, trade_count FROM flow_footprint_levels WHERE symbol = ? AND minute_bucket_ms >= ? AND minute_bucket_ms < ? ORDER BY minute_bucket_ms, price", (symbol, start_ms, end_ms)).fetchall()
+                bars = connection.execute("SELECT bucket_time_ms, open_price, high_price, low_price, close_price FROM flow_minute_bars WHERE symbol = ? AND bucket_time_ms >= ? AND bucket_time_ms < ? ORDER BY bucket_time_ms", (symbol, start_ms, end_ms)).fetchall()
+        interval_ms = interval_minutes * 60_000
+        candles: dict[int, dict[str, Any]] = {}
+        for row in bars:
+            ts = int(row[0]); bucket = (ts // interval_ms) * interval_ms
+            c = candles.setdefault(bucket, {"time": bucket // 1000, "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "levels": {}})
+            c["high"] = max(c["high"], float(row[2])); c["low"] = min(c["low"], float(row[3])); c["close"] = float(row[4])
+        step = max(float(price_step), 1e-12)
+        for row in levels:
+            ts, price = int(row[0]), float(row[1]); bucket = (ts // interval_ms) * interval_ms
+            c = candles.get(bucket)
+            if c is None: continue
+            grouped_price = round(round(price / step) * step, 12)
+            level = c["levels"].setdefault(grouped_price, {"price": grouped_price, "buyQuantity": 0.0, "sellQuantity": 0.0, "buyNotional": 0.0, "sellNotional": 0.0, "tradeCount": 0})
+            level["buyQuantity"] += float(row[2]); level["sellQuantity"] += float(row[3])
+            level["buyNotional"] += float(row[4]); level["sellNotional"] += float(row[5]); level["tradeCount"] += int(row[6])
+        result = []
+        for c in candles.values():
+            ordered = sorted(c["levels"].values(), key=lambda item: item["price"])
+            if not ordered: continue
+            for level in ordered:
+                level["delta"] = level["buyNotional"] - level["sellNotional"]
+                level["totalNotional"] = level["buyNotional"] + level["sellNotional"]
+            total = sum(item["totalNotional"] for item in ordered)
+            poc = max(ordered, key=lambda item: item["totalNotional"])
+            low_idx = high_idx = ordered.index(poc); accumulated = poc["totalNotional"]
+            while total and accumulated < total * 0.70 and (low_idx > 0 or high_idx < len(ordered) - 1):
+                below = ordered[low_idx - 1]["totalNotional"] if low_idx > 0 else -1
+                above = ordered[high_idx + 1]["totalNotional"] if high_idx < len(ordered) - 1 else -1
+                if above > below: high_idx += 1; accumulated += above
+                else: low_idx -= 1; accumulated += below
+            buy = sum(item["buyNotional"] for item in ordered); sell = sum(item["sellNotional"] for item in ordered)
+            c.update({"levels": ordered, "buyNotional": buy, "sellNotional": sell, "deltaNotional": buy-sell,
+                      "totalNotional": buy+sell, "tradeCount": sum(item["tradeCount"] for item in ordered),
+                      "poc": poc["price"], "vah": ordered[high_idx]["price"], "val": ordered[low_idx]["price"]})
+            result.append(c)
+        return sorted(result, key=lambda item: item["time"])
 
     def scanner_flow(self, start_ms: int, end_ms: int) -> dict[str, list[dict[str, Any]]]:
         """Return observed Binance flow grouped into 15-minute buckets for all assets."""

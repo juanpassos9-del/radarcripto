@@ -52,6 +52,8 @@ services:
         value: "1"
       - key: FLOW_AGG_RETENTION_DAYS
         value: "30"
+      - key: FLOW_FOOTPRINT_RETENTION_DAYS
+        value: "1"
       - key: FLOW_GAP_RECOVERY_MAX_TRADES
         value: "5000"
       - key: BINANCE_SPOT_REST_URL
