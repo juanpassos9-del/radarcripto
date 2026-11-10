@@ -1034,6 +1034,127 @@ async def tradfi_candles(symbol: str = Query(...), interval: str = Query("5m"), 
         log.warning("BingX TradFi candles unavailable", extra={"symbol": symbol, "interval": interval, "error": str(error)})
         raise HTTPException(502, "Candles BingX indisponíveis para este ativo ou sessão.") from error
 
+@app.get("/api/tradfi/indicators")
+async def tradfi_indicators(symbol: str = Query(...), interval: str = Query("5m")):
+    """Volatility, anchored levels and deterministic signals from BingX TradFi OHLCV."""
+    symbol = await validate_bingx_tradfi_symbol(symbol)
+    if interval not in {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}:
+        raise HTTPException(400, "Intervalo TradFi inválido.")
+    try:
+        rows, daily_rows, hourly_rows = await asyncio.gather(
+            bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": interval, "limit": 300}, 20),
+            bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "1d", "limit": 400}, 300),
+            bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "1h", "limit": 500}, 60),
+        )
+
+        def normalize(row: dict[str, Any]) -> dict[str, Any]:
+            return {"time": int(row["time"] // 1000), "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]), "close": float(row["close"]), "volume": float(row.get("volume", 0))}
+
+        candles = [normalize(row) for row in rows or []]
+        daily = [normalize(row) for row in daily_rows or []]
+        hourly = [normalize(row) for row in hourly_rows or []]
+        zones = calculate_zones(symbol, daily)
+        zones["source"] = "BingX USDT-M TradFi daily klines"
+
+        # Keep levels aligned with the information that was available at each
+        # closed intraday candle. The newest daily bar is the still-forming bar.
+        closed_candles = candles[:-1]
+        zones_by_candle: list[dict[str, Any] | None] = []
+        zones_cache: dict[int, dict[str, Any]] = {}
+        for candle in closed_candles:
+            day_index = -1
+            for index, daily_candle in enumerate(daily):
+                if daily_candle["time"] + 86_400 <= candle["time"]:
+                    day_index = index
+                else:
+                    break
+            if day_index < 0 or day_index + 1 >= len(daily):
+                zones_by_candle.append(None)
+                continue
+            if day_index not in zones_cache:
+                history = daily[:day_index + 2]
+                zones_cache[day_index] = calculate_zones(symbol, history)
+                zones_cache[day_index]["source"] = "BingX USDT-M TradFi daily klines"
+            zones_by_candle.append(zones_cache[day_index])
+
+        reversal = build_reversal_signals(
+            symbol, interval, closed_candles, zones_by_candle,
+            min_sigma=1.0, min_score=50, cooldown=10, volume_enabled=True,
+        )
+        breakout = build_breakout_signals(symbol, interval, closed_candles)
+        breakout["source"] = "BingX USDT-M TradFi OHLCV; candles fechados; compressão sem dados futuros"
+
+        # Candle VWAP is an OHLCV estimate, not trade-by-trade VWAP. Seed the
+        # visible curves with prior daily candles from the active UTC period.
+        vwap_totals = {name: [0.0, 0.0] for name in ("daily", "weekly", "monthly")}
+        series: dict[str, list[dict[str, float | int]]] = {name: [] for name in vwap_totals}
+        if candles:
+            first_ms = candles[0]["time"] * 1000
+            first_keys = _period_starts(first_ms)
+            starts = dict(zip(vwap_totals, first_keys))
+            first_day_start = starts["daily"]
+            for daily_candle in daily[:-1]:
+                stamp_ms = daily_candle["time"] * 1000
+                if stamp_ms >= first_day_start:
+                    continue
+                day_key, week_key, month_key = _period_starts(stamp_ms)
+                keys = {"daily": day_key, "weekly": week_key, "monthly": month_key}
+                typical = (daily_candle["high"] + daily_candle["low"] + daily_candle["close"]) / 3
+                volume = daily_candle["volume"]
+                for name in ("weekly", "monthly"):
+                    if keys[name] == starts[name] and volume > 0:
+                        vwap_totals[name][0] += typical * volume
+                        vwap_totals[name][1] += volume
+            for hourly_candle in hourly[:-1]:
+                stamp_ms = hourly_candle["time"] * 1000
+                if stamp_ms < first_day_start or stamp_ms + 3_600_000 > first_ms:
+                    continue
+                hour_day, hour_week, hour_month = _period_starts(stamp_ms)
+                keys = {"daily": hour_day, "weekly": hour_week, "monthly": hour_month}
+                typical = (hourly_candle["high"] + hourly_candle["low"] + hourly_candle["close"]) / 3
+                volume = hourly_candle["volume"]
+                for name in vwap_totals:
+                    if keys[name] == starts[name] and volume > 0:
+                        vwap_totals[name][0] += typical * volume
+                        vwap_totals[name][1] += volume
+            last_keys = starts.copy()
+            for candle in candles:
+                keys = dict(zip(vwap_totals, _period_starts(candle["time"] * 1000)))
+                for name in vwap_totals:
+                    if keys[name] != last_keys[name]:
+                        vwap_totals[name] = [0.0, 0.0]
+                        last_keys[name] = keys[name]
+                    typical = (candle["high"] + candle["low"] + candle["close"]) / 3
+                    volume = candle["volume"]
+                    if volume > 0:
+                        vwap_totals[name][0] += typical * volume
+                        vwap_totals[name][1] += volume
+                    if vwap_totals[name][1] > 0:
+                        series[name].append({"time": candle["time"], "value": vwap_totals[name][0] / vwap_totals[name][1]})
+
+        now_ms = int(time.time() * 1000)
+        today_start, week_start, month_start = _period_starts(now_ms)
+        previous_month_dt = datetime.fromtimestamp(month_start / 1000, timezone.utc)
+        previous_month_dt = (previous_month_dt.replace(day=1) - timedelta(days=1)).replace(day=1)
+        previous_month_start = int(previous_month_dt.timestamp() * 1000)
+        completed_daily = daily[:-1]
+        def extreme(start_ms: int, end_ms: int, field: str, mode: str) -> float | None:
+            values = [float(item[field]) for item in completed_daily if start_ms <= item["time"] * 1000 < end_ms]
+            return (max(values) if mode == "high" else min(values)) if values else None
+        previous = {
+            "day": {"high": extreme(today_start - 86_400_000, today_start, "high", "high"), "low": extreme(today_start - 86_400_000, today_start, "low", "low")},
+            "week": {"high": extreme(week_start - 7 * 86_400_000, week_start, "high", "high"), "low": extreme(week_start - 7 * 86_400_000, week_start, "low", "low")},
+            "month": {"high": extreme(previous_month_start, month_start, "high", "high"), "low": extreme(previous_month_start, month_start, "low", "low")},
+        }
+        overlays = {"symbol": symbol, "interval": interval, "timezone": "UTC", "vwap": series, "previous": previous,
+                    "source": "BingX OHLCV · VWAP aproximada por preço típico e volume dos candles", "receivedAt": now_ms}
+        return {"symbol": symbol, "interval": interval, "zones": zones, "overlays": overlays,
+                "reversal": reversal, "breakout": breakout, "receivedAt": now_ms,
+                "limitations": ["VWAPs estimadas com OHLCV (preço típico × volume), não com cada negócio.", "Níveis anteriores usam candles diários UTC da BingX; ativos TradFi podem ter pausas e sessões próprias.", "Sinais são calculados somente em candles fechados e não enviam ordens."]}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as error:
+        log.warning("BingX TradFi indicators unavailable", extra={"symbol": symbol, "interval": interval, "error": str(error)})
+        raise HTTPException(502, "Não foi possível calcular os indicadores TradFi com o histórico BingX disponível.") from error
+
 @app.get("/api/tradfi/market")
 async def tradfi_market(symbol: str = Query(...)):
     symbol = await validate_bingx_tradfi_symbol(symbol)
