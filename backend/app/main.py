@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import logging
 import os
@@ -37,6 +38,18 @@ SYMBOLS = [
     "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "FILUSDT",
     "UNIUSDT", "ETCUSDT", "ATOMUSDT", "AAVEUSDT", "WIFUSDT",
 ]
+TRADFI_INDEX_SYMBOLS = {
+    "NCSIDOWJONES2USD-USDT": "Dow Jones",
+    "NCSIDXY2USD-USDT": "DXY · Índice do dólar",
+    "NCSIGER2USD-USDT": "GER40 · Alemanha",
+    "NCSIKOSPI12USD-USDT": "KOSPI · Coreia do Sul",
+    "NCSIKOSPI2USD-USDT": "KR200 · Coreia do Sul",
+    "NCSINASDAQ1002USD-USDT": "NASDAQ 100",
+    "NCSINIKKEI2252USD-USDT": "Nikkei 225 · Japão",
+    "NCSIRUSSELL20002USD-USDT": "Russell 2000",
+    "NCSISP5002USD-USDT": "S&P 500",
+    "NCSKASX2USD-USDT": "ASX · Austrália",
+}
 INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"}
 
 def positive_int_setting(name: str, default: int, maximum: int) -> int:
@@ -432,7 +445,8 @@ class MarketService:
 
     def book_payload(self, symbol: str, state: dict[str, Any], limit: int) -> BookSnapshot:
         now_ms = int(time.time() * 1000)
-        external = [self.external_books.get((symbol, venue)) for venue in ("Kraken", "Coinbase")]
+        venues = ("Kraken", "Coinbase", "BingX", "OKX")
+        external = [self.external_books.get((symbol, venue)) for venue in venues]
         version = (
             state.get("lastUpdateId"), state.get("receivedAt"), state.get("status"),
             tuple((item.get("status"), item.get("receivedAt")) if item else None for item in external),
@@ -445,12 +459,12 @@ class MarketService:
         bids = sorted(state["bids"].items(), reverse=True)[:limit]
         asks = sorted(state["asks"].items())[:limit]
         venue_states = {"Binance": "stale" if state["status"] == "live" and now_ms - int(state["receivedAt"]) > 15_000 else state["status"]}
-        for venue, other in zip(("Kraken", "Coinbase"), external):
+        for venue, other in zip(venues, external):
             status = other["status"] if other else "connecting"
             venue_states[venue] = "stale" if status == "live" and now_ms - int(other["receivedAt"]) > 15_000 else status
         combined_bids: dict[float, dict[str, Any]] = {}
         combined_asks: dict[float, dict[str, Any]] = {}
-        source_books = [("Binance", state), *[(name, item) for name, item in zip(("Kraken", "Coinbase"), external) if item and venue_states.get(name) == "live"]]
+        source_books = [("Binance", state), *[(name, item) for name, item in zip(venues, external) if item and venue_states.get(name) == "live"]]
         source_books = [(venue, item) for venue, item in source_books if item.get("status") == "live" and now_ms - int(item.get("receivedAt", 0)) <= 15_000]
         mids = [(max(item["bids"]) + min(item["asks"])) / 2 for _, item in source_books if item.get("bids") and item.get("asks")]
         reference_price = sum(mids) / len(mids) if mids else 1.0
@@ -513,7 +527,7 @@ class MarketService:
                     if (active_symbol, venue) in self.external_books:
                         self.external_books[(active_symbol, venue)]["status"] = "stopped"
             active_symbols.discard(evicted)
-        for venue in ("Kraken", "Coinbase"):
+        for venue in ("Kraken", "Coinbase", "BingX", "OKX"):
             key = (symbol, venue)
             task = self.external_tasks.get(key)
             if task is None or task.done():
@@ -524,6 +538,10 @@ class MarketService:
         base = symbol.removesuffix("USDT")
         if venue == "Kraken":
             return f"{base}/USD"
+        if venue == "BingX":
+            return f"{base}-USDT"
+        if venue == "OKX":
+            return f"{base}-USDT"
         return f"{base}-USD"
 
     @staticmethod
@@ -539,7 +557,12 @@ class MarketService:
         trade_state = self.external_trade_status.setdefault(key, {"status": "connecting", "connected": False, "lastMessageAt": None, "lastTradeAt": None, "reconnects": 0, "error": None})
         trades = self.external_trades.setdefault(symbol, deque(maxlen=5000))
         seen_queue, seen_ids = self.external_trade_ids.setdefault(key, (deque(maxlen=10_000), set()))
-        url = "wss://ws.kraken.com/v2" if venue == "Kraken" else "wss://advanced-trade-ws.coinbase.com"
+        url = {
+            "Kraken": "wss://ws.kraken.com/v2",
+            "Coinbase": "wss://advanced-trade-ws.coinbase.com",
+            "BingX": "wss://open-api-ws.bingx.com/market",
+            "OKX": "wss://ws.okx.com/ws/v5/public",
+        }[venue]
         reconnect_delay = 1.0
         while True:
             try:
@@ -552,16 +575,92 @@ class MarketService:
                     if venue == "Kraken":
                         await socket.send(json.dumps({"method": "subscribe", "params": {"channel": "book", "symbol": [pair], "depth": 100, "snapshot": True}}))
                         await socket.send(json.dumps({"method": "subscribe", "params": {"channel": "trade", "symbol": [pair], "snapshot": True}}))
-                    else:
+                    elif venue == "Coinbase":
                         # Coinbase heartbeats keep otherwise quiet subscriptions alive and
                         # let us distinguish a healthy idle feed from a dead socket.
                         for channel in ("level2", "market_trades", "heartbeats"):
                             await socket.send(json.dumps({"type": "subscribe", "product_ids": [pair], "channel": channel}))
+                    elif venue == "BingX":
+                        for channel in (f"{pair}@depth50", f"{pair}@trade"):
+                            await socket.send(json.dumps({"id": f"nexus-{int(time.time() * 1000)}", "reqType": "sub", "dataType": channel}))
+                    else:
+                        await socket.send(json.dumps({"op": "subscribe", "args": [
+                            {"channel": "books5", "instId": pair},
+                            {"channel": "trades", "instId": pair},
+                        ]}))
                     async for raw in socket:
-                        message = json.loads(raw)
+                        if venue == "BingX":
+                            try:
+                                text = gzip.decompress(raw).decode("utf-8") if isinstance(raw, bytes) else raw
+                            except (OSError, EOFError):
+                                text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+                            if "ping" in text.lower():
+                                await socket.send("Pong")
+                                continue
+                            message = json.loads(text)
+                        else:
+                            if raw in ("ping", b"ping"):
+                                await socket.send("pong")
+                                continue
+                            message = json.loads(raw)
                         received = int(time.time() * 1000)
                         trade_state["lastMessageAt"] = received
-                        if venue == "Kraken":
+                        if venue == "BingX":
+                            data_type = str(message.get("dataType", ""))
+                            payload = message.get("data", {})
+                            if message.get("code") not in (None, 0, "0"):
+                                error = str(message.get("msg", message.get("message", "subscription rejected")))
+                                state.update(status="unavailable", error=error)
+                                trade_state.update(status="unavailable", connected=False, error=error)
+                                continue
+                            if "@depth" in data_type or (isinstance(payload, dict) and ("bids" in payload or "asks" in payload)):
+                                if isinstance(payload, list):
+                                    payload = payload[-1] if payload else {}
+                                state["bids"] = {float(x[0]): float(x[1]) for x in payload.get("bids", []) if len(x) >= 2 and float(x[1]) > 0}
+                                state["asks"] = {float(x[0]): float(x[1]) for x in payload.get("asks", []) if len(x) >= 2 and float(x[1]) > 0}
+                                state["bids"] = dict(sorted(state["bids"].items(), reverse=True)[:MAX_AGGREGATED_BOOK_LEVELS])
+                                state["asks"] = dict(sorted(state["asks"].items())[:MAX_AGGREGATED_BOOK_LEVELS])
+                                state.update(status="live", eventTime=self.exchange_time(payload.get("E", payload.get("T", received))), receivedAt=received)
+                            elif "@trade" in data_type:
+                                rows = payload if isinstance(payload, list) else [payload]
+                                for row in rows:
+                                    stamp = self.exchange_time(row.get("T", row.get("E", received)))
+                                    trade_id = str(row.get("t", f"{stamp}:{row.get('p')}:{row.get('q')}"))
+                                    if trade_id in seen_ids:
+                                        continue
+                                    if len(seen_queue) == seen_queue.maxlen:
+                                        seen_ids.discard(seen_queue[0])
+                                    seen_queue.append(trade_id)
+                                    seen_ids.add(trade_id)
+                                    trades.append(Trade(id=trade_id, time=stamp, price=float(row["p"]), quantity=float(row["q"]), side="sell" if row.get("m") else "buy", source=venue))
+                                    trade_state.update(status="live", connected=True, lastTradeAt=received, error=None)
+                        elif venue == "OKX":
+                            if message.get("event") == "error":
+                                error = str(message.get("msg", "subscription rejected"))
+                                state.update(status="unavailable", error=error)
+                                trade_state.update(status="unavailable", connected=False, error=error)
+                                continue
+                            if message.get("event") == "subscribe" and message.get("arg", {}).get("channel") == "trades":
+                                trade_state.update(status="live", connected=True, error=None)
+                                continue
+                            channel = message.get("arg", {}).get("channel")
+                            for row in message.get("data", []):
+                                if channel == "books5":
+                                    state["bids"] = {float(x[0]): float(x[1]) for x in row.get("bids", []) if len(x) >= 2 and float(x[1]) > 0}
+                                    state["asks"] = {float(x[0]): float(x[1]) for x in row.get("asks", []) if len(x) >= 2 and float(x[1]) > 0}
+                                    state.update(status="live", eventTime=self.exchange_time(row.get("ts", received)), receivedAt=received)
+                                elif channel == "trades":
+                                    stamp = self.exchange_time(row.get("ts", received))
+                                    trade_id = str(row.get("tradeId", f"{stamp}:{row.get('px')}:{row.get('sz')}:{row.get('side')}"))
+                                    if trade_id in seen_ids:
+                                        continue
+                                    if len(seen_queue) == seen_queue.maxlen:
+                                        seen_ids.discard(seen_queue[0])
+                                    seen_queue.append(trade_id)
+                                    seen_ids.add(trade_id)
+                                    trades.append(Trade(id=trade_id, time=stamp, price=float(row["px"]), quantity=float(row["sz"]), side=row["side"], source=venue))
+                                    trade_state.update(status="live", connected=True, lastTradeAt=received, error=None)
+                        elif venue == "Kraken":
                             channel, rows, message_type = message.get("channel"), message.get("data", []), message.get("type")
                             if message.get("success") is False:
                                 error = str(message.get("error", "subscription rejected"))
@@ -873,6 +972,87 @@ async def markets(market: str = Query("spot")):
             unavailable.append({"symbol": SYMBOLS[index], "reason": str(item) or type(item).__name__})
     return {"markets": [item.model_dump() for item in results if isinstance(item, MarketSnapshot)], "unavailable": unavailable}
 
+async def bingx_tradfi_request(path: str, params: dict[str, Any], ttl: float) -> Any:
+    key = f"bingx-tradfi:{path}:{json.dumps(params, sort_keys=True, separators=(',', ':'))}"
+    async def load() -> Any:
+        async with service.request_slots:
+            response = await service.client.get(f"https://open-api.bingx.com{path}", params=params, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+        if str(payload.get("code", "0")) != "0":
+            raise HTTPException(502, f"BingX market data error: {payload.get('msg', payload.get('code'))}")
+        return payload.get("data")
+    return await service.cache_value(key, ttl, load)
+
+async def bingx_tradfi_catalog() -> list[dict[str, Any]]:
+    rows = await bingx_tradfi_request("/openApi/swap/v2/quote/contracts", {}, 900)
+    instruments: list[dict[str, Any]] = []
+    for row in rows or []:
+        symbol = str(row.get("symbol", "")).upper()
+        asset = str(row.get("asset", "")).upper()
+        if row.get("status") != 1 or str(row.get("apiStateOpen", "")).lower() != "true" or row.get("currency") != "USDT":
+            continue
+        if asset.startswith("NCFX"):
+            category, label = "forex", str(row.get("displayName", symbol)).removesuffix("-USDT")
+            if label.endswith("-USDT"):
+                label = label[:-5]
+            if len(label) == 6 and label.isalpha():
+                label = f"{label[:3]}/{label[3:]}"
+        elif symbol in TRADFI_INDEX_SYMBOLS:
+            category, label = "indices", TRADFI_INDEX_SYMBOLS[symbol]
+        else:
+            continue
+        instruments.append({"symbol": symbol, "name": label, "category": category, "asset": asset, "minimumNotional": row.get("tradeMinUSDT"), "pricePrecision": row.get("pricePrecision"), "quantityPrecision": row.get("quantityPrecision")})
+    return sorted(instruments, key=lambda item: (item["category"], item["name"]))
+
+async def validate_bingx_tradfi_symbol(symbol: str) -> str:
+    symbol = symbol.upper()
+    catalog = await bingx_tradfi_catalog()
+    if not any(item["symbol"] == symbol for item in catalog):
+        raise HTTPException(404, "Índice ou par Forex indisponível na BingX.")
+    return symbol
+
+@app.get("/api/tradfi/contracts")
+async def tradfi_contracts():
+    try:
+        instruments = await bingx_tradfi_catalog()
+        return {"source": "BingX USDT-M Perpetual · contratos TradFi", "receivedAt": int(time.time() * 1000), "instruments": instruments}
+    except (httpx.HTTPError, ValueError, KeyError) as error:
+        log.warning("BingX TradFi contract list unavailable: %s", error)
+        raise HTTPException(502, "Não foi possível carregar os contratos TradFi da BingX.") from error
+
+@app.get("/api/tradfi/candles")
+async def tradfi_candles(symbol: str = Query(...), interval: str = Query("5m"), limit: int = Query(240, ge=20, le=500)):
+    symbol = await validate_bingx_tradfi_symbol(symbol)
+    if interval not in {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}:
+        raise HTTPException(400, "Intervalo TradFi inválido.")
+    try:
+        rows = await bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": interval, "limit": limit}, 15)
+        candles = [{"time": int(row["time"] // 1000), "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]), "close": float(row["close"]), "volume": float(row.get("volume", 0))} for row in rows or []]
+        return {"symbol": symbol, "interval": interval, "candles": candles, "source": "BingX USDT-M Perpetual", "receivedAt": int(time.time() * 1000)}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+        log.warning("BingX TradFi candles unavailable", extra={"symbol": symbol, "interval": interval, "error": str(error)})
+        raise HTTPException(502, "Candles BingX indisponíveis para este ativo ou sessão.") from error
+
+@app.get("/api/tradfi/market")
+async def tradfi_market(symbol: str = Query(...)):
+    symbol = await validate_bingx_tradfi_symbol(symbol)
+    try:
+        ticker, depth, trades = await asyncio.gather(
+            bingx_tradfi_request("/openApi/swap/v2/quote/ticker", {"symbol": symbol}, 3),
+            bingx_tradfi_request("/openApi/swap/v2/quote/depth", {"symbol": symbol, "limit": 20}, 2),
+            bingx_tradfi_request("/openApi/swap/v2/quote/trades", {"symbol": symbol, "limit": 30}, 2),
+        )
+        bids_raw, asks_raw = (depth or {}).get("bids", []), (depth or {}).get("asks", [])
+        bids = [{"price": float(row[0]), "quantity": float(row[1]), "total": float(row[0]) * float(row[1]), "sources": ["BingX Perpétuo"]} for row in bids_raw]
+        asks = [{"price": float(row[0]), "quantity": float(row[1]), "total": float(row[0]) * float(row[1]), "sources": ["BingX Perpétuo"]} for row in asks_raw]
+        bid_qty, ask_qty = sum(row["quantity"] for row in bids), sum(row["quantity"] for row in asks)
+        normalized_trades = [{"id": str(row.get("fillId", row.get("ts", row.get("time", index)))), "time": int(row.get("time", row.get("ts", 0))), "price": float(row["price"]), "quantity": float(row.get("qty", 0)), "side": "sell" if row.get("isBuyerMaker") else "buy", "source": "BingX Perpétuo"} for index, row in enumerate(trades or [])]
+        return {"symbol": symbol, "source": "BingX USDT-M Perpetual", "receivedAt": int(time.time() * 1000), "ticker": {"price": float(ticker["lastPrice"]), "change24h": float(ticker.get("priceChangePercent", 0)), "high24h": float(ticker.get("highPrice", 0)), "low24h": float(ticker.get("lowPrice", 0)), "quoteVolume24h": float(ticker.get("quoteVolume", 0)), "eventTime": int(ticker.get("closeTime", 0))}, "book": {"bids": bids, "asks": asks, "spread": float(asks_raw[0][0]) - float(bids_raw[0][0]) if asks_raw and bids_raw else 0, "imbalance": (bid_qty - ask_qty) / (bid_qty + ask_qty) if bid_qty + ask_qty else 0, "status": "live" if bids and asks else "stale", "source": "BingX Perpétuo"}, "trades": normalized_trades}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+        log.warning("BingX TradFi market data unavailable", extra={"symbol": symbol, "error": str(error)})
+        raise HTTPException(502, "Dados ao vivo BingX indisponíveis. O contrato pode estar fora da sessão.") from error
+
 @app.get("/api/scanner-flow")
 async def scanner_flow():
     """Observed Binance notional flow for the 25 supported Spot assets."""
@@ -1092,14 +1272,15 @@ async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), li
     binance_status = "live" if binance_state["connected"] else "reconnecting"
     sources = {"Binance": binance_status}
     trade_health = {"Binance": {"status": binance_status, "lastTradeAt": binance_state.get("lastReceivedAt")}}
-    for venue in ("Kraken", "Coinbase"):
+    venues = ("Kraken", "Coinbase", "BingX", "OKX")
+    for venue in venues:
         health = service.external_trade_status.get((symbol, venue))
         status = health["status"] if health else "connecting"
         if health and health.get("connected") and health.get("lastMessageAt") and int(time.time() * 1000) - health["lastMessageAt"] > 30_000:
             status = "stale"
         sources[venue] = status
         trade_health[venue] = {"status": status, "lastTradeAt": health.get("lastTradeAt") if health else None, "reconnects": health.get("reconnects", 0) if health else 0, "error": health.get("error") if health else None}
-    return {"trades": [trade.model_dump() for trade in rows], "source": "Binance + Kraken + Coinbase Spot", "sources": sources, "tradeHealth": trade_health, "receivedAt": int(time.time() * 1000), "coverage": "Negociações públicas observadas por exchange; não representa o mercado global. USD ≈ USDT."}
+    return {"trades": [trade.model_dump() for trade in rows], "source": "Binance + Kraken + Coinbase + BingX + OKX Spot", "sources": sources, "tradeHealth": trade_health, "receivedAt": int(time.time() * 1000), "coverage": "Negociações públicas observadas por exchange; não representa o mercado global. USD ≈ USDT."}
 
 @app.get("/api/flow-quality")
 async def flow_quality(symbol: str = Query("BTCUSDT")):
