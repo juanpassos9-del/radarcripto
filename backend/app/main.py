@@ -50,6 +50,21 @@ TRADFI_INDEX_SYMBOLS = {
     "NCSISP5002USD-USDT": "S&P 500",
     "NCSKASX2USD-USDT": "ASX · Austrália",
 }
+TRADFI_COMMODITY_SYMBOLS = {
+    "NCCOALUMINIUM2USD-USDT": "Alumínio",
+    "NCCO724COPPER2USD-USDT": "Cobre",
+    "NCCOGOLD2USD-USDT": "Ouro",
+    "NCCOHEATINGOIL2USD-USDT": "Óleo de aquecimento",
+    "NCCOLEAD2USD-USDT": "Chumbo",
+    "NCCO7241NATGAS2USD-USDT": "Gás natural",
+    "NCCONICKEL2USD-USDT": "Níquel",
+    "NCCO1OILBRENT2USD-USDT": "Petróleo Brent",
+    "NCCO1OILWTI2USD-USDT": "Petróleo WTI",
+    "NCCOPALLADIUM2USD-USDT": "Paládio",
+    "NCCOXPT2USD-USDT": "Platina",
+    "NCCOXAG2USD-USDT": "Prata",
+    "NCCOZINC2USD-USDT": "Zinco",
+}
 INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"}
 
 def positive_int_setting(name: str, default: int, maximum: int) -> int:
@@ -1000,6 +1015,8 @@ async def bingx_tradfi_catalog() -> list[dict[str, Any]]:
                 label = f"{label[:3]}/{label[3:]}"
         elif symbol in TRADFI_INDEX_SYMBOLS:
             category, label = "indices", TRADFI_INDEX_SYMBOLS[symbol]
+        elif symbol in TRADFI_COMMODITY_SYMBOLS:
+            category, label = "commodities", TRADFI_COMMODITY_SYMBOLS[symbol]
         else:
             continue
         instruments.append({"symbol": symbol, "name": label, "category": category, "asset": asset, "minimumNotional": row.get("tradeMinUSDT"), "pricePrecision": row.get("pricePrecision"), "quantityPrecision": row.get("quantityPrecision")})

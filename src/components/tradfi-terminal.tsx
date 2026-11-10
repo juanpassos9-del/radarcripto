@@ -6,7 +6,7 @@ import { ArrowLeft, LogOut, Search, Wifi } from "lucide-react";
 import MarketChart from "@/components/market-chart";
 import { fmtCompact, fmtPrice, fmtTime, getJson, type BreakoutSignalData, type Candle, type ChartOverlays, type ReversalSignalData, type Trade, type VolatilityZones } from "@/lib/market";
 
-type Instrument = { symbol: string; name: string; category: "indices" | "forex"; minimumNotional?: number; pricePrecision?: number };
+type Instrument = { symbol: string; name: string; category: "indices" | "forex" | "commodities"; minimumNotional?: number; pricePrecision?: number };
 type TradfiMarket = {
   source: string; receivedAt: number;
   ticker: { price: number; change24h: number; high24h: number; low24h: number; quoteVolume24h: number; eventTime: number };
@@ -20,7 +20,7 @@ const emptySignals: never[] = [];
 
 export default function TradfiTerminal() {
   const [instruments, setInstruments] = useState<Instrument[]>([]);
-  const [category, setCategory] = useState<"indices" | "forex">("indices");
+  const [category, setCategory] = useState<"indices" | "forex" | "commodities">("indices");
   const [symbol, setSymbol] = useState("NCSISP5002USD-USDT");
   const [interval, setInterval] = useState("5m");
   const [search, setSearch] = useState("");
@@ -100,14 +100,14 @@ export default function TradfiTerminal() {
       <div className="heading"><div><div className="eyebrow">BINGX · MERCADOS TRADFI</div><h1>Índices mundiais & Forex</h1></div><div className="headmeta"><span className="badge">PERPÉTUOS MARGEM USDT</span><span className="badge">CONTRATOS PÚBLICOS</span></div></div>
       <div className="tradfi-layout">
         <aside className="panel tradfi-sidebar">
-          <div className="tradfi-tabs"><button className={category === "indices" ? "selected" : ""} onClick={() => setCategory("indices")}>ÍNDICES <b>{instruments.filter(item => item.category === "indices").length}</b></button><button className={category === "forex" ? "selected" : ""} onClick={() => setCategory("forex")}>FOREX <b>{instruments.filter(item => item.category === "forex").length}</b></button></div>
+          <div className="tradfi-tabs tradfi-tabs-three"><button className={category === "indices" ? "selected" : ""} onClick={() => setCategory("indices")}>ÍNDICES <b>{instruments.filter(item => item.category === "indices").length}</b></button><button className={category === "forex" ? "selected" : ""} onClick={() => setCategory("forex")}>FOREX <b>{instruments.filter(item => item.category === "forex").length}</b></button><button className={category === "commodities" ? "selected" : ""} onClick={() => setCategory("commodities")}>COMMODITIES <b>{instruments.filter(item => item.category === "commodities").length}</b></button></div>
           <label className="tradfi-search"><Search size={14}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Buscar instrumento"/></label>
           <div className="tradfi-list">{visible.map(item => <button key={item.symbol} className={`tradfi-instrument ${symbol === item.symbol ? "selected" : ""}`} onClick={() => setSymbol(item.symbol)}><span><strong>{item.name}</strong><small>{item.symbol}</small></span><span className={`mono ${((snapshot?.ticker.change24h ?? 0) >= 0) ? "pos" : "neg"}`}>{symbol === item.symbol && snapshot ? `${snapshot.ticker.change24h >= 0 ? "+" : ""}${snapshot.ticker.change24h.toFixed(2)}%` : "·"}</span></button>)}{visible.length === 0 && <div className="loading">Nenhum instrumento listado.</div>}</div>
           <div className="tradfi-source-note">Lista atualizada a partir dos contratos públicos habilitados pela BingX.</div>
         </aside>
         <section className="tradfi-main">
           <div className="panel tradfi-chart-panel">
-            <div className="tradfi-assetbar"><div><div className="eyebrow">BINGX · USDT-M PERPETUAL</div><h2>{selected?.name ?? symbol}</h2><small>{symbol} · {selected?.category === "forex" ? "PAR CAMBIAL" : "ÍNDICE"}</small></div><div className="tradfi-last"><strong>{snapshot ? fmtPrice(snapshot.ticker.price, selected?.pricePrecision ?? 2) : "—"}</strong><span className={(snapshot?.ticker.change24h ?? 0) >= 0 ? "pos" : "neg"}>{snapshot ? `${snapshot.ticker.change24h >= 0 ? "+" : ""}${snapshot.ticker.change24h.toFixed(2)}%` : "—"}</span></div></div>
+            <div className="tradfi-assetbar"><div><div className="eyebrow">BINGX · USDT-M PERPETUAL</div><h2>{selected?.name ?? symbol}</h2><small>{symbol} · {selected?.category === "forex" ? "PAR CAMBIAL" : selected?.category === "commodities" ? "COMMODITY" : "ÍNDICE"}</small></div><div className="tradfi-last"><strong>{snapshot ? fmtPrice(snapshot.ticker.price, selected?.pricePrecision ?? 2) : "—"}</strong><span className={(snapshot?.ticker.change24h ?? 0) >= 0 ? "pos" : "neg"}>{snapshot ? `${snapshot.ticker.change24h >= 0 ? "+" : ""}${snapshot.ticker.change24h.toFixed(2)}%` : "—"}</span></div></div>
             <div className="charttools"><span className="subtle">PERÍODO</span>{intervals.map(value => <button key={value} className={interval === value ? "active" : ""} onClick={() => setInterval(value)}>{value.toUpperCase()}</button>)}<span className="tradfi-chart-source">BINGX · {fmtTime(snapshot?.receivedAt)}</span></div>
             <div className="charttools tradfi-indicator-tools" aria-label="Indicadores do gráfico">
               <button className={`volume-toggle ${showGarch ? "active" : ""}`} onClick={() => setShowGarch(value => !value)}>GARCH</button>
