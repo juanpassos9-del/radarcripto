@@ -160,7 +160,7 @@ export default function TradfiTerminal() {
     <header className="topbar">
       <Link href="/" className="tradfi-back" aria-label="Voltar ao Terminal Spot"><ArrowLeft size={15}/></Link>
       <div className="brand"><div className="logo">N</div><div><strong>NEXUS</strong><small>MARKET INTELLIGENCE</small></div></div>
-      <nav className="nav"><Link href="/">Cripto Spot</Link><a className="active" aria-current="page" href="/tradfi">Índices & Forex</a></nav>
+      <nav className="nav"><Link href="/">Cripto Spot</Link><a className="active" aria-current="page" href="/tradfi">Índices & Forex</a><Link href="/macro">Macro Quant</Link></nav>
       <div className="topright"><div className="live"><span className={`dot ${snapshot ? "" : "tradfi-offline"}`}/>{snapshot ? "BINGX PERP · AO VIVO" : "CONECTANDO FEED"}</div><button className="iconbtn" title="Sair" aria-label="Sair" onClick={() => { window.location.href = "/api/auth/logout"; }}><LogOut size={16}/></button></div>
     </header>
     <div className="wrap tradfi-wrap">

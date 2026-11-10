@@ -23,6 +23,7 @@ from .flow_store import FlowStore
 from .reversal_engine import build_reversal_signals
 from .breakout_engine import build_breakout_signals
 from .volatility import calculate_zones
+from .macro_engine import MACRO_ASSETS, build_macro_snapshot
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("nexus.market")
@@ -94,9 +95,14 @@ class MarketService:
         self.market_subscribers: dict[tuple[str, str, str], set[asyncio.Queue[dict[str, Any]]]] = {}
         self.market_stream_tasks: dict[tuple[str, str, str], asyncio.Task[Any]] = {}
         self.tradfi_ticker_task: asyncio.Task[Any] | None = None
+        self.tradfi_sample_task: asyncio.Task[Any] | None = None
+        self.tradfi_seed_task: asyncio.Task[Any] | None = None
+        self.tradfi_seed_complete = False
         self.tradfi_prices: dict[str, dict[str, Any]] = {}
+        self.tradfi_samples: dict[str, deque[dict[str, Any]]] = {}
         self.tradfi_symbol_categories: dict[str, str] = {}
         self.tradfi_watchlist_subscribers: dict[str, set[WebSocket]] = {"indices": set(), "forex": set(), "commodities": set()}
+        self.tradfi_macro_subscribers: set[WebSocket] = set()
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
         self.external_books: dict[tuple[str, str], dict[str, Any]] = {}
         self.external_trades: dict[str, deque[Trade]] = {}
@@ -121,11 +127,86 @@ class MarketService:
         if self.tradfi_ticker_task:
             self.tradfi_ticker_task.cancel()
             await asyncio.gather(self.tradfi_ticker_task, return_exceptions=True)
+        if self.tradfi_sample_task:
+            self.tradfi_sample_task.cancel()
+            await asyncio.gather(self.tradfi_sample_task, return_exceptions=True)
+        if self.tradfi_seed_task:
+            self.tradfi_seed_task.cancel()
+            await asyncio.gather(self.tradfi_seed_task, return_exceptions=True)
         await self.client.aclose()
 
     def ensure_tradfi_ticker_stream(self) -> None:
         if self.tradfi_ticker_task is None or self.tradfi_ticker_task.done():
             self.tradfi_ticker_task = asyncio.create_task(self.collect_tradfi_tickers())
+        if self.tradfi_sample_task is None or self.tradfi_sample_task.done():
+            self.tradfi_sample_task = asyncio.create_task(self.sample_tradfi_prices())
+        if self.tradfi_seed_task is None or (self.tradfi_seed_task.done() and not self.tradfi_seed_complete):
+            self.tradfi_seed_task = asyncio.create_task(self.seed_tradfi_history())
+
+    async def seed_tradfi_history(self) -> None:
+        try:
+            catalog = await bingx_tradfi_catalog()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("BingX macro history seed could not load contract catalogue")
+            return
+        instruments = [item for item in catalog if item["symbol"] in MACRO_ASSETS]
+        now_bucket = int(time.time() // 60) * 60_000
+
+        async def load_symbol(instrument: dict[str, Any]):
+            try:
+                rows = await bingx_tradfi_request(
+                    "/openApi/swap/v2/quote/klines",
+                    {"symbol": instrument["symbol"], "interval": "1m", "limit": 90},
+                    300,
+                )
+                samples = []
+                for row in rows or []:
+                    sample_time = (int(row["time"]) // 60_000) * 60_000
+                    if sample_time >= now_bucket:
+                        continue
+                    samples.append((instrument["symbol"], sample_time, float(row["close"]), instrument["category"]))
+                return samples
+            except (httpx.HTTPError, HTTPException, ValueError, KeyError, TypeError) as error:
+                log.info("BingX macro history seed unavailable", extra={"symbol": instrument["symbol"], "error": str(error)})
+                return []
+
+        loaded = await asyncio.gather(*(load_symbol(item) for item in instruments))
+        rows = [sample for batch in loaded for sample in batch]
+        for symbol, sample_time, price, category in rows:
+            self.tradfi_samples.setdefault(symbol, deque(maxlen=7 * 24 * 60)).append({"time": sample_time, "price": price, "category": category})
+        if rows and self.flow_store:
+            await asyncio.to_thread(self.flow_store.save_tradfi_price_samples, rows)
+        self.tradfi_seed_complete = True
+
+    async def sample_tradfi_prices(self) -> None:
+        # Align one-minute samples across contracts so cross-asset returns and correlations are comparable.
+        delay = 60 - (time.time() % 60)
+        await asyncio.sleep(delay)
+        while True:
+            sample_time = int(time.time() // 60) * 60_000
+            samples: list[tuple[str, int, float, str]] = []
+            for symbol, latest in tuple(self.tradfi_prices.items()):
+                if sample_time - int(latest.get("receivedAt", 0)) > 90_000:
+                    continue
+                category = self.tradfi_symbol_categories.get(symbol)
+                if not category:
+                    continue
+                point = {"time": sample_time, "price": float(latest["price"]), "category": category}
+                self.tradfi_samples.setdefault(symbol, deque(maxlen=7 * 24 * 60)).append(point)
+                samples.append((symbol, sample_time, point["price"], category))
+            if samples and self.flow_store:
+                try:
+                    await asyncio.to_thread(self.flow_store.save_tradfi_price_samples, samples)
+                except Exception:
+                    log.exception("TradFi macro samples could not be persisted", extra={"count": len(samples)})
+            if sample_time // (15 * 60_000) != (sample_time - 60_000) // (15 * 60_000) and self.flow_store:
+                try:
+                    await asyncio.to_thread(self.flow_store.prune)
+                except Exception:
+                    log.exception("TradFi macro sample retention cleanup failed")
+            await asyncio.sleep(max(1, 60 - (time.time() % 60)))
 
     async def publish_tradfi_quote(self, symbol: str, price: float, event_time: int | None = None) -> None:
         received_at = int(time.time() * 1000)
@@ -154,6 +235,17 @@ class MarketService:
             for subscriber, task in zip(subscribers, sends):
                 if task not in done or task.cancelled() or task.exception() is not None:
                     self.tradfi_watchlist_subscribers[category].discard(subscriber)
+        macro_subscribers = tuple(self.tradfi_macro_subscribers)
+        if macro_subscribers:
+            sends = [asyncio.create_task(subscriber.send_json(message)) for subscriber in macro_subscribers]
+            done, pending = await asyncio.wait(sends, timeout=1)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for subscriber, task in zip(macro_subscribers, sends):
+                if task not in done or task.cancelled() or task.exception() is not None:
+                    self.tradfi_macro_subscribers.discard(subscriber)
 
     async def collect_tradfi_tickers(self) -> None:
         reconnect_delay = 1.0
@@ -1206,6 +1298,37 @@ async def tradfi_watchlist(category: str = Query("indices")):
         log.warning("BingX TradFi watchlist quotes unavailable", extra={"category": category, "error": str(error)})
         raise HTTPException(502, "Não foi possível atualizar as cotações da watchlist BingX.") from error
 
+@app.get("/api/tradfi/macro")
+async def tradfi_macro():
+    catalog = await bingx_tradfi_catalog()
+    service.ensure_tradfi_ticker_stream()
+    if service.tradfi_seed_task:
+        try:
+            await asyncio.wait_for(asyncio.shield(service.tradfi_seed_task), timeout=12)
+        except asyncio.TimeoutError:
+            log.info("Macro history seed continues in background")
+        except Exception:
+            log.exception("Macro history seed failed")
+    now_ms = int(time.time() * 1000)
+    selected = [item for item in catalog if item["symbol"] in MACRO_ASSETS]
+    symbols = [item["symbol"] for item in selected]
+    history: dict[str, list[dict[str, Any]]] = {}
+    if service.flow_store:
+        try:
+            history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 3 * 60 * 60_000)
+        except Exception:
+            log.exception("TradFi macro history query failed")
+    for symbol, points in service.tradfi_samples.items():
+        if symbol in MACRO_ASSETS:
+            by_time = {item["time"]: item for item in history.get(symbol, [])}
+            by_time.update({item["time"]: item for item in points if item["time"] >= now_ms - 3 * 60 * 60_000})
+            history[symbol] = sorted(by_time.values(), key=lambda item: item["time"])
+    return build_macro_snapshot(
+        selected, history, service.tradfi_prices, now_ms,
+        service.flow_store.storage if service.flow_store else "unavailable",
+        service.flow_store.durable if service.flow_store else False,
+    )
+
 @app.get("/api/tradfi/candles")
 async def tradfi_candles(symbol: str = Query(...), interval: str = Query("5m"), limit: int = Query(240, ge=20, le=500)):
     symbol = await validate_bingx_tradfi_symbol(symbol)
@@ -1956,6 +2079,38 @@ async def tradfi_watchlist_ws(socket: WebSocket):
         service.tradfi_watchlist_subscribers[category].discard(socket)
         active_sessions = await service.close_market_session()
         log.info("beta TradFi watchlist session closed", extra={"active_sessions": active_sessions, "category": category})
+
+@app.websocket("/ws/tradfi/macro")
+async def tradfi_macro_ws(socket: WebSocket):
+    allowed_origins = {origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()}
+    origin = socket.headers.get("origin")
+    protocols = [value.strip() for value in socket.headers.get("sec-websocket-protocol", "").split(",") if value.strip()]
+    market_token = protocols[1] if len(protocols) == 2 and protocols[0] == "nexus-market-v1" else ""
+    if (origin and origin not in allowed_origins) or not verify_market_token(market_token, "ws"):
+        await socket.close(code=4401, reason="Authentication required")
+        return
+    admitted, active_sessions = await service.try_open_market_session()
+    if not admitted:
+        await socket.close(code=1013, reason="Beta live session limit reached")
+        return
+    try:
+        await socket.accept(subprotocol="nexus-market-v1")
+        service.tradfi_macro_subscribers.add(socket)
+        service.ensure_tradfi_ticker_stream()
+        for symbol, quote in tuple(service.tradfi_prices.items()):
+            if symbol in MACRO_ASSETS:
+                await socket.send_json({"type": "quote", "data": {"symbol": symbol, **quote}})
+        while True:
+            try:
+                await asyncio.wait_for(socket.receive_text(), timeout=30)
+            except asyncio.TimeoutError:
+                await socket.send_json({"type": "heartbeat", "data": {"time": int(time.time() * 1000)}})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        service.tradfi_macro_subscribers.discard(socket)
+        active_sessions = await service.close_market_session()
+        log.info("beta TradFi macro session closed", extra={"active_sessions": active_sessions})
 
 async def _consume_market(socket: WebSocket, queue: asyncio.Queue[dict[str, Any]]):
     while True:

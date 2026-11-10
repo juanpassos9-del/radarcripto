@@ -77,6 +77,16 @@ class FlowStore:
                 """)
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_flow_minute_bars_symbol_time ON flow_minute_bars(symbol, bucket_time_ms DESC)")
                 cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS tradfi_price_samples (
+                        symbol TEXT NOT NULL,
+                        sample_time_ms BIGINT NOT NULL,
+                        price DOUBLE PRECISION NOT NULL,
+                        category TEXT NOT NULL,
+                        PRIMARY KEY (symbol, sample_time_ms)
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_tradfi_price_samples_time ON tradfi_price_samples(sample_time_ms DESC)")
+                cursor.execute("""
                     CREATE OR REPLACE FUNCTION nexus_update_flow_minute_bar() RETURNS trigger AS $$
                     BEGIN
                         INSERT INTO flow_minute_bars (
@@ -153,6 +163,16 @@ class FlowStore:
                 )
             """)
             connection.execute("CREATE INDEX IF NOT EXISTS idx_flow_minute_bars_symbol_time ON flow_minute_bars(symbol, bucket_time_ms DESC)")
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS tradfi_price_samples (
+                    symbol TEXT NOT NULL,
+                    sample_time_ms INTEGER NOT NULL,
+                    price REAL NOT NULL,
+                    category TEXT NOT NULL,
+                    PRIMARY KEY (symbol, sample_time_ms)
+                )
+            """)
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_tradfi_price_samples_time ON tradfi_price_samples(sample_time_ms DESC)")
             connection.execute("DROP TRIGGER IF EXISTS trg_flow_trade_minute_bar")
             connection.execute("""
                 CREATE TRIGGER trg_flow_trade_minute_bar AFTER INSERT ON flow_trades BEGIN
@@ -188,22 +208,63 @@ class FlowStore:
             connection.execute("DELETE FROM flow_trades WHERE event_time_ms < ?", (cutoff,))
             aggregate_cutoff = int(time.time() * 1000) - self.aggregate_retention_days * 86_400_000
             connection.execute("DELETE FROM flow_minute_bars WHERE bucket_time_ms < ?", (aggregate_cutoff,))
+            connection.execute("DELETE FROM tradfi_price_samples WHERE sample_time_ms < ?", (int(time.time() * 1000) - 7 * 86_400_000,))
             connection.execute("PRAGMA incremental_vacuum(10000)")
             connection.commit()
 
     def prune(self) -> None:
         cutoff = int(time.time() * 1000) - self.retention_hours * 3_600_000
         aggregate_cutoff = int(time.time() * 1000) - self.aggregate_retention_days * 86_400_000
+        tradfi_cutoff = int(time.time() * 1000) - 7 * 86_400_000
         if self.storage == "postgres":
             with self.db_lock, self.pg_connection.cursor() as cursor:
                 cursor.execute("DELETE FROM flow_trades WHERE event_time_ms < %s", (cutoff,))
                 cursor.execute("DELETE FROM flow_minute_bars WHERE bucket_time_ms < %s", (aggregate_cutoff,))
+                cursor.execute("DELETE FROM tradfi_price_samples WHERE sample_time_ms < %s", (tradfi_cutoff,))
             return
         with sqlite3.connect(self.path, timeout=10) as connection:
             connection.execute("DELETE FROM flow_trades WHERE event_time_ms < ?", (cutoff,))
             connection.execute("DELETE FROM flow_minute_bars WHERE bucket_time_ms < ?", (aggregate_cutoff,))
+            connection.execute("DELETE FROM tradfi_price_samples WHERE sample_time_ms < ?", (tradfi_cutoff,))
             connection.execute("PRAGMA incremental_vacuum(10000)")
             connection.commit()
+
+    def save_tradfi_price_samples(self, samples: list[tuple[str, int, float, str]]) -> None:
+        if not samples:
+            return
+        if self.storage == "postgres":
+            with self.db_lock, self.pg_connection.cursor() as cursor:
+                cursor.executemany(
+                    "INSERT INTO tradfi_price_samples(symbol, sample_time_ms, price, category) VALUES (%s, %s, %s, %s) ON CONFLICT (symbol, sample_time_ms) DO UPDATE SET price = EXCLUDED.price, category = EXCLUDED.category",
+                    samples,
+                )
+            return
+        with sqlite3.connect(self.path, timeout=10) as connection:
+            connection.executemany(
+                "INSERT INTO tradfi_price_samples(symbol, sample_time_ms, price, category) VALUES (?, ?, ?, ?) ON CONFLICT(symbol, sample_time_ms) DO UPDATE SET price = excluded.price, category = excluded.category",
+                samples,
+            )
+            connection.commit()
+
+    def tradfi_price_history(self, symbols: list[str], start_ms: int) -> dict[str, list[dict[str, Any]]]:
+        if not symbols:
+            return {}
+        placeholders = ",".join(["%s"] * len(symbols)) if self.storage == "postgres" else ",".join(["?"] * len(symbols))
+        query = f"SELECT symbol, sample_time_ms, price, category FROM tradfi_price_samples WHERE symbol IN ({placeholders}) AND sample_time_ms >= %s ORDER BY sample_time_ms ASC" if self.storage == "postgres" else f"SELECT symbol, sample_time_ms, price, category FROM tradfi_price_samples WHERE symbol IN ({placeholders}) AND sample_time_ms >= ? ORDER BY sample_time_ms ASC"
+        params = (*symbols, start_ms)
+        if self.storage == "postgres":
+            with self.db_lock, self.pg_connection.cursor() as cursor:
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+        else:
+            if not self.path.exists():
+                return {}
+            with sqlite3.connect(self.path, timeout=5) as connection:
+                rows = connection.execute(query, params).fetchall()
+        history: dict[str, list[dict[str, Any]]] = {}
+        for symbol, sample_time_ms, price, category in rows:
+            history.setdefault(str(symbol), []).append({"time": int(sample_time_ms), "price": float(price), "category": str(category)})
+        return history
 
     def enqueue(self, symbol: str, trade: Trade, received_time_ms: int) -> bool:
         try:
