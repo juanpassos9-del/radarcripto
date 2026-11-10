@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, LogOut, Search, Wifi } from "lucide-react";
 import MarketChart from "@/components/market-chart";
-import { fmtCompact, fmtPrice, fmtTime, getJson, type BreakoutSignalData, type Candle, type ChartOverlays, type ReversalSignalData, type Trade, type VolatilityZones } from "@/lib/market";
+import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken, type BreakoutSignalData, type Candle, type ChartOverlays, type ReversalSignalData, type Trade, type VolatilityZones } from "@/lib/market";
 
 type Instrument = { symbol: string; name: string; category: "indices" | "forex" | "commodities"; minimumNotional?: number; pricePrecision?: number };
 type TradfiMarket = {
@@ -14,12 +14,14 @@ type TradfiMarket = {
   trades: Trade[];
 };
 type TradfiIndicators = { zones: VolatilityZones; overlays: ChartOverlays; reversal: ReversalSignalData; breakout: BreakoutSignalData; limitations: string[]; receivedAt: number };
+type WatchQuote = { symbol: string; price: number | null; previousClose: number | null; changePercent: number | null; referenceTime: number | null };
 
 const intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const emptySignals: never[] = [];
 
 export default function TradfiTerminal() {
   const [instruments, setInstruments] = useState<Instrument[]>([]);
+  const [watchQuotes, setWatchQuotes] = useState<Record<string, WatchQuote>>({});
   const [category, setCategory] = useState<"indices" | "forex" | "commodities">("indices");
   const [symbol, setSymbol] = useState("NCSISP5002USD-USDT");
   const [interval, setInterval] = useState("5m");
@@ -83,6 +85,71 @@ export default function TradfiTerminal() {
     return () => { active = false; window.clearInterval(timer); };
   }, [symbol]);
 
+  useEffect(() => {
+    let active = true;
+    let socket: WebSocket | null = null;
+    let reconnectTimer = 0;
+    let pollTimer = 0;
+    let retryDelay = 1000;
+    let refreshToken = false;
+    const refresh = () => getJson<{ quotes: WatchQuote[] }>(`/api/tradfi/watchlist?category=${category}`)
+      .then(data => { if (active) setWatchQuotes(current => ({ ...current, ...Object.fromEntries(data.quotes.map(quote => [quote.symbol, quote])) })); })
+      .catch(() => undefined);
+    const startFallbackPolling = () => {
+      if (!pollTimer) {
+        void refresh();
+        pollTimer = window.setInterval(refresh, 15_000);
+      }
+    };
+    const connect = async () => {
+      try {
+        const token = await getMarketWsToken(refreshToken);
+        refreshToken = false;
+        if (!active) return;
+        const apiOrigin = process.env.NEXT_PUBLIC_MARKET_API_URL?.replace(/\/+$/, "") || window.location.origin;
+        const wsOrigin = apiOrigin.replace(/^http/, "ws");
+        const url = new URL("/ws/tradfi/watchlist", wsOrigin);
+        url.searchParams.set("category", category);
+        socket = new WebSocket(url, ["nexus-market-v1", token]);
+        socket.onopen = () => {
+          retryDelay = 1000;
+          if (pollTimer) window.clearInterval(pollTimer);
+          pollTimer = 0;
+          void refresh();
+        };
+        socket.onmessage = event => {
+          try {
+            const message = JSON.parse(event.data) as { type?: string; data?: WatchQuote };
+            if (message.type === "quote" && message.data?.symbol && active) {
+              setWatchQuotes(current => ({ ...current, [message.data!.symbol]: message.data! }));
+            }
+          } catch { /* Ignore malformed or non-quote feed messages. */ }
+        };
+        socket.onclose = event => {
+          if (!active) return;
+          refreshToken = event.code === 4401;
+          startFallbackPolling();
+          reconnectTimer = window.setTimeout(connect, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 30_000);
+        };
+        socket.onerror = () => socket?.close();
+      } catch {
+        if (!active) return;
+        startFallbackPolling();
+        reconnectTimer = window.setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 30_000);
+      }
+    };
+    void refresh();
+    void connect();
+    return () => {
+      active = false;
+      window.clearTimeout(reconnectTimer);
+      window.clearInterval(pollTimer);
+      socket?.close();
+    };
+  }, [category]);
+
   const visible = useMemo(() => instruments.filter(item => item.category === category && `${item.name} ${item.symbol}`.toLowerCase().includes(search.toLowerCase())), [instruments, category, search]);
   const selected = instruments.find(item => item.symbol === symbol);
   const bids = snapshot?.book.bids.slice(0, 10) ?? [];
@@ -97,13 +164,13 @@ export default function TradfiTerminal() {
       <div className="topright"><div className="live"><span className={`dot ${snapshot ? "" : "tradfi-offline"}`}/>{snapshot ? "BINGX PERP · AO VIVO" : "CONECTANDO FEED"}</div><button className="iconbtn" title="Sair" aria-label="Sair" onClick={() => { window.location.href = "/api/auth/logout"; }}><LogOut size={16}/></button></div>
     </header>
     <div className="wrap tradfi-wrap">
-      <div className="heading"><div><div className="eyebrow">BINGX · MERCADOS TRADFI</div><h1>Índices mundiais & Forex</h1></div><div className="headmeta"><span className="badge">PERPÉTUOS MARGEM USDT</span><span className="badge">CONTRATOS PÚBLICOS</span></div></div>
+      <div className="heading"><div><div className="eyebrow">BINGX · MERCADOS TRADFI</div><h1>Índices, Forex & Commodities</h1></div><div className="headmeta"><span className="badge">PERPÉTUOS MARGEM USDT</span><span className="badge">CONTRATOS PÚBLICOS</span></div></div>
       <div className="tradfi-layout">
         <aside className="panel tradfi-sidebar">
           <div className="tradfi-tabs tradfi-tabs-three"><button className={category === "indices" ? "selected" : ""} onClick={() => setCategory("indices")}>ÍNDICES <b>{instruments.filter(item => item.category === "indices").length}</b></button><button className={category === "forex" ? "selected" : ""} onClick={() => setCategory("forex")}>FOREX <b>{instruments.filter(item => item.category === "forex").length}</b></button><button className={category === "commodities" ? "selected" : ""} onClick={() => setCategory("commodities")}>COMMODITIES <b>{instruments.filter(item => item.category === "commodities").length}</b></button></div>
           <label className="tradfi-search"><Search size={14}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Buscar instrumento"/></label>
-          <div className="tradfi-list">{visible.map(item => <button key={item.symbol} className={`tradfi-instrument ${symbol === item.symbol ? "selected" : ""}`} onClick={() => setSymbol(item.symbol)}><span><strong>{item.name}</strong><small>{item.symbol}</small></span><span className={`mono ${((snapshot?.ticker.change24h ?? 0) >= 0) ? "pos" : "neg"}`}>{symbol === item.symbol && snapshot ? `${snapshot.ticker.change24h >= 0 ? "+" : ""}${snapshot.ticker.change24h.toFixed(2)}%` : "·"}</span></button>)}{visible.length === 0 && <div className="loading">Nenhum instrumento listado.</div>}</div>
-          <div className="tradfi-source-note">Lista atualizada a partir dos contratos públicos habilitados pela BingX.</div>
+          <div className="tradfi-list">{visible.map(item => { const quote = watchQuotes[item.symbol]; const change = quote?.changePercent; return <button key={item.symbol} className={`tradfi-instrument ${symbol === item.symbol ? "selected" : ""}`} onClick={() => setSymbol(item.symbol)}><span className="tradfi-instrument-name"><strong>{item.name}</strong><small>{item.symbol}</small></span><span className="tradfi-instrument-quote"><strong className="mono">{quote?.price != null ? fmtPrice(quote.price, item.pricePrecision ?? 2) : "—"}</strong><small className={`mono ${change == null ? "" : change >= 0 ? "pos" : "neg"}`}>{change != null ? `${change >= 0 ? "+" : ""}${change.toFixed(2)}%` : "calculando"}</small></span></button>; })}{visible.length === 0 && <div className="loading">Nenhum instrumento listado.</div>}</div>
+          <div className="tradfi-source-note">Cotação atual · variação contra o último fechamento diário da BingX (UTC).</div>
         </aside>
         <section className="tradfi-main">
           <div className="panel tradfi-chart-panel">

@@ -65,6 +65,9 @@ TRADFI_COMMODITY_SYMBOLS = {
     "NCCOXAG2USD-USDT": "Prata",
     "NCCOZINC2USD-USDT": "Zinco",
 }
+TRADFI_DAILY_CLOSES: dict[str, dict[str, Any]] = {}
+TRADFI_DAILY_CLOSES_TASK: asyncio.Task[Any] | None = None
+TRADFI_DAILY_CLOSES_PENDING: dict[str, dict[str, Any]] = {}
 INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"}
 
 def positive_int_setting(name: str, default: int, maximum: int) -> int:
@@ -90,6 +93,10 @@ class MarketService:
         self.book_payload_cache: dict[tuple[str, int], tuple[tuple[Any, ...], BookSnapshot]] = {}
         self.market_subscribers: dict[tuple[str, str, str], set[asyncio.Queue[dict[str, Any]]]] = {}
         self.market_stream_tasks: dict[tuple[str, str, str], asyncio.Task[Any]] = {}
+        self.tradfi_ticker_task: asyncio.Task[Any] | None = None
+        self.tradfi_prices: dict[str, dict[str, Any]] = {}
+        self.tradfi_symbol_categories: dict[str, str] = {}
+        self.tradfi_watchlist_subscribers: dict[str, set[WebSocket]] = {"indices": set(), "forex": set(), "commodities": set()}
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
         self.external_books: dict[tuple[str, str], dict[str, Any]] = {}
         self.external_trades: dict[str, deque[Trade]] = {}
@@ -111,7 +118,89 @@ class MarketService:
         }
 
     async def close(self) -> None:
+        if self.tradfi_ticker_task:
+            self.tradfi_ticker_task.cancel()
+            await asyncio.gather(self.tradfi_ticker_task, return_exceptions=True)
         await self.client.aclose()
+
+    def ensure_tradfi_ticker_stream(self) -> None:
+        if self.tradfi_ticker_task is None or self.tradfi_ticker_task.done():
+            self.tradfi_ticker_task = asyncio.create_task(self.collect_tradfi_tickers())
+
+    async def publish_tradfi_quote(self, symbol: str, price: float, event_time: int | None = None) -> None:
+        received_at = int(time.time() * 1000)
+        self.tradfi_prices[symbol] = {"price": price, "eventTime": event_time or received_at, "receivedAt": received_at}
+        category = self.tradfi_symbol_categories.get(symbol)
+        if not category:
+            return
+        reference = TRADFI_DAILY_CLOSES.get(symbol)
+        today = datetime.now(timezone.utc).date().isoformat()
+        previous_close = reference.get("close") if reference and reference.get("referenceDate") == today else None
+        change = ((price - previous_close) / previous_close * 100) if previous_close else None
+        message = {"type": "quote", "data": {
+            "symbol": symbol, "price": price, "previousClose": previous_close,
+            "changePercent": round(change, 4) if change is not None else None,
+            "referenceTime": reference.get("candleTime") if previous_close is not None else None,
+            "eventTime": event_time, "receivedAt": received_at,
+        }}
+        subscribers = tuple(self.tradfi_watchlist_subscribers[category])
+        if subscribers:
+            sends = [asyncio.create_task(subscriber.send_json(message)) for subscriber in subscribers]
+            done, pending = await asyncio.wait(sends, timeout=1)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for subscriber, task in zip(subscribers, sends):
+                if task not in done or task.cancelled() or task.exception() is not None:
+                    self.tradfi_watchlist_subscribers[category].discard(subscriber)
+
+    async def collect_tradfi_tickers(self) -> None:
+        reconnect_delay = 1.0
+        while True:
+            try:
+                instruments = await bingx_tradfi_catalog()
+                self.tradfi_symbol_categories = {item["symbol"]: item["category"] for item in instruments}
+                async with websockets.connect(
+                    "wss://open-api-swap.bingx.com/swap-market", ping_interval=20, ping_timeout=20,
+                    open_timeout=12, close_timeout=5, max_size=2**20, max_queue=4096,
+                ) as upstream:
+                    connected_since = time.monotonic()
+                    for instrument in instruments:
+                        channel = f"{instrument['symbol']}@ticker"
+                        await upstream.send(json.dumps({"id": channel, "reqType": "sub", "dataType": channel}))
+                        await asyncio.sleep(0.11)
+                    async for raw in upstream:
+                        try:
+                            text = gzip.decompress(raw).decode("utf-8") if isinstance(raw, bytes) else raw
+                        except (OSError, EOFError):
+                            text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+                        if text.strip().lower() == "ping":
+                            await upstream.send("Pong")
+                            continue
+                        message = json.loads(text)
+                        if message.get("code") not in (None, 0, "0"):
+                            log.info("BingX TradFi ticker subscription response", extra={"dataType": message.get("dataType"), "code": message.get("code"), "message": message.get("msg")})
+                            continue
+                        data_type = str(message.get("dataType", ""))
+                        if not data_type.endswith("@ticker"):
+                            continue
+                        data = message.get("data") or {}
+                        symbol = str(data.get("s") or data_type[:-7]).upper()
+                        if symbol not in self.tradfi_symbol_categories:
+                            continue
+                        try:
+                            price = float(data["c"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        await self.publish_tradfi_quote(symbol, price, int(data.get("E", message.get("ts", time.time() * 1000))))
+                    reconnect_delay = 1.0 if time.monotonic() - connected_since >= 20 else min(reconnect_delay * 2, 30.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("BingX TradFi ticker stream disconnected")
+                reconnect_delay = min(reconnect_delay * 2, 30.0)
+            await asyncio.sleep(reconnect_delay)
 
     async def try_open_market_session(self) -> tuple[bool, int]:
         async with self.market_sessions_lock:
@@ -1038,6 +1127,85 @@ async def tradfi_contracts():
         log.warning("BingX TradFi contract list unavailable: %s", error)
         raise HTTPException(502, "Não foi possível carregar os contratos TradFi da BingX.") from error
 
+async def refresh_tradfi_daily_closes() -> None:
+    """Warm requested contracts' last completed daily close once per UTC day."""
+    while TRADFI_DAILY_CLOSES_PENDING:
+        _, instrument = TRADFI_DAILY_CLOSES_PENDING.popitem()
+        symbol = instrument["symbol"]
+        now = datetime.now(timezone.utc)
+        reference_date = now.date().isoformat()
+        day_start_ms = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        cached = TRADFI_DAILY_CLOSES.get(symbol)
+        if cached and cached.get("referenceDate") == reference_date:
+            continue
+        try:
+            rows = await bingx_tradfi_request(
+                "/openApi/swap/v2/quote/klines",
+                {"symbol": symbol, "interval": "1d", "limit": 3, "endTime": int(time.time() * 1000)},
+                3600,
+            )
+            completed = [row for row in rows or [] if int(row["time"]) < day_start_ms]
+            if completed:
+                previous = max(completed, key=lambda row: int(row["time"]))
+                TRADFI_DAILY_CLOSES[symbol] = {
+                    "close": float(previous["close"]),
+                    "candleTime": int(previous["time"] // 1000),
+                    "referenceDate": reference_date,
+                    "source": "BingX último candle diário fechado · UTC",
+                }
+                # Refresh the live row as soon as its daily reference becomes available.
+                latest = service.tradfi_prices.get(symbol)
+                if latest:
+                    await service.publish_tradfi_quote(symbol, latest["price"], latest["eventTime"])
+        except (httpx.HTTPError, HTTPException, ValueError, KeyError, TypeError) as error:
+            log.info("BingX TradFi daily reference unavailable", extra={"symbol": symbol, "error": str(error)})
+        # The public Kline endpoint is rate limited. Spread the warm-up across
+        # contracts rather than bursting one historical request per watchlist row.
+        await asyncio.sleep(1.05)
+
+@app.get("/api/tradfi/watchlist")
+async def tradfi_watchlist(category: str = Query("indices")):
+    if category not in {"indices", "forex", "commodities"}:
+        raise HTTPException(400, "Categoria TradFi inválida.")
+    catalog = await bingx_tradfi_catalog()
+    selected = [item for item in catalog if item["category"] == category]
+    service.ensure_tradfi_ticker_stream()
+    service.tradfi_symbol_categories.update({item["symbol"]: item["category"] for item in selected})
+    reference_date = datetime.now(timezone.utc).date().isoformat()
+    global TRADFI_DAILY_CLOSES_TASK
+    stale = [item for item in selected if TRADFI_DAILY_CLOSES.get(item["symbol"], {}).get("referenceDate") != reference_date]
+    TRADFI_DAILY_CLOSES_PENDING.update({item["symbol"]: item for item in stale})
+    if stale:
+        if TRADFI_DAILY_CLOSES_TASK is None or TRADFI_DAILY_CLOSES_TASK.done():
+            TRADFI_DAILY_CLOSES_TASK = asyncio.create_task(refresh_tradfi_daily_closes())
+    try:
+        rows = await bingx_tradfi_request("/openApi/swap/v2/quote/ticker", {}, 5)
+        tickers = rows if isinstance(rows, list) else [rows] if rows else []
+        by_symbol = {str(row.get("symbol", "")).upper(): row for row in tickers}
+        quotes = []
+        for item in selected:
+            symbol = item["symbol"]
+            ticker = by_symbol.get(symbol, {})
+            try:
+                price = float(ticker["lastPrice"])
+            except (KeyError, TypeError, ValueError):
+                price = None
+            reference = TRADFI_DAILY_CLOSES.get(symbol)
+            previous_close = reference.get("close") if reference and reference.get("referenceDate") == reference_date else None
+            change_percent = ((price - previous_close) / previous_close * 100) if price is not None and previous_close else None
+            quotes.append({
+                "symbol": symbol, "price": price, "previousClose": previous_close,
+                "changePercent": round(change_percent, 4) if change_percent is not None else None,
+                "referenceTime": reference.get("candleTime") if previous_close is not None else None,
+                "source": "BingX ticker + fechamento diário anterior UTC",
+            })
+        return {"category": category, "quotes": quotes, "receivedAt": int(time.time() * 1000),
+                "reference": "Último candle diário fechado (UTC); cotação em lote BingX.",
+                "referenceStatus": "ready" if all(row["previousClose"] is not None for row in quotes) else "loading"}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+        log.warning("BingX TradFi watchlist quotes unavailable", extra={"category": category, "error": str(error)})
+        raise HTTPException(502, "Não foi possível atualizar as cotações da watchlist BingX.") from error
+
 @app.get("/api/tradfi/candles")
 async def tradfi_candles(symbol: str = Query(...), interval: str = Query("5m"), limit: int = Query(240, ge=20, le=500)):
     symbol = await validate_bingx_tradfi_symbol(symbol)
@@ -1755,6 +1923,39 @@ async def market_ws(socket: WebSocket):
             await service.unsubscribe_market(subscription_key, market_queue)
         active_sessions = await service.close_market_session()
         log.info("beta market session closed", extra={"active_sessions": active_sessions, "symbol": symbol})
+
+@app.websocket("/ws/tradfi/watchlist")
+async def tradfi_watchlist_ws(socket: WebSocket):
+    allowed_origins = {origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()}
+    origin = socket.headers.get("origin")
+    protocols = [value.strip() for value in socket.headers.get("sec-websocket-protocol", "").split(",") if value.strip()]
+    market_token = protocols[1] if len(protocols) == 2 and protocols[0] == "nexus-market-v1" else ""
+    if (origin and origin not in allowed_origins) or not verify_market_token(market_token, "ws"):
+        await socket.close(code=4401, reason="Authentication required")
+        return
+    category = socket.query_params.get("category", "indices")
+    if category not in service.tradfi_watchlist_subscribers:
+        await socket.close(code=1008, reason="Unsupported TradFi category")
+        return
+    admitted, active_sessions = await service.try_open_market_session()
+    if not admitted:
+        await socket.close(code=1013, reason="Beta live session limit reached")
+        return
+    try:
+        await socket.accept(subprotocol="nexus-market-v1")
+        service.tradfi_watchlist_subscribers[category].add(socket)
+        service.ensure_tradfi_ticker_stream()
+        while True:
+            try:
+                await asyncio.wait_for(socket.receive_text(), timeout=30)
+            except asyncio.TimeoutError:
+                await socket.send_json({"type": "heartbeat", "data": {"time": int(time.time() * 1000)}})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        service.tradfi_watchlist_subscribers[category].discard(socket)
+        active_sessions = await service.close_market_session()
+        log.info("beta TradFi watchlist session closed", extra={"active_sessions": active_sessions, "category": category})
 
 async def _consume_market(socket: WebSocket, queue: asyncio.Queue[dict[str, Any]]):
     while True:

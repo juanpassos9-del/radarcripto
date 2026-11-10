@@ -77,8 +77,8 @@ async function authorizedFetch(url: string): Promise<Response> {
   return response;
 }
 
-export function getMarketWsToken() {
-  return getMarketToken("ws");
+export function getMarketWsToken(forceRefresh = false) {
+  return getMarketToken("ws", forceRefresh);
 }
 export const marketDataLabel = "BINANCE SPOT · USDT";
 export const fmtPrice = (value: number | null | undefined, digits = 2) => value == null ? "—" : new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
