@@ -197,7 +197,7 @@ def build_macro_snapshot(
         return result
 
     relationships = []
-    for left, right, label in [("DXY", "EURUSD", "Dólar × EUR/USD"), ("DXY", "SP500", "Dólar × S&P 500"), ("WTI", "SP500", "Petróleo × S&P 500"), ("GOLD", "DXY", "Ouro × dólar"), ("UST2Y", "SP500", "Treasury 2Y × S&P 500"), ("UST10Y", "TLT", "Treasury 10Y × TLT"), ("UST30Y", "Treasury 30Y × TLT"), ("DXY", "EWZ", "Dólar × EWZ")]:
+    for left, right, label in [("DXY", "EURUSD", "Dólar × EUR/USD"), ("DXY", "SP500", "Dólar × S&P 500"), ("WTI", "SP500", "Petróleo × S&P 500"), ("GOLD", "DXY", "Ouro × dólar"), ("UST2Y", "SP500", "Treasury 2Y × S&P 500"), ("UST10Y", "TLT", "Treasury 10Y × TLT"), ("UST30Y", "TLT", "Treasury 30Y × TLT"), ("DXY", "EWZ", "Dólar × EWZ")]:
         left_times = histories.get(measures.get(left, {}).get("symbol", ""), [])
         right_times = histories.get(measures.get(right, {}).get("symbol", ""), [])
         shared = sorted({point["time"] for point in left_times} & {point["time"] for point in right_times})[-31:]
