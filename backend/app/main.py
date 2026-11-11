@@ -110,6 +110,8 @@ class MarketService:
         self.tradfi_sample_task: asyncio.Task[Any] | None = None
         self.tradfi_seed_task: asyncio.Task[Any] | None = None
         self.tradfi_seed_complete = False
+        self.macro_regime_state: dict[str, Any] = {"confirmed": "AQUECENDO", "candidate": None, "count": 0, "lastBucket": None}
+        self.macro_divergence_states: dict[str, dict[str, Any]] = {}
         self.tradfi_prices: dict[str, dict[str, Any]] = {}
         self.tradfi_samples: dict[str, deque[dict[str, Any]]] = {}
         self.tradfi_symbol_categories: dict[str, str] = {symbol: descriptor["category"] for symbol, descriptor in HYPERLIQUID_ASSETS.items()}
@@ -134,6 +136,62 @@ class MarketService:
             symbol: {"status": "starting", "connected": False, "sessionStartedAt": int(time.time() * 1000), "connectedAt": None, "lastEventTime": None, "lastReceivedAt": None, "lastLatencyMs": None, "events": 0, "reconnects": 0, "possibleIdGaps": 0, "backfillRowsFetched": 0, "backfillRowsQueued": 0, "backfillSkippedIds": 0, "backfillFailures": 0, "lastBackfillAt": None, "lastTradeId": None, "lastDisconnectAt": None}
             for symbol in SYMBOLS
         }
+
+    def apply_macro_persistence(self, snapshot: dict[str, Any], now_ms: int) -> dict[str, Any]:
+        bucket = now_ms // 60_000
+        regime = snapshot["regime"]
+        state = self.macro_regime_state
+        score = regime.get("score")
+        qualified = bool(regime.get("qualified")) and score is not None
+        current = state["confirmed"]
+        if not qualified:
+            candidate = "AQUECENDO"
+            state.update({"confirmed": candidate, "candidate": None, "count": 0, "lastBucket": bucket})
+        else:
+            if current == "RISK-ON":
+                candidate = "RISK-ON" if score > 10 else "RISK-OFF" if score <= -25 else "MISTO"
+            elif current == "RISK-OFF":
+                candidate = "RISK-OFF" if score < -10 else "RISK-ON" if score >= 25 else "MISTO"
+            else:
+                candidate = "RISK-ON" if score >= 25 else "RISK-OFF" if score <= -25 else "MISTO"
+            last_bucket = state.get("lastBucket")
+            if last_bucket is None or bucket > last_bucket:
+                consecutive = last_bucket is not None and bucket == last_bucket + 1
+                if state.get("candidate") == candidate and consecutive:
+                    state["count"] += 1
+                else:
+                    state["candidate"], state["count"] = candidate, 1
+                state["lastBucket"] = bucket
+                if candidate == current:
+                    state["candidate"], state["count"] = None, 0
+                elif state["count"] >= 3:
+                    state["confirmed"] = candidate
+                    state["candidate"], state["count"] = None, 0
+        regime.update({
+            "label": state["confirmed"], "candidate": candidate,
+            "pendingSamples": state["count"], "requiredSamples": 3,
+            "transitionPending": candidate != state["confirmed"],
+        })
+
+        divergences = {item["id"]: item for item in snapshot.get("divergences", [])}
+        for key in list(self.macro_divergence_states):
+            if key not in divergences:
+                state_for_key = self.macro_divergence_states[key]
+                if state_for_key["lastBucket"] < bucket:
+                    self.macro_divergence_states.pop(key, None)
+        for key, item in divergences.items():
+            previous = self.macro_divergence_states.get(key)
+            if previous is None:
+                previous = {"count": 1, "lastBucket": bucket}
+            elif bucket > previous["lastBucket"]:
+                previous = {
+                    "count": previous["count"] + 1 if bucket == previous["lastBucket"] + 1 else 1,
+                    "lastBucket": bucket,
+                }
+            self.macro_divergence_states[key] = previous
+            item["persistenceMinutes"] = previous["count"]
+            item["confirmed"] = previous["count"] >= 2
+        return snapshot
 
     async def close(self) -> None:
         if self.tradfi_ticker_task:
@@ -1436,29 +1494,32 @@ async def tradfi_watchlist(category: str = Query("indices")):
 
 @app.get("/api/tradfi/macro")
 async def tradfi_macro():
-    # The macro asset universe is static and already declared in the engine. Avoid waiting
-    # on the external BingX catalogue (or historical seeding) before responding to the UI.
-    catalog = [{"symbol": symbol, "category": metadata["category"]} for symbol, metadata in MACRO_ASSETS.items()]
     service.ensure_tradfi_ticker_stream()
-    now_ms = int(time.time() * 1000)
-    selected = catalog
-    symbols = [item["symbol"] for item in selected]
-    history: dict[str, list[dict[str, Any]]] = {}
-    if service.flow_store:
-        try:
-            history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 3 * 60 * 60_000)
-        except Exception:
-            log.exception("TradFi macro history query failed")
-    for symbol, points in service.tradfi_samples.items():
-        if symbol in MACRO_ASSETS:
-            by_time = {item["time"]: item for item in history.get(symbol, [])}
-            by_time.update({item["time"]: item for item in points if item["time"] >= now_ms - 3 * 60 * 60_000})
-            history[symbol] = sorted(by_time.values(), key=lambda item: item["time"])
-    return build_macro_snapshot(
-        selected, history, service.tradfi_prices, now_ms,
-        service.flow_store.storage if service.flow_store else "unavailable",
-        service.flow_store.durable if service.flow_store else False,
-    )
+    async def build_snapshot() -> dict[str, Any]:
+        # Coalesce the dashboard's frequent refreshes so matrix calculations and history
+        # queries are shared across users instead of repeated for each browser poll.
+        catalog = [{"symbol": symbol, "category": metadata["category"]} for symbol, metadata in MACRO_ASSETS.items()]
+        now_ms = int(time.time() * 1000)
+        symbols = [item["symbol"] for item in catalog]
+        history: dict[str, list[dict[str, Any]]] = {}
+        if service.flow_store:
+            try:
+                history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 3 * 60 * 60_000)
+            except Exception:
+                log.exception("TradFi macro history query failed")
+        for symbol, points in service.tradfi_samples.items():
+            if symbol in MACRO_ASSETS:
+                by_time = {item["time"]: item for item in history.get(symbol, [])}
+                by_time.update({item["time"]: item for item in points if item["time"] >= now_ms - 3 * 60 * 60_000})
+                history[symbol] = sorted(by_time.values(), key=lambda item: item["time"])
+        snapshot = build_macro_snapshot(
+            catalog, history, service.tradfi_prices, now_ms,
+            service.flow_store.storage if service.flow_store else "unavailable",
+            service.flow_store.durable if service.flow_store else False,
+        )
+        return service.apply_macro_persistence(snapshot, now_ms)
+
+    return await service.cache_value("tradfi-macro-snapshot", 15, build_snapshot)
 
 @app.get("/api/tradfi/candles")
 async def tradfi_candles(symbol: str = Query(...), interval: str = Query("5m"), limit: int = Query(240, ge=20, le=500)):

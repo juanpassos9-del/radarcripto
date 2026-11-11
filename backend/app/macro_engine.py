@@ -29,6 +29,10 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "HL:spot:WBRL-USDC": {"key": "WBRLUSDC", "label": "WBRL/USDC · real empacotado", "category": "fx", "color": "#b8e986", "source": "Hyperliquid Spot", "unit": "USDC por WBRL"},
 }
 
+MOMENTUM_WINDOWS = (1, 5, 15, 60)
+CORRELATION_WINDOWS = (15, 30, 60)
+CORRELATION_ASSET_KEYS = tuple(item["key"] for item in MACRO_ASSETS.values())
+
 
 def _bounded(value: float, low: float = -1.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -52,6 +56,69 @@ def _pearson(left: list[float], right: list[float]) -> float | None:
     return _bounded(covariance / denominator) if denominator else None
 
 
+def _returns_by_minute(points: list[dict[str, Any]], is_yield: bool) -> dict[int, float]:
+    prices = {int(point["time"]): float(point["price"]) for point in points if point.get("price", 0) > 0}
+    result: dict[int, float] = {}
+    for timestamp, price in prices.items():
+        previous = prices.get(timestamp - 60_000)
+        if previous is not None and previous > 0:
+            result[timestamp] = (price - previous) * 100 if is_yield else (price / previous - 1) * 100
+    return result
+
+
+def _build_correlation_matrix(
+    measures: dict[str, dict[str, Any]], histories: dict[str, list[dict[str, Any]]], now_ms: int,
+) -> dict[str, Any]:
+    assets = [{"key": item["key"], "label": item["label"]} for item in MACRO_ASSETS.values()]
+    returns: dict[str, dict[int, float]] = {}
+    for item in MACRO_ASSETS.values():
+        key, symbol = item["key"], measures[item["key"]]["symbol"]
+        returns[key] = _returns_by_minute(histories.get(symbol, []), item.get("unit") == "yield_pct")
+
+    windows: dict[str, dict[str, list[list[Any]]]] = {}
+    breakouts: list[dict[str, Any]] = []
+    for minutes in CORRELATION_WINDOWS:
+        min_observations = max(8, math.ceil(minutes * 0.75))
+        values: list[list[float | None]] = [[None for _ in assets] for _ in assets]
+        observations: list[list[int]] = [[0 for _ in assets] for _ in assets]
+        for left_index, left in enumerate(assets):
+            for right_index in range(left_index, len(assets)):
+                right = assets[right_index]
+                shared = sorted(set(returns[left["key"]]) & set(returns[right["key"]]))
+                shared = [timestamp for timestamp in shared if now_ms - timestamp <= 65 * 60_000][-minutes:]
+                if not shared or now_ms - shared[-1] > 3 * 60_000:
+                    shared = []
+                samples = len(shared)
+                corr = _pearson([returns[left["key"]][t] for t in shared], [returns[right["key"]][t] for t in shared]) if samples >= min_observations else None
+                values[left_index][right_index] = round(corr, 3) if corr is not None else None
+                values[right_index][left_index] = values[left_index][right_index]
+                observations[left_index][right_index] = samples
+                observations[right_index][left_index] = samples
+        windows[str(minutes)] = {"values": values, "observations": observations}
+
+    short, long = windows["15"], windows["60"]
+    for left_index, left in enumerate(assets):
+        for right_index in range(left_index + 1, len(assets)):
+            right = assets[right_index]
+            corr15 = short["values"][left_index][right_index]
+            corr60 = long["values"][left_index][right_index]
+            count15 = short["observations"][left_index][right_index]
+            count60 = long["observations"][left_index][right_index]
+            if corr15 is None or corr60 is None or count15 < 12 or count60 < 48 or abs(corr60) < 0.6:
+                continue
+            sign_flip = corr15 * corr60 < 0 and abs(corr15) >= 0.3
+            weakened = abs(corr15) <= 0.2
+            if sign_flip or weakened:
+                breakouts.append({
+                    "leftKey": left["key"], "rightKey": right["key"],
+                    "leftLabel": left["label"], "rightLabel": right["label"],
+                    "shortCorrelation": corr15, "baselineCorrelation": corr60,
+                    "observations15m": count15, "observations60m": count60,
+                    "type": "inversion" if sign_flip else "weakening",
+                })
+    return {"assets": assets, "windows": windows, "correlationShifts": breakouts}
+
+
 def build_macro_snapshot(
     catalog: list[dict[str, Any]],
     histories: dict[str, list[dict[str, Any]]],
@@ -69,7 +136,7 @@ def build_macro_snapshot(
     for symbol, metadata in MACRO_ASSETS.items():
         instrument = instruments.get(symbol)
         if not instrument:
-            measures[metadata["key"]] = {"symbol": symbol, **metadata, "available": False, "price": None, "change5mPct": None, "change30mPct": None, "acceleration5mPp": None, "z5m": None, "sampleCount": 0, "ageMs": None, "status": "unavailable"}
+            measures[metadata["key"]] = {"symbol": symbol, **metadata, "available": False, "price": None, "change5mPct": None, "change30mPct": None, "acceleration5mPp": None, "z5m": None, "windows": {}, "sampleCount": 0, "ageMs": None, "status": "unavailable"}
             continue
         points = sorted(histories.get(symbol, []), key=lambda point: point["time"])
         sample_count = len(points)
@@ -86,28 +153,47 @@ def build_macro_snapshot(
         points = [point for point in points if point["price"] > 0]
         first = points[0] if points else None
         latest = points[-1] if points else None
-        at_5m = _near_price(points, now_ms - 5 * 60_000)
-        at_10m = _near_price(points, now_ms - 10 * 60_000)
-        at_30m = _near_price(points, now_ms - 30 * 60_000)
-        change_5m = (latest["price"] / at_5m["price"] - 1) * 100 if latest and at_5m else None
-        prior_5m = (at_5m["price"] / at_10m["price"] - 1) * 100 if at_5m and at_10m else None
-        change_30m = (latest["price"] / at_30m["price"] - 1) * 100 if latest and at_30m else None
-        acceleration = change_5m - prior_5m if change_5m is not None and prior_5m is not None else None
         is_yield = metadata.get("unit") == "yield_pct"
-        change_5m_bps = (latest["price"] - at_5m["price"]) * 100 if is_yield and latest and at_5m else None
-        change_30m_bps = (latest["price"] - at_30m["price"]) * 100 if is_yield and latest and at_30m else None
-        prior_5m_bps = (at_5m["price"] - at_10m["price"]) * 100 if is_yield and at_5m and at_10m else None
-        acceleration_bps = change_5m_bps - prior_5m_bps if change_5m_bps is not None and prior_5m_bps is not None else None
         recent = [point for point in points if now_ms - 60 * 60_000 <= point["time"] <= now_ms]
-        one_minute_returns = [((right["price"] - left["price"]) * 100 if is_yield else (right["price"] / left["price"] - 1) * 100) for left, right in zip(recent, recent[1:]) if left["price"] > 0]
-        z5m = None
-        normalized_change_5m = change_5m_bps if is_yield else change_5m
-        if normalized_change_5m is not None and len(one_minute_returns) >= 12:
-            mean = sum(one_minute_returns) / len(one_minute_returns)
-            variance = sum((value - mean) ** 2 for value in one_minute_returns) / len(one_minute_returns)
-            sigma_5m = math.sqrt(variance * 5)
-            if sigma_5m > 1e-8:
-                z5m = normalized_change_5m / sigma_5m
+        one_minute_returns = [
+            (right["price"] - left["price"]) * 100 if is_yield else (right["price"] / left["price"] - 1) * 100
+            for left, right in zip(recent, recent[1:])
+            if left["price"] > 0 and 30_000 <= right["time"] - left["time"] <= 90_000
+        ]
+        volatility_1m = None
+        if len(one_minute_returns) >= 12:
+            mean_1m = sum(one_minute_returns) / len(one_minute_returns)
+            variance_1m = sum((value - mean_1m) ** 2 for value in one_minute_returns) / len(one_minute_returns)
+            volatility_1m = math.sqrt(variance_1m)
+        windows: dict[str, dict[str, float | None | str]] = {}
+        latest_is_fresh = bool(latest and now_ms - latest["time"] <= 120_000)
+        for minutes in (1, 5, 15, 30, 60):
+            base = _near_price(points, now_ms - minutes * 60_000) if latest_is_fresh else None
+            change = None
+            if latest and base and base["price"] > 0:
+                change = (latest["price"] - base["price"]) * 100 if is_yield else (latest["price"] / base["price"] - 1) * 100
+            z_score = None
+            if minutes in MOMENTUM_WINDOWS and change is not None and volatility_1m and volatility_1m > 1e-8:
+                z_score = change / (volatility_1m * math.sqrt(minutes))
+            windows[str(minutes)] = {
+                "change": round(change, 4) if change is not None else None,
+                "velocityPerMinute": round(change / minutes, 5) if change is not None else None,
+                "z": round(z_score, 3) if z_score is not None else None,
+                "direction": "alta" if change is not None and change > 0 else "queda" if change is not None and change < 0 else "neutro" if change is not None else "indisponível",
+            }
+        change_5m = windows["5"]["change"]
+        change_30m = windows["30"]["change"]
+        at_5m = _near_price(points, now_ms - 5 * 60_000) if latest_is_fresh else None
+        at_10m = _near_price(points, now_ms - 10 * 60_000) if latest_is_fresh else None
+        prior_5m = (at_5m["price"] / at_10m["price"] - 1) * 100 if at_5m and at_10m and not is_yield else ((at_5m["price"] - at_10m["price"]) * 100 if at_5m and at_10m else None)
+        acceleration = change_5m - prior_5m if change_5m is not None and prior_5m is not None else None
+        change_5m_bps = change_5m if is_yield else None
+        change_30m_bps = change_30m if is_yield else None
+        acceleration_bps = acceleration if is_yield else None
+        if not is_yield:
+            change_5m = windows["5"]["change"]
+            change_30m = windows["30"]["change"]
+        z5m = windows["5"]["z"]
         if first:
             oldest_sample = first["time"] if oldest_sample is None else min(oldest_sample, first["time"])
         measures[metadata["key"]] = {
@@ -121,6 +207,7 @@ def build_macro_snapshot(
             "change30mBps": round(change_30m_bps, 3) if change_30m_bps is not None else None,
             "acceleration5mBps": round(acceleration_bps, 3) if acceleration_bps is not None else None,
             "z5m": round(z5m, 3) if z5m is not None else None,
+            "windows": windows,
             "sampleCount": sample_count, "ageMs": age_ms,
             "status": "live" if has_live else "history" if latest else "warming",
         }
@@ -163,6 +250,61 @@ def build_macro_snapshot(
     cross_asset_confirmation = equity_breadth is not None and (usd_strength is not None or cyclicals is not None)
     sufficient_coverage = coverage >= 55
     regime = "RISK-ON" if sufficient_coverage and cross_asset_confirmation and risk_score is not None and risk_score >= 20 else "RISK-OFF" if sufficient_coverage and cross_asset_confirmation and risk_score is not None and risk_score <= -20 else "MISTO" if sufficient_coverage and cross_asset_confirmation and risk_score is not None else "AQUECENDO"
+    regime_qualified = sufficient_coverage and cross_asset_confirmation and risk_score is not None
+
+    def build_breadth(keys: list[str], inverted: set[str] | None = None) -> dict[str, Any]:
+        inverted = inverted or set()
+        values = [(-signal(key) if key in inverted and signal(key) is not None else signal(key)) for key in keys]
+        active_values = [value for value in values if value is not None]
+        advancing = sum(value >= 0.15 for value in active_values)
+        declining = sum(value <= -0.15 for value in active_values)
+        neutral = len(active_values) - advancing - declining
+        score = round(mean_available(active_values) * 100) if active_values else None
+        return {
+            "advancing": advancing, "neutral": neutral, "declining": declining,
+            "available": len(active_values), "total": len(keys), "score": score,
+            "coverage": round(len(active_values) / len(keys) * 100) if keys else 0,
+        }
+
+    breadth = {
+        "indices": {"label": "Índices amplos", **build_breadth(["SP500", "NASDAQ100", "RUSSELL2000", "DOW"])},
+        "usd": {"label": "Força do USD", **build_breadth(["DXY", "USDJPY", "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"], {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"})},
+        "energy": {"label": "Energia", **build_breadth(["WTI", "BRENT"])},
+        "metals": {"label": "Metais", **build_breadth(["GOLD", "COPPER"])},
+        "yields": {"label": "Treasury yields", **build_breadth(["UST2Y", "UST10Y", "UST30Y"])},
+    }
+    risk_votes = {
+        "Índices": equity_breadth,
+        "USD": -usd_strength if usd_strength is not None else None,
+        "Cíclicos / ouro": cyclicals,
+    }
+    on_classes = [name for name, value in risk_votes.items() if value is not None and value >= 0.2]
+    off_classes = [name for name, value in risk_votes.items() if value is not None and value <= -0.2]
+    breadth["confirmation"] = {
+        "direction": "RISK-ON" if len(on_classes) >= 2 else "RISK-OFF" if len(off_classes) >= 2 else "MISTA",
+        "classes": on_classes if len(on_classes) >= 2 else off_classes if len(off_classes) >= 2 else [],
+        "votes": {name: round(value * 100) if value is not None else None for name, value in risk_votes.items()},
+    }
+
+    divergence_specs = [
+        ("NASDAQ100", "SP500", "Nasdaq × S&P 500", 1),
+        ("RUSSELL2000", "SP500", "Russell 2000 × S&P 500", 1),
+        ("DXY", "EURUSD", "DXY × EUR/USD", -1),
+        ("DXY", "GOLD", "DXY × ouro", -1),
+    ]
+    divergences = []
+    for left_key, right_key, label, expected_sign in divergence_specs:
+        left_z, right_z = measures.get(left_key, {}).get("z5m"), measures.get(right_key, {}).get("z5m")
+        if left_z is None or right_z is None or abs(left_z) < 0.75 or abs(right_z) < 0.75:
+            continue
+        violates_relation = left_z * right_z < 0 if expected_sign > 0 else left_z * right_z > 0
+        if violates_relation:
+            divergences.append({
+                "id": f"{left_key}:{right_key}", "leftKey": left_key, "rightKey": right_key,
+                "label": label, "leftZ5m": left_z, "rightZ5m": right_z,
+                "strength": round(min(abs(left_z), abs(right_z)), 2),
+                "note": "Movimentos de curto prazo em desacordo com a relação observada; não implica reversão.",
+            })
     usd_state = "USD COMPRADO" if usd_strength is not None and usd_strength >= 0.2 else "USD VENDIDO" if usd_strength is not None and usd_strength <= -0.2 else "USD MISTO" if usd_strength is not None else "SEM HISTÓRICO"
     oil_pressure = mean_available([signal("WTI"), signal("BRENT")])
     oil_state = "ACELERANDO" if oil_pressure is not None and oil_pressure >= 0.2 else "ALIVIANDO" if oil_pressure is not None and oil_pressure <= -0.2 else "SEM PRESSÃO DIRECIONAL" if oil_pressure is not None else "AGUARDANDO DADOS"
@@ -195,27 +337,24 @@ def build_macro_snapshot(
         gold_title = "Ouro com momentum positivo" if gold_bias == "favorable" else "Ouro perdendo força" if gold_bias == "caution" else "Ouro sem direção clara"
         outlook.append({"group": "METALS", "bias": gold_bias, "title": gold_title, "detail": "Ouro é proxy defensiva, mas também responde a dólar e juros; não confirma aversão a risco isoladamente."})
 
-    def returns_for(key: str, target: list[int]) -> dict[int, float]:
-        points = histories.get(measures.get(key, {}).get("symbol", ""), [])
-        indexed = {point["time"]: point["price"] for point in points}
-        result: dict[int, float] = {}
-        for timestamp in target:
-            current = indexed.get(timestamp)
-            previous = indexed.get(timestamp - 60_000)
-            if current and previous:
-                result[timestamp] = (current - previous) * 100 if measures.get(key, {}).get("unit") == "yield_pct" else (current / previous - 1) * 100
-        return result
-
+    correlation_matrix = _build_correlation_matrix(measures, histories, now_ms)
+    correlation_keys = [item["key"] for item in correlation_matrix["assets"]]
+    correlation_30 = correlation_matrix["windows"]["30"]
+    pair_specs = [
+        ("DXY", "EURUSD", "Dólar × EUR/USD"), ("DXY", "SP500", "Dólar × S&P 500"),
+        ("WTI", "SP500", "Petróleo × S&P 500"), ("GOLD", "DXY", "Ouro × dólar"),
+        ("UST2Y", "SP500", "Treasury 2Y × S&P 500"), ("UST10Y", "TLT", "Treasury 10Y × TLT"),
+        ("UST30Y", "TLT", "Treasury 30Y × TLT"), ("DXY", "EWZ", "Dólar × EWZ"),
+    ]
     relationships = []
-    for left, right, label in [("DXY", "EURUSD", "Dólar × EUR/USD"), ("DXY", "SP500", "Dólar × S&P 500"), ("WTI", "SP500", "Petróleo × S&P 500"), ("GOLD", "DXY", "Ouro × dólar"), ("UST2Y", "SP500", "Treasury 2Y × S&P 500"), ("UST10Y", "TLT", "Treasury 10Y × TLT"), ("UST30Y", "TLT", "Treasury 30Y × TLT"), ("DXY", "EWZ", "Dólar × EWZ")]:
-        left_times = histories.get(measures.get(left, {}).get("symbol", ""), [])
-        right_times = histories.get(measures.get(right, {}).get("symbol", ""), [])
-        shared = sorted({point["time"] for point in left_times} & {point["time"] for point in right_times})[-31:]
-        left_returns, right_returns = returns_for(left, shared), returns_for(right, shared)
-        aligned = sorted(set(left_returns) & set(right_returns))
-        fresh = bool(aligned and now_ms - aligned[-1] <= 3 * 60_000)
-        corr = _pearson([left_returns[timestamp] for timestamp in aligned], [right_returns[timestamp] for timestamp in aligned]) if fresh else None
-        relationships.append({"left": left, "right": right, "label": label, "correlation": round(corr, 3) if corr is not None else None, "observations": len(aligned), "windowMinutes": 30})
+    for left, right, label in pair_specs:
+        left_index, right_index = correlation_keys.index(left), correlation_keys.index(right)
+        relationships.append({
+            "left": left, "right": right, "label": label,
+            "correlation": correlation_30["values"][left_index][right_index],
+            "observations": correlation_30["observations"][left_index][right_index],
+            "windowMinutes": 30,
+        })
 
     insights: list[dict[str, str]] = []
     if usd_state == "USD COMPRADO":
@@ -240,21 +379,23 @@ def build_macro_snapshot(
 
     accelerators = sorted(
         [item for item in measures.values() if item.get("acceleration5mPp") is not None or item.get("acceleration5mBps") is not None],
-        key=lambda item: abs(item.get("acceleration5mBps") if item.get("acceleration5mBps") is not None else item["acceleration5mPp"]), reverse=True,
+        key=lambda item: abs(item.get("z5m") or 0), reverse=True,
     )[:6]
     usable_samples = sum(1 for item in measures.values() if item.get("sampleCount", 0) > 0)
     return {
         "asOf": now_ms, "source": "BingX TradFi + Hyperliquid Spot/HIP-3 · cotações ao vivo; amostras alinhadas de 1 minuto",
         "storage": {"engine": storage, "durable": durable, "retentionDays": 7, "oldestSample": oldest_sample, "trackedAssets": len(MACRO_ASSETS), "assetsWithHistory": usable_samples},
         "status": "live" if live_count else "history" if usable_samples else "warming",
-        "regime": {"label": regime, "score": risk_score, "coverage": coverage, "components": components},
+        "regime": {"label": regime, "candidate": regime, "qualified": regime_qualified, "score": risk_score, "coverage": coverage, "components": components},
+        "breadth": breadth,
         "usd": {"state": usd_state, "strengthScore": round(usd_strength * 100) if usd_strength is not None else None},
         "oil": {"state": oil_state, "pressureScore": round(oil_pressure * 100) if oil_pressure is not None else None},
         "assets": list(measures.values()), "accelerators": accelerators, "outlook": outlook,
         "yieldCurve": _build_yield_curve(histories, live, now_ms),
-        "relationships": relationships, "insights": insights, "chart": {"windowMinutes": 60, "series": chart_series},
-        "method": "Score composto de variações de 5 min normalizadas pela volatilidade de 1 min; pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasuries combina a intensidade do movimento dos yields de 2Y/10Y/30Y com a direção conjunta de índices, dólar e cíclicos; yields não definem o regime isoladamente. Risk-On/Off exige ao menos 55% de cobertura, índices disponíveis e confirmação independente por dólar ou cíclicos; sem isso, o estado fica AQUECENDO. Inclinações 10Y−2Y e 30Y−10Y usam pontos-base. Correlações Pearson usam amostras de 1 min sincronizadas em até 30 min.",
-        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Os scores descrevem associação de curto prazo, não causalidade nem recomendação.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT e EWZ são contratos sintéticos perpétuos e podem divergir dos ETFs subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
+        "relationships": relationships, "correlationMatrix": correlation_matrix, "correlationShifts": correlation_matrix["correlationShifts"],
+        "divergences": divergences, "insights": insights, "chart": {"windowMinutes": 60, "series": chart_series},
+        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasury corrobora o contexto cruzado e yields sozinhos não definem regime. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras. A matriz calcula Pearson de retornos sincronizados nas janelas de 15/30/60 min e exige cobertura mínima de 75% da janela; ruptura compara 15 min com 60 min.",
+        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Correlação de 60 min não é uma referência histórica diária; os alertas comparam apenas janelas curtas. Não há matriz diária nem backtest fora da amostra.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
 
 
