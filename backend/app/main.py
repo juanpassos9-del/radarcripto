@@ -25,6 +25,13 @@ from .breakout_engine import build_breakout_signals
 from .volatility import calculate_zones
 from .macro_engine import MACRO_ASSETS, build_macro_snapshot
 
+HYPERLIQUID_ASSETS: dict[str, dict[str, str]] = {
+    "HL:para:2Y": {"coin": "para:2Y", "dex": "para", "category": "rates"},
+    "HL:para:10Y": {"coin": "para:10Y", "dex": "para", "category": "rates"},
+    "HL:xyz:EWZ": {"coin": "xyz:EWZ", "dex": "xyz", "category": "equity"},
+    "HL:xyz:TLT": {"coin": "xyz:TLT", "dex": "xyz", "category": "bond"},
+}
+
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("nexus.market")
 SPOT_DATA = os.getenv("BINANCE_SPOT_REST_URL", "https://data-api.binance.vision")
@@ -95,6 +102,7 @@ class MarketService:
         self.market_subscribers: dict[tuple[str, str, str], set[asyncio.Queue[dict[str, Any]]]] = {}
         self.market_stream_tasks: dict[tuple[str, str, str], asyncio.Task[Any]] = {}
         self.tradfi_ticker_task: asyncio.Task[Any] | None = None
+        self.hyperliquid_task: asyncio.Task[Any] | None = None
         self.tradfi_sample_task: asyncio.Task[Any] | None = None
         self.tradfi_seed_task: asyncio.Task[Any] | None = None
         self.tradfi_seed_complete = False
@@ -127,6 +135,9 @@ class MarketService:
         if self.tradfi_ticker_task:
             self.tradfi_ticker_task.cancel()
             await asyncio.gather(self.tradfi_ticker_task, return_exceptions=True)
+        if self.hyperliquid_task:
+            self.hyperliquid_task.cancel()
+            await asyncio.gather(self.hyperliquid_task, return_exceptions=True)
         if self.tradfi_sample_task:
             self.tradfi_sample_task.cancel()
             await asyncio.gather(self.tradfi_sample_task, return_exceptions=True)
@@ -142,6 +153,8 @@ class MarketService:
             self.tradfi_sample_task = asyncio.create_task(self.sample_tradfi_prices())
         if self.tradfi_seed_task is None or (self.tradfi_seed_task.done() and not self.tradfi_seed_complete):
             self.tradfi_seed_task = asyncio.create_task(self.seed_tradfi_history())
+        if self.hyperliquid_task is None or self.hyperliquid_task.done():
+            self.hyperliquid_task = asyncio.create_task(self.collect_hyperliquid_macro())
 
     async def seed_tradfi_history(self) -> None:
         try:
@@ -208,9 +221,9 @@ class MarketService:
                     log.exception("TradFi macro sample retention cleanup failed")
             await asyncio.sleep(max(1, 60 - (time.time() % 60)))
 
-    async def publish_tradfi_quote(self, symbol: str, price: float, event_time: int | None = None) -> None:
+    async def publish_tradfi_quote(self, symbol: str, price: float, event_time: int | None = None, source: str = "BingX") -> None:
         received_at = int(time.time() * 1000)
-        self.tradfi_prices[symbol] = {"price": price, "eventTime": event_time or received_at, "receivedAt": received_at}
+        self.tradfi_prices[symbol] = {"price": price, "eventTime": event_time or received_at, "receivedAt": received_at, "source": source}
         category = self.tradfi_symbol_categories.get(symbol)
         if not category:
             return
@@ -221,10 +234,10 @@ class MarketService:
         message = {"type": "quote", "data": {
             "symbol": symbol, "price": price, "previousClose": previous_close,
             "changePercent": round(change, 4) if change is not None else None,
-            "referenceTime": reference.get("candleTime") if previous_close is not None else None,
+            "referenceTime": reference.get("candleTime") if previous_close is not None else None, "source": source,
             "eventTime": event_time, "receivedAt": received_at,
         }}
-        subscribers = tuple(self.tradfi_watchlist_subscribers[category])
+        subscribers = tuple(self.tradfi_watchlist_subscribers.get(category, ()))
         if subscribers:
             sends = [asyncio.create_task(subscriber.send_json(message)) for subscriber in subscribers]
             done, pending = await asyncio.wait(sends, timeout=1)
@@ -252,7 +265,7 @@ class MarketService:
         while True:
             try:
                 instruments = await bingx_tradfi_catalog()
-                self.tradfi_symbol_categories = {item["symbol"]: item["category"] for item in instruments}
+                self.tradfi_symbol_categories.update({item["symbol"]: item["category"] for item in instruments})
                 async with websockets.connect(
                     "wss://open-api-swap.bingx.com/swap-market", ping_interval=20, ping_timeout=20,
                     open_timeout=12, close_timeout=5, max_size=2**20, max_queue=4096,
@@ -291,6 +304,67 @@ class MarketService:
                 raise
             except Exception:
                 log.exception("BingX TradFi ticker stream disconnected")
+                reconnect_delay = min(reconnect_delay * 2, 30.0)
+            await asyncio.sleep(reconnect_delay)
+
+    async def hyperliquid_info(self, payload: dict[str, Any]) -> Any:
+        async with self.request_slots:
+            response = await self.client.post("https://api.hyperliquid.xyz/info", json=payload, timeout=12)
+        response.raise_for_status()
+        return response.json()
+
+    async def collect_hyperliquid_macro(self) -> None:
+        reconnect_delay = 1.0
+        while True:
+            try:
+                # Bootstrap active HIP-3 markets and seed prices before the shared websocket starts.
+                for dex in ("para", "xyz"):
+                    response = await self.hyperliquid_info({"type": "metaAndAssetCtxs", "dex": dex})
+                    universe = (response[0] or {}).get("universe", [])
+                    contexts = response[1] if len(response) > 1 else []
+                    indices = {str(row.get("name", "")): index for index, row in enumerate(universe)}
+                    for symbol, descriptor in HYPERLIQUID_ASSETS.items():
+                        if descriptor["dex"] != dex:
+                            continue
+                        index = indices.get(descriptor["coin"])
+                        if index is None or universe[index].get("isDelisted"):
+                            self.tradfi_symbol_categories.pop(symbol, None)
+                            continue
+                        context = contexts[index] if index < len(contexts) else {}
+                        raw_price = context.get("midPx") or context.get("markPx") or context.get("oraclePx")
+                        if raw_price is None:
+                            continue
+                        self.tradfi_symbol_categories[symbol] = descriptor["category"]
+                        await self.publish_tradfi_quote(symbol, float(raw_price), source="Hyperliquid HIP-3")
+
+                async with websockets.connect(
+                    "wss://api.hyperliquid.xyz/ws", ping_interval=20, ping_timeout=20,
+                    open_timeout=12, close_timeout=5, max_size=2**20, max_queue=2048,
+                ) as upstream:
+                    connected_since = time.monotonic()
+                    for dex in ("para", "xyz"):
+                        await upstream.send(json.dumps({"method": "subscribe", "subscription": {"type": "allMids", "dex": dex}}))
+                    async for raw in upstream:
+                        message = json.loads(raw)
+                        if message.get("channel") != "allMids":
+                            continue
+                        data = message.get("data") or {}
+                        mids = data.get("mids") or {}
+                        dex = str(data.get("dex") or "")
+                        for symbol, descriptor in HYPERLIQUID_ASSETS.items():
+                            if dex and descriptor["dex"] != dex:
+                                continue
+                            coin = descriptor["coin"]
+                            mid = mids.get(coin) or mids.get(coin.split(":", 1)[-1])
+                            if mid is None:
+                                continue
+                            self.tradfi_symbol_categories[symbol] = descriptor["category"]
+                            await self.publish_tradfi_quote(symbol, float(mid), source="Hyperliquid HIP-3")
+                    reconnect_delay = 1.0 if time.monotonic() - connected_since >= 20 else min(reconnect_delay * 2, 30.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Hyperliquid macro stream disconnected")
                 reconnect_delay = min(reconnect_delay * 2, 30.0)
             await asyncio.sleep(reconnect_delay)
 
@@ -1311,6 +1385,11 @@ async def tradfi_macro():
             log.exception("Macro history seed failed")
     now_ms = int(time.time() * 1000)
     selected = [item for item in catalog if item["symbol"] in MACRO_ASSETS]
+    selected.extend(
+        {"symbol": symbol, "category": descriptor["category"]}
+        for symbol, descriptor in HYPERLIQUID_ASSETS.items()
+        if descriptor["category"] == service.tradfi_symbol_categories.get(symbol)
+    )
     symbols = [item["symbol"] for item in selected]
     history: dict[str, list[dict[str, Any]]] = {}
     if service.flow_store:

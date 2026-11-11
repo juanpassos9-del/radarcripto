@@ -8,7 +8,8 @@ import { fmtPrice, fmtTime, getJson, getMarketWsToken } from "@/lib/market";
 type MacroAsset = {
   key: string; symbol: string; label: string; category: string; color: string;
   available: boolean; price: number | null; change5mPct: number | null; change30mPct: number | null;
-  acceleration5mPp: number | null; z5m: number | null; sampleCount: number; ageMs: number | null; status: string;
+  acceleration5mPp: number | null; change5mBps: number | null; change30mBps: number | null; acceleration5mBps: number | null;
+  unit?: string; source?: string; z5m: number | null; sampleCount: number; ageMs: number | null; status: string;
 };
 type MacroSeries = { key: string; label: string; color: string; values: { time: number; value: number }[] };
 type MacroSnapshot = {
@@ -22,13 +23,14 @@ type MacroSnapshot = {
   insights: { tone: string; title: string; detail: string }[];
   outlook: { group: string; bias: string; title: string; detail: string }[];
   chart: { windowMinutes: number; series: MacroSeries[] };
+  yieldCurve: { spreadBps: number | null; change5mBps: number | null; status: string; label: string };
   method: string; limitations: string[];
 };
 
 function MacroLineChart({ series }: { series: MacroSeries[] }) {
   const width = 1000, height = 330, left = 46, right = 18, top = 18, bottom = 26;
   const all = series.flatMap(item => item.values);
-  if (all.length < 4) return <div className="macro-chart-empty">Aguardando amostras sincronizadas da BingX para desenhar as relações de preço.</div>;
+  if (all.length < 4) return <div className="macro-chart-empty">Aguardando amostras sincronizadas da BingX e Hyperliquid para desenhar as relações de preço.</div>;
   const times = all.map(point => point.time), values = all.map(point => point.value);
   const minTime = Math.min(...times), maxTime = Math.max(...times);
   const minValue = Math.min(0, ...values), maxValue = Math.max(0, ...values);
@@ -121,10 +123,10 @@ export default function MacroTerminal() {
       <Link href="/tradfi" className="tradfi-back" aria-label="Voltar a Índices e Forex"><ArrowLeft size={15}/></Link>
       <div className="brand"><div className="logo">N</div><div><strong>NEXUS</strong><small>MACRO INTELLIGENCE</small></div></div>
       <nav className="nav"><Link href="/">Cripto Spot</Link><Link href="/tradfi">Índices & Forex</Link><a className="active" aria-current="page" href="/macro">Macro Quant</a></nav>
-      <div className="topright"><div className="live"><span className={`dot ${connected ? "" : "tradfi-offline"}`}/>{connected ? "BINGX · FLUXO AO VIVO" : "RECONECTANDO"}</div><button className="iconbtn" title="Sair" aria-label="Sair" onClick={() => { window.location.href = "/api/auth/logout"; }}><LogOut size={16}/></button></div>
+      <div className="topright"><div className="live"><span className={`dot ${connected ? "" : "tradfi-offline"}`}/>{connected ? "MACRO · STREAM API AO VIVO" : "RECONECTANDO API"}</div><button className="iconbtn" title="Sair" aria-label="Sair" onClick={() => { window.location.href = "/api/auth/logout"; }}><LogOut size={16}/></button></div>
     </header>
     <div className="wrap macro-wrap">
-      <div className="macro-heading"><div><div className="eyebrow">NEXUS · REGIME & FLUXO MACRO</div><h1>Macro Quant <span>01</span></h1><p>Leitura quantitativa de moedas, índices e commodities pela variação sincronizada de preços.</p></div><div className="macro-clock"><Radio size={13}/><span>{snapshot ? `ATUALIZADO ${fmtTime(snapshot.asOf)}` : "INICIANDO FEED"}</span><i className={connected ? "on" : ""}/></div></div>
+      <div className="macro-heading"><div><div className="eyebrow">NEXUS · REGIME & FLUXO MACRO</div><h1>Macro Quant <span>01</span></h1><p>Leitura quantitativa de moedas, índices, commodities, juros e ETFs sintéticos.</p></div><div className="macro-clock"><Radio size={13}/><span>{snapshot ? `ATUALIZADO ${fmtTime(snapshot.asOf)}` : "INICIANDO FEED"}</span><i className={connected ? "on" : ""}/></div></div>
 
       <section className="macro-overview">
         <article className={`macro-regime-card ${regimeClass}`}>
@@ -136,7 +138,16 @@ export default function MacroTerminal() {
         </article>
         <article className="macro-metric-card usd"><div className="macro-card-kicker"><Waves size={14}/> PRESSÃO NO DÓLAR</div><strong>{snapshot?.usd.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.usd.strengthScore == null ? "—" : `${snapshot.usd.strengthScore > 0 ? "+" : ""}${snapshot.usd.strengthScore}`}<small>/100</small></div><p>DXY + cesta EUR, GBP, AUD, NZD e JPY</p></article>
         <article className="macro-metric-card oil"><div className="macro-card-kicker"><Activity size={14}/> PRESSÃO DE ENERGIA</div><strong>{snapshot?.oil.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.oil.pressureScore == null ? "—" : `${snapshot.oil.pressureScore > 0 ? "+" : ""}${snapshot.oil.pressureScore}`}<small>/100</small></div><p>Brent & WTI · proxy de custo e inflação</p></article>
-        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 14} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
+        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 18} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
+      </section>
+
+      <section className="macro-yield-strip" aria-label="Curva de juros dos Treasuries">
+        {["UST2Y", "UST10Y"].map(key => {
+          const asset = snapshot?.assets.find(item => item.key === key);
+          const movement = asset?.change5mBps;
+          return <article key={key}><small>{asset?.label ?? (key === "UST2Y" ? "Treasury 2Y · yield" : "Treasury 10Y · yield")}</small><strong>{asset?.price == null ? "AQUECENDO" : `${asset.price.toFixed(3)}%`}</strong><span className={movement == null ? "muted" : movement >= 0 ? "neg" : "pos"}>{movement == null ? "—" : `${movement > 0 ? "+" : ""}${movement.toFixed(2)} bps · 5 min`}</span></article>;
+        })}
+        <article><small>INCLINAÇÃO DA CURVA · 10Y−2Y</small><strong>{snapshot?.yieldCurve.spreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.spreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve.change5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.change5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.change5mBps.toFixed(2)} bps · 5 min`}</span></article>
       </section>
 
       <div className="macro-grid">
@@ -159,10 +170,14 @@ export default function MacroTerminal() {
           <div className="macro-table-head"><span>ATIVO / FATOR</span><span>PREÇO</span><span>5 MIN</span><span>30 MIN</span><span>ACELERAÇÃO</span></div>
           <div className="macro-assets-list">{snapshot?.assets.filter(item => item.available).map(asset => {
             const price = quotes[asset.symbol] ?? asset.price;
-            const acceleration = asset.acceleration5mPp;
-            return <div className="macro-asset-row" key={asset.key}><span className="macro-asset-label"><i style={{ background: asset.color }}/><strong>{asset.label}</strong><small>{asset.category.toUpperCase()} · {asset.status === "live" ? "AO VIVO" : "HISTÓRICO"}</small></span><strong className="mono">{fmtPrice(price, asset.category === "fx" ? 4 : 2)}</strong><span className={`mono ${asset.change5mPct == null ? "muted" : asset.change5mPct >= 0 ? "pos" : "neg"}`}>{asset.change5mPct == null ? "—" : `${asset.change5mPct > 0 ? "+" : ""}${asset.change5mPct.toFixed(3)}%`}</span><span className={`mono ${asset.change30mPct == null ? "muted" : asset.change30mPct >= 0 ? "pos" : "neg"}`}>{asset.change30mPct == null ? "—" : `${asset.change30mPct > 0 ? "+" : ""}${asset.change30mPct.toFixed(3)}%`}</span><span className={`mono ${acceleration == null ? "muted" : acceleration >= 0 ? "pos" : "neg"}`}>{acceleration == null ? "AQUECENDO" : `${acceleration > 0 ? "+" : ""}${acceleration.toFixed(3)} pp`}</span></div>;
+            const isYield = asset.unit === "yield_pct";
+            const change5m = isYield ? asset.change5mBps : asset.change5mPct;
+            const change30m = isYield ? asset.change30mBps : asset.change30mPct;
+            const acceleration = isYield ? asset.acceleration5mBps : asset.acceleration5mPp;
+            const unit = isYield ? " bps" : "%";
+            return <div className="macro-asset-row" key={asset.key}><span className="macro-asset-label"><i style={{ background: asset.color }}/><strong>{asset.label}</strong><small>{asset.source ?? "BingX USDT-M"} · {asset.status === "live" ? "AO VIVO" : "HISTÓRICO"}</small></span><strong className="mono">{price == null ? "—" : isYield ? `${price.toFixed(3)}%` : fmtPrice(price, asset.category === "fx" ? 4 : 2)}</strong><span className={`mono ${change5m == null ? "muted" : change5m >= 0 ? "pos" : "neg"}`}>{change5m == null ? "—" : `${change5m > 0 ? "+" : ""}${change5m.toFixed(isYield ? 2 : 3)}${unit}`}</span><span className={`mono ${change30m == null ? "muted" : change30m >= 0 ? "pos" : "neg"}`}>{change30m == null ? "—" : `${change30m > 0 ? "+" : ""}${change30m.toFixed(isYield ? 2 : 3)}${unit}`}</span><span className={`mono ${acceleration == null ? "muted" : acceleration >= 0 ? "pos" : "neg"}`}>{acceleration == null ? "AQUECENDO" : `${acceleration > 0 ? "+" : ""}${acceleration.toFixed(isYield ? 2 : 3)}${isYield ? " bps" : " pp"}`}</span></div>;
           }) ?? <div className="loading">Aguardando histórico sincronizado…</div>}</div>
-          <div className="macro-table-foot">Aceleração = retorno dos últimos 5 min − retorno dos 5 min anteriores. Valores ausentes ficam em aquecimento.</div>
+          <div className="macro-table-foot">Yields Hyperliquid: nível em %, mudanças em pontos-base. Outros ativos: retorno percentual. Aceleração compara os últimos 5 min com os 5 min anteriores.</div>
         </section>
         <section className="panel macro-relationships-panel">
           <div className="panelhead"><span className="paneltitle">RELAÇÕES OBSERVADAS · PEARSON</span><span className="macro-tag">30 MIN</span></div>
