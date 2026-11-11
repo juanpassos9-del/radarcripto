@@ -53,7 +53,15 @@ export async function getJson<T>(path: string): Promise<T> {
   const apiPath = path.startsWith("/api/") ? path.slice("/api/".length) : path.replace(/^\/+/, "");
   const url = `/api/market/${apiPath}`;
   const response = await authorizedFetch(url);
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`.trim();
+    try {
+      const body = await response.json() as { detail?: unknown; error?: unknown };
+      const message = body.detail ?? body.error;
+      if (typeof message === "string" && message) detail = `${response.status}: ${message}`;
+    } catch { /* Keep the HTTP status when the upstream body is not JSON. */ }
+    throw new Error(detail);
+  }
   return response.json() as Promise<T>;
 }
 
