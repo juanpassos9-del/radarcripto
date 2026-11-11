@@ -142,17 +142,23 @@ def build_macro_snapshot(
     ])
     equity_breadth = mean_available([signal("SP500"), signal("NASDAQ100"), signal("RUSSELL2000"), signal("DOW")])
     cyclicals = mean_available([signal("COPPER"), signal("GOLD", True)])
-    rates_signal = mean_available([signal("UST2Y"), signal("UST10Y"), signal("UST30Y")])
+    # Keep Treasury yield direction separate from its risk interpretation. Rates
+    # corroborate the cross-asset backdrop; rising yields alone are not risk-off.
+    yield_move = mean_available([signal("UST2Y", True), signal("UST10Y", True), signal("UST30Y", True)])
+    risk_context = mean_available([equity_breadth, -usd_strength if usd_strength is not None else None, cyclicals])
+    rates_confirmation = risk_context * abs(yield_move) if risk_context is not None and yield_move is not None else None
     components = [
         {"key": "equities", "label": "Índices", "value": round(equity_breadth * 100) if equity_breadth is not None else None, "weight": 0.40},
         {"key": "usd", "label": "Dólar", "value": round(-usd_strength * 100) if usd_strength is not None else None, "weight": 0.30},
         {"key": "cyclicals", "label": "Cíclicos / ouro", "value": round(cyclicals * 100) if cyclicals is not None else None, "weight": 0.15},
-        {"key": "rates", "label": "Juros EUA", "value": round(rates_signal * 100) if rates_signal is not None else None, "weight": 0.15},
+        {"key": "rates", "label": "Treasuries · contexto", "value": round(rates_confirmation * 100) if rates_confirmation is not None else None, "weight": 0.15},
     ]
     active_components = [item for item in components if item["value"] is not None]
     risk_score = round(sum(item["value"] * item["weight"] for item in active_components) / sum(item["weight"] for item in active_components)) if active_components else None
     coverage = round(sum(item["weight"] for item in active_components) * 100)
-    regime = "RISK-ON" if risk_score is not None and risk_score >= 20 else "RISK-OFF" if risk_score is not None and risk_score <= -20 else "MISTO" if risk_score is not None else "AQUECENDO"
+    cross_asset_confirmation = equity_breadth is not None and (usd_strength is not None or cyclicals is not None)
+    sufficient_coverage = coverage >= 55
+    regime = "RISK-ON" if sufficient_coverage and cross_asset_confirmation and risk_score is not None and risk_score >= 20 else "RISK-OFF" if sufficient_coverage and cross_asset_confirmation and risk_score is not None and risk_score <= -20 else "MISTO" if sufficient_coverage and cross_asset_confirmation and risk_score is not None else "AQUECENDO"
     usd_state = "USD COMPRADO" if usd_strength is not None and usd_strength >= 0.2 else "USD VENDIDO" if usd_strength is not None and usd_strength <= -0.2 else "USD MISTO" if usd_strength is not None else "SEM HISTÓRICO"
     oil_pressure = mean_available([signal("WTI"), signal("BRENT")])
     oil_state = "ACELERANDO" if oil_pressure is not None and oil_pressure >= 0.2 else "ALIVIANDO" if oil_pressure is not None and oil_pressure <= -0.2 else "SEM PRESSÃO DIRECIONAL" if oil_pressure is not None else "AGUARDANDO DADOS"
@@ -220,9 +226,11 @@ def build_macro_snapshot(
         insights.append({"tone": "warning", "title": "Petróleo acelera", "detail": "Brent/WTI adicionam pressão de custos e inflação; isso pode pesar sobre índices amplos, embora a reação varie por setor e sessão."})
     elif oil_state == "ALIVIANDO":
         insights.append({"tone": "positive", "title": "Petróleo perde força", "detail": "A pressão recente de energia está aliviando; observe se os índices confirmam esse movimento."})
-    if rates_signal is not None:
-        rates_state = "juros pressionando risco" if rates_signal <= -0.2 else "juros aliviando" if rates_signal >= 0.2 else "juros sem direção clara"
-        insights.append({"tone": "warning" if rates_signal <= -0.2 else "positive" if rates_signal >= 0.2 else "neutral", "title": f"Treasuries: {rates_state}", "detail": "Variação de yields de 2Y/10Y é convertida para pontos-base. A relação com ações depende do motivo do movimento (inflação, crescimento ou expectativa de Fed)."})
+    if yield_move is not None:
+        yield_direction = "subindo" if yield_move >= 0.2 else "caindo" if yield_move <= -0.2 else "sem direção clara"
+        rates_tone = "positive" if rates_confirmation is not None and rates_confirmation >= 0.2 else "warning" if rates_confirmation is not None and rates_confirmation <= -0.2 else "neutral"
+        rates_context_label = "reforça o viés pró-risco" if rates_tone == "positive" else "reforça o viés defensivo" if rates_tone == "warning" else "sem confirmação cruzada"
+        insights.append({"tone": rates_tone, "title": f"Treasuries: yields {yield_direction} · {rates_context_label}", "detail": "Yields de 2Y/10Y/30Y são lidos junto com índices, dólar e cíclicos. O movimento de juros sozinho não define Risk-On ou Risk-Off."})
     if not insights:
         insights.append({"tone": "neutral", "title": "Sinais macro sem confluência", "detail": "Os fatores disponíveis estão mistos ou ainda não têm histórico sincronizado suficiente para uma leitura direcional."})
 
@@ -241,7 +249,7 @@ def build_macro_snapshot(
         "assets": list(measures.values()), "accelerators": accelerators, "outlook": outlook,
         "yieldCurve": _build_yield_curve(histories, live, now_ms),
         "relationships": relationships, "insights": insights, "chart": {"windowMinutes": 60, "series": chart_series},
-        "method": "Score composto de variações de 5 min normalizadas pela volatilidade de 1 min; pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e yields EUA 15%. Yields de 2Y/10Y/30Y são medidos em pontos-base; o sinal de yields crescentes é tratado como possível pressão sobre risco, sem inferir causalidade. Inclinações 10Y−2Y e 30Y−10Y usam pontos-base. Correlações Pearson usam amostras de 1 min sincronizadas em até 30 min.",
+        "method": "Score composto de variações de 5 min normalizadas pela volatilidade de 1 min; pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasuries combina a intensidade do movimento dos yields de 2Y/10Y/30Y com a direção conjunta de índices, dólar e cíclicos; yields não definem o regime isoladamente. Risk-On/Off exige ao menos 55% de cobertura, índices disponíveis e confirmação independente por dólar ou cíclicos; sem isso, o estado fica AQUECENDO. Inclinações 10Y−2Y e 30Y−10Y usam pontos-base. Correlações Pearson usam amostras de 1 min sincronizadas em até 30 min.",
         "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Os scores descrevem associação de curto prazo, não causalidade nem recomendação.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT e EWZ são contratos sintéticos perpétuos e podem divergir dos ETFs subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
 

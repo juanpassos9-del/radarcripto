@@ -30,7 +30,7 @@
 .macro-gauge { height:5px; border-radius:8px; background:linear-gradient(90deg,#ff7391,#39404b 48%,#39404b 52%,#48d69a); position:relative; }
 .macro-gauge i { position:absolute; top:-4px; transform:translateX(-50%); width:13px; height:13px; border-radius:50%; background:#eff6ff; border:2px solid #101821; box-shadow:0 0 11px #9ef0e8; transition:left .3s; }
 .macro-gauge-labels { display:flex; justify-content:space-between; margin-top:5px; color:#667486; font:7px 'DM Mono',monospace; }
-.macro-components { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:11px; }
+.macro-components { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:11px; }
 .macro-components div { display:flex; align-items:center; justify-content:space-between; border-top:1px solid #ffffff0d; padding-top:6px; gap:3px; }
 .macro-components span { color:#8492a2; font-size:8px; }
 .macro-components strong { font:10px 'DM Mono',monospace; }
@@ -141,6 +141,7 @@
   .macro-regime-card { grid-column:1/-1; }
   .macro-regime-card,.macro-metric-card { padding:12px; min-height:132px; }
   .macro-regime-main>strong { font-size:21px; }
+  .macro-components { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .macro-components span { font-size:7px; }
   .macro-metric-card>strong { font-size:10px; }
   .macro-metric-card .macro-metric-value { font-size:20px; }
