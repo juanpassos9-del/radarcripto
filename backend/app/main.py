@@ -1509,13 +1509,14 @@ async def tradfi_macro():
         history: dict[str, list[dict[str, Any]]] = {}
         if service.flow_store:
             try:
-                history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 24 * 60 * 60_000)
+                # Keep one hour of headroom so the 24h chart can select a true pre-window baseline.
+                history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 25 * 60 * 60_000)
             except Exception:
                 log.exception("TradFi macro history query failed")
         for symbol, points in service.tradfi_samples.items():
             if symbol in MACRO_ASSETS:
                 by_time = {item["time"]: item for item in history.get(symbol, [])}
-                by_time.update({item["time"]: item for item in points if item["time"] >= now_ms - 24 * 60 * 60_000})
+                by_time.update({item["time"]: item for item in points if item["time"] >= now_ms - 25 * 60 * 60_000})
                 history[symbol] = sorted(by_time.values(), key=lambda item: item["time"])
         snapshot = build_macro_snapshot(
             catalog, history, service.tradfi_prices, now_ms,
