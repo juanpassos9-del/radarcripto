@@ -1502,6 +1502,7 @@ async def tradfi_macro():
     service.ensure_tradfi_ticker_stream()
     global TRADFI_DAILY_CLOSES_TASK
     async def build_snapshot() -> dict[str, Any]:
+        global TRADFI_DAILY_CLOSES_TASK
         # Coalesce the dashboard's frequent refreshes so daily history queries and chart
         # series are shared across users instead of repeated for each browser poll.
         catalog = [{"symbol": symbol, "category": metadata["category"]} for symbol, metadata in MACRO_ASSETS.items()]
@@ -1524,17 +1525,28 @@ async def tradfi_macro():
                 history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 25 * 60 * 60_000)
             except Exception:
                 log.exception("TradFi macro history query failed")
+        cutoff_ms = now_ms - 25 * 60 * 60_000
         for symbol, points in service.tradfi_samples.items():
             if symbol in MACRO_ASSETS:
-                by_time = {item["time"]: item for item in history.get(symbol, [])}
-                by_time.update({item["time"]: item for item in points if item["time"] >= now_ms - 25 * 60 * 60_000})
+                by_time: dict[int, dict[str, Any]] = {}
+                for item in [*history.get(symbol, []), *points]:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        sample_time = int(item.get("time", 0))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if sample_time >= cutoff_ms:
+                        by_time[sample_time] = {**item, "time": sample_time}
                 history[symbol] = sorted(by_time.values(), key=lambda item: item["time"])
-        snapshot = build_macro_snapshot(
-            catalog, history, service.tradfi_prices, now_ms,
-            service.flow_store.storage if service.flow_store else "unavailable",
-            service.flow_store.durable if service.flow_store else False,
-            daily_closes,
-        )
+        storage = service.flow_store.storage if service.flow_store else "unavailable"
+        durable = service.flow_store.durable if service.flow_store else False
+        try:
+            snapshot = build_macro_snapshot(catalog, history, service.tradfi_prices, now_ms, storage, durable, daily_closes)
+        except Exception:
+            log.exception("TradFi macro snapshot failed; returning a live-only degraded snapshot")
+            snapshot = build_macro_snapshot(catalog, {}, service.tradfi_prices, now_ms, storage, durable, {})
+            snapshot["status"] = "degraded"
         return service.apply_macro_persistence(snapshot, now_ms)
 
     return await service.cache_value("tradfi-macro-snapshot", 15, build_snapshot)
