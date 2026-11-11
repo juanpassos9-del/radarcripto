@@ -153,6 +153,11 @@ export default function MacroTerminal() {
         <article><small>INCLINAÇÃO LONGA · 30Y−10Y</small><strong>{snapshot?.yieldCurve?.longSpreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.longSpreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve?.longChange5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.longChange5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.longChange5mBps.toFixed(2)} bps · 5 min`}</span></article>
       </section>
 
+      <section className="macro-outlook-section">
+        <div className="macro-section-heading"><div><div className="eyebrow">MAPA DE EXPOSIÇÃO · CURTO PRAZO</div><h2>Quem pode se beneficiar e o que merece atenção</h2></div><span>VIÉS OBSERVADO · NÃO É PREVISÃO</span></div>
+        <div className="macro-outlook-grid">{snapshot?.outlook.map(item => <article className={`macro-outlook-card ${item.bias}`} key={item.group}><small>{item.group}</small><strong>{item.title}</strong><p>{item.detail}</p><span>{item.bias === "favorable" ? "MOMENTUM FAVORÁVEL" : item.bias === "caution" ? "PRESSÃO / CAUTELA" : "OBSERVAR CONFIRMAÇÃO"}</span></article>) ?? <div className="loading">Aguardando fatores alinhados para estimar exposição…</div>}</div>
+      </section>
+
       <div className="macro-grid">
         <section className="panel macro-chart-panel">
           <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · VARIAÇÃO NORMALIZADA</span><span className="macro-tag"><i/> ÚLTIMOS 60 MIN</span></div>
@@ -188,11 +193,6 @@ export default function MacroTerminal() {
           <div className="macro-corr-note">Correlação positiva indica movimento conjunto; negativa indica movimento oposto. Amostras curtas podem mudar rapidamente.</div>
         </section>
       </div>
-
-      <section className="macro-outlook-section">
-        <div className="macro-section-heading"><div><div className="eyebrow">MAPA DE EXPOSIÇÃO · CURTO PRAZO</div><h2>Quem pode se beneficiar e o que merece atenção</h2></div><span>VIÉS OBSERVADO · NÃO É PREVISÃO</span></div>
-        <div className="macro-outlook-grid">{snapshot?.outlook.map(item => <article className={`macro-outlook-card ${item.bias}`} key={item.group}><small>{item.group}</small><strong>{item.title}</strong><p>{item.detail}</p><span>{item.bias === "favorable" ? "MOMENTUM FAVORÁVEL" : item.bias === "caution" ? "PRESSÃO / CAUTELA" : "OBSERVAR CONFIRMAÇÃO"}</span></article>) ?? <div className="loading">Aguardando fatores alinhados para estimar exposição…</div>}</div>
-      </section>
 
       <section className="macro-method">
         <button onClick={() => setShowMethod(value => !value)}><Activity size={13}/>{showMethod ? "OCULTAR MÉTODO E LIMITAÇÕES" : "MÉTODO, COBERTURA E LIMITAÇÕES"}<span>{snapshot?.storage.engine.toUpperCase()} · {snapshot?.storage.durable ? "RETENÇÃO DURÁVEL" : "ARMAZENAMENTO NÃO DURÁVEL"}</span></button>
