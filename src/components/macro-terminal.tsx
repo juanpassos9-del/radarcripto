@@ -28,8 +28,6 @@ const CHART_SERIES_COLORS: Record<string, string> = {
   GOLD: "#F4E04D",
   COPPER: "#D88B55",
   EWZ: "#55E6A5",
-  TLT: "#F36CCF",
-  WBRLUSDC: "#B8E986",
   DRAM: "#75D7FF",
   SOXL: "#FF80BF",
 };
