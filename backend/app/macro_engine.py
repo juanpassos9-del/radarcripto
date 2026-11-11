@@ -45,6 +45,7 @@ def build_macro_snapshot(
     now_ms: int,
     storage: str,
     durable: bool,
+    daily_closes: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     instruments = {item["symbol"]: item for item in catalog}
     measures: dict[str, dict[str, Any]] = {}
@@ -60,7 +61,7 @@ def build_macro_snapshot(
     for symbol, metadata in MACRO_ASSETS.items():
         instrument = instruments.get(symbol)
         if not instrument:
-            measures[metadata["key"]] = {"symbol": symbol, **metadata, "available": False, "price": None, "dailyChangePct": None, "dailyChangeBps": None, "previousDailyClose": None, "previousDailyCloseTime": None, "change5mPct": None, "change30mPct": None, "acceleration5mPp": None, "z5m": None, "windows": {}, "sampleCount": 0, "ageMs": None, "status": "unavailable"}
+            measures[metadata["key"]] = {"symbol": symbol, **metadata, "available": False, "price": None, "dailyChangePct": None, "dailyChangeBps": None, "previousDailyClose": None, "previousDailyCloseTime": None, "dailyCloseSource": None, "change5mPct": None, "change30mPct": None, "acceleration5mPp": None, "z5m": None, "windows": {}, "sampleCount": 0, "ageMs": None, "status": "unavailable"}
             continue
         points = sorted(histories.get(symbol, []), key=lambda point: point["time"])
         sample_count = len(points)
@@ -78,7 +79,22 @@ def build_macro_snapshot(
         first = points[0] if points else None
         latest = points[-1] if points else None
         is_yield = metadata.get("unit") == "yield_pct"
-        previous_daily_close = _near_price(points, previous_close_target_ms, tolerance_ms=60 * 60_000)
+        daily_reference = (daily_closes or {}).get(symbol)
+        previous_daily_close = None
+        daily_close_source = None
+        if daily_reference and daily_reference.get("close") is not None:
+            previous_daily_close = {
+                "price": float(daily_reference["close"]),
+                "time": int(daily_reference.get("candleTime", previous_close_target_ms // 1000)) * 1000,
+            }
+            daily_close_source = "daily_candle"
+        else:
+            # Hyperliquid contracts do not all expose the same daily kline API.
+            # Use the last observed sample before UTC midnight when it is no
+            # more than six hours old, and identify it as an approximation.
+            previous_daily_close = _near_price(points, previous_close_target_ms, tolerance_ms=6 * 60 * 60_000)
+            if previous_daily_close:
+                daily_close_source = "observed_sample"
         daily_change_pct = None
         daily_change_bps = None
         recent = [point for point in points if now_ms - 60 * 60_000 <= point["time"] <= now_ms]
@@ -135,6 +151,7 @@ def build_macro_snapshot(
             "dailyChangeBps": round(daily_change_bps, 2) if daily_change_bps is not None else None,
             "previousDailyClose": previous_daily_close["price"] if previous_daily_close else None,
             "previousDailyCloseTime": previous_daily_close["time"] if previous_daily_close else None,
+            "dailyCloseSource": daily_close_source,
             "quoteVolume24h": current.get("quoteVolume24h") if current else None,
             "change5mPct": round(change_5m, 4) if change_5m is not None else None,
             "change30mPct": round(change_30m, 4) if change_30m is not None else None,

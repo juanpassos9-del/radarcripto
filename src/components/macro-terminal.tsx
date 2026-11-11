@@ -8,7 +8,7 @@ import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken } from "@/lib/
 type MacroAsset = {
   key: string; symbol: string; label: string; category: string; color: string;
   available: boolean; price: number | null; change5mPct: number | null; change30mPct: number | null;
-  previousDailyClose?: number | null; previousDailyCloseTime?: number | null;
+  previousDailyClose?: number | null; previousDailyCloseTime?: number | null; dailyCloseSource?: "daily_candle" | "observed_sample" | null;
   acceleration5mPp: number | null; change5mBps: number | null; change30mBps: number | null; acceleration5mBps: number | null;
   unit?: string; source?: string; quoteVolume24h?: number | null; z5m: number | null;
   windows?: Record<string, { change: number | null; velocityPerMinute: number | null; z: number | null; direction: string }>;
@@ -395,7 +395,7 @@ export default function MacroTerminal() {
                   const unit = isYield ? "bps" : "%";
                   const digits = isYield ? 2 : 2;
                   const tooltip = asset.previousDailyCloseTime
-                    ? `Fechamento de referência: ${new Date(asset.previousDailyCloseTime).toLocaleString("pt-BR", { timeZone: "UTC", timeZoneName: "short" })}`
+                    ? `${asset.dailyCloseSource === "daily_candle" ? "Candle diário fechado" : "Amostra observada aproximada"}: ${new Date(asset.previousDailyCloseTime).toLocaleString("pt-BR", { timeZone: "UTC", timeZoneName: "short" })}`
                     : "Sem amostra próxima ao fechamento UTC anterior";
                   return <div className="macro-watchlist-row" key={asset.key} title={tooltip}>
                     <span className="macro-watchlist-name"><i style={{ background: asset.color }}/><strong>{asset.label}</strong><small>{asset.status === "live" ? "AO VIVO" : asset.available ? "HISTÓRICO" : "INDISPONÍVEL"}</small></span>
@@ -407,7 +407,7 @@ export default function MacroTerminal() {
             })}
             {!snapshot && <div className="loading">Carregando cotações e histórico…</div>}
           </div>
-          <div className="macro-watchlist-foot">Variação calculada contra a última amostra antes da virada do dia UTC. Yields em pontos-base. “Sem base” indica histórico insuficiente ou mercado sem cotação recente.</div>
+          <div className="macro-watchlist-foot">BingX: candle diário anterior fechado. Hyperliquid: amostra anterior à virada UTC, usada apenas se tiver até 6h. Yields em pontos-base; “sem base” indica referência ou cotação atual insuficiente.</div>
         </section>
       </div>
 

@@ -1500,12 +1500,23 @@ async def tradfi_watchlist(category: str = Query("indices")):
 @app.get("/api/tradfi/macro")
 async def tradfi_macro():
     service.ensure_tradfi_ticker_stream()
+    global TRADFI_DAILY_CLOSES_TASK
     async def build_snapshot() -> dict[str, Any]:
         # Coalesce the dashboard's frequent refreshes so daily history queries and chart
         # series are shared across users instead of repeated for each browser poll.
         catalog = [{"symbol": symbol, "category": metadata["category"]} for symbol, metadata in MACRO_ASSETS.items()]
         now_ms = int(time.time() * 1000)
         symbols = [item["symbol"] for item in catalog]
+        reference_date = datetime.now(timezone.utc).date().isoformat()
+        bingx_symbols = [symbol for symbol in symbols if not symbol.startswith("HL:")]
+        stale_closes = [symbol for symbol in bingx_symbols if TRADFI_DAILY_CLOSES.get(symbol, {}).get("referenceDate") != reference_date]
+        TRADFI_DAILY_CLOSES_PENDING.update({symbol: {"symbol": symbol} for symbol in stale_closes})
+        if stale_closes and (TRADFI_DAILY_CLOSES_TASK is None or TRADFI_DAILY_CLOSES_TASK.done()):
+            TRADFI_DAILY_CLOSES_TASK = asyncio.create_task(refresh_tradfi_daily_closes())
+        daily_closes = {
+            symbol: reference for symbol, reference in TRADFI_DAILY_CLOSES.items()
+            if reference.get("referenceDate") == reference_date
+        }
         history: dict[str, list[dict[str, Any]]] = {}
         if service.flow_store:
             try:
@@ -1522,6 +1533,7 @@ async def tradfi_macro():
             catalog, history, service.tradfi_prices, now_ms,
             service.flow_store.storage if service.flow_store else "unavailable",
             service.flow_store.durable if service.flow_store else False,
+            daily_closes,
         )
         return service.apply_macro_persistence(snapshot, now_ms)
 
