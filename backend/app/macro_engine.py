@@ -32,10 +32,6 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
 MOMENTUM_WINDOWS = (1, 5, 15, 60)
 
 
-def _bounded(value: float, low: float = -1.0, high: float = 1.0) -> float:
-    return max(low, min(high, value))
-
-
 def _near_price(points: list[dict[str, Any]], target_ms: int, tolerance_ms: int = 120_000) -> dict[str, Any] | None:
     match = next((point for point in reversed(points) if point["time"] <= target_ms), None)
     return match if match and target_ms - match["time"] <= tolerance_ms else None
@@ -295,6 +291,15 @@ def build_macro_snapshot(
         "oil": {"state": oil_state, "pressureScore": round(oil_pressure * 100) if oil_pressure is not None else None},
         "assets": list(measures.values()), "accelerators": accelerators, "outlook": outlook,
         "yieldCurve": _build_yield_curve(histories, live, now_ms),
+        # Preserve the removed matrix response shape during independent web/API deploys.
+        # Older browser bundles can render empty cells instead of crashing on missing fields.
+        "relationships": [],
+        "correlationMatrix": {
+            "assets": [],
+            "windows": {str(minutes): {"values": [], "observations": []} for minutes in (15, 30, 60)},
+            "correlationShifts": [],
+        },
+        "correlationShifts": [],
         "divergences": divergences, "insights": insights, "chart": {"windowMinutes": 60, "series": chart_series},
         "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasury corrobora o contexto cruzado e yields sozinhos não definem regime. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
         "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
