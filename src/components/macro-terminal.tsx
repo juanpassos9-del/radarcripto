@@ -12,6 +12,17 @@ type MacroAsset = {
   unit?: string; source?: string; z5m: number | null; sampleCount: number; ageMs: number | null; status: string;
 };
 type MacroSeries = { key: string; label: string; color: string; values: { time: number; value: number }[] };
+const CHART_SERIES_COLORS: Record<string, string> = {
+  DXY: "#45E1D0",
+  EURUSD: "#B78CFF",
+  SP500: "#FFD166",
+  NASDAQ100: "#4DA3FF",
+  WTI: "#FF6B6B",
+  GOLD: "#F4E04D",
+  COPPER: "#D88B55",
+  EWZ: "#55E6A5",
+  TLT: "#F36CCF",
+};
 type MacroSnapshot = {
   asOf: number; source: string; status: string;
   storage: { engine: string; durable: boolean; retentionDays: number; oldestSample: number | null; trackedAssets: number; assetsWithHistory: number };
@@ -43,8 +54,7 @@ function MacroLineChart({ series }: { series: MacroSeries[] }) {
     <svg className="macro-line-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="Variação percentual normalizada dos ativos nos últimos 60 minutos">
       {ticks.map((tick, index) => <g key={index}><line x1={left} x2={width - right} y1={y(tick)} y2={y(tick)} className={Math.abs(tick) < 1e-6 ? "macro-zero-line" : "macro-grid-line"}/><text x={left - 8} y={y(tick) + 3} textAnchor="end" className="macro-axis-label">{tick.toFixed(2)}%</text></g>)}
       <line x1={left} x2={left} y1={top} y2={height - bottom} className="macro-grid-line"/>
-      {series.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="2.4" strokeLinejoin="round" strokeLinecap="round" filter="url(#macroGlow)" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
-      <defs><filter id="macroGlow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="2.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+      {series.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="2.6" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
       <text x={left} y={height - 5} className="macro-axis-label">{fmtTime(minTime)}</text><text x={width - right} y={height - 5} textAnchor="end" className="macro-axis-label">{fmtTime(maxTime)}</text>
     </svg>
     <div className="macro-legend">{series.map(item => <span key={item.key}><i style={{ background: item.color, boxShadow: `0 0 8px ${item.color}` }}/>{item.label}</span>)}</div>
@@ -107,14 +117,15 @@ export default function MacroTerminal() {
   }, []);
 
   const chartSeries = useMemo(() => (snapshot?.chart.series ?? []).map(series => {
+    const color = CHART_SERIES_COLORS[series.key] ?? series.color;
     const latestPrice = quotes[snapshot?.assets.find(asset => asset.key === series.key)?.symbol ?? ""];
-    if (!latestPrice || !series.values.length) return series;
+    if (!latestPrice || !series.values.length) return { ...series, color };
     const asset = snapshot?.assets.find(item => item.key === series.key);
     const basisPrice = asset?.price;
-    if (!basisPrice) return series;
+    if (!basisPrice) return { ...series, color };
     const last = series.values[series.values.length - 1];
     const value = last.value + (latestPrice / basisPrice - 1) * 100;
-    return { ...series, values: [...series.values.slice(0, -1), { time: Date.now(), value }] };
+    return { ...series, color, values: [...series.values.slice(0, -1), { time: Date.now(), value }] };
   }), [snapshot, quotes]);
   const regimeClass = snapshot?.regime.label === "RISK-ON" ? "positive" : snapshot?.regime.label === "RISK-OFF" ? "negative" : "neutral";
   const markerLeft = `${Math.max(0, Math.min(100, ((snapshot?.regime.score ?? 0) + 100) / 2))}%`;
