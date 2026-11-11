@@ -16,10 +16,9 @@ type MacroAsset = {
 type RotationPoint = { asset: MacroAsset; x: number; y: number; strength: number; acceleration: number };
 type MacroSeries = { key: string; label: string; color: string; values: { time: number; value: number }[] };
 type BreadthGroup = { label: string; advancing: number; neutral: number; declining: number; available: number; total: number; score: number | null; coverage: number };
-type AlertPreferences = { enabled: boolean; regime: boolean; exceptionalMove: boolean; divergence: boolean; correlationShift: boolean; multiClass: boolean; zThreshold: number; cooldownMinutes: number };
+type AlertPreferences = { enabled: boolean; regime: boolean; exceptionalMove: boolean; divergence: boolean; multiClass: boolean; zThreshold: number; cooldownMinutes: number };
 type MacroAlert = { id: string; createdAt: number; title: string; detail: string; tone: "positive" | "risk" | "warning" };
-type CorrelationShift = { leftKey: string; rightKey: string; leftLabel: string; rightLabel: string; shortCorrelation: number; baselineCorrelation: number; observations15m: number; observations60m: number; type: "weakening" | "inversion" };
-const DEFAULT_ALERT_PREFERENCES: AlertPreferences = { enabled: true, regime: true, exceptionalMove: true, divergence: true, correlationShift: true, multiClass: true, zThreshold: 2, cooldownMinutes: 10 };
+const DEFAULT_ALERT_PREFERENCES: AlertPreferences = { enabled: true, regime: true, exceptionalMove: true, divergence: true, multiClass: true, zThreshold: 2, cooldownMinutes: 10 };
 const CHART_SERIES_COLORS: Record<string, string> = {
   DXY: "#45E1D0",
   EURUSD: "#B78CFF",
@@ -42,9 +41,6 @@ type MacroSnapshot = {
   usd: { state: string; strengthScore: number | null };
   oil: { state: string; pressureScore: number | null };
   assets: MacroAsset[]; accelerators: MacroAsset[];
-  relationships: { left: string; right: string; label: string; correlation: number | null; observations: number; windowMinutes: number }[];
-  correlationMatrix: { assets: { key: string; label: string }[]; windows: Record<string, { values: (number | null)[][]; observations: number[][] }>; correlationShifts: CorrelationShift[] };
-  correlationShifts: CorrelationShift[];
   divergences: { id: string; leftKey: string; rightKey: string; label: string; leftZ5m: number; rightZ5m: number; strength: number; note: string; persistenceMinutes?: number; confirmed?: boolean }[];
   insights: { tone: string; title: string; detail: string }[];
   outlook: { group: string; bias: string; title: string; detail: string }[];
@@ -115,7 +111,6 @@ export default function MacroTerminal() {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
   const [showMethod, setShowMethod] = useState(false);
-  const [correlationWindow, setCorrelationWindow] = useState<15 | 30 | 60>(15);
   const [rotationCategory, setRotationCategory] = useState("all");
   const [alertPreferences, setAlertPreferences] = useState<AlertPreferences>(DEFAULT_ALERT_PREFERENCES);
   const [alertHistory, setAlertHistory] = useState<MacroAlert[]>([]);
@@ -223,12 +218,6 @@ export default function MacroTerminal() {
         raise(`divergence:${item.id}`, `Divergência persistente: ${item.label}`, `${item.note} Persistência de ${item.persistenceMinutes} amostras de 1 minuto; z5m ${item.leftZ5m}σ / ${item.rightZ5m}σ.`, "warning");
       }
     }
-    if (alertPreferences.correlationShift) {
-      for (const item of snapshot.correlationShifts.slice(0, 3)) {
-        const kind = item.type === "inversion" ? "inverteu" : "enfraqueceu";
-        raise(`corr:${item.leftKey}:${item.rightKey}`, `Correlação curta ${kind}`, `${item.leftLabel} × ${item.rightLabel}: 15 min ${item.shortCorrelation.toFixed(2)} vs. 60 min ${item.baselineCorrelation.toFixed(2)}.`, "warning");
-      }
-    }
     const confirmation = snapshot.breadth.confirmation;
     if (alertPreferences.multiClass && confirmation.direction !== "MISTA" && previousConfirmation.current !== confirmation.direction) {
       raise(`multiclass:${confirmation.direction}`, `Confirmação entre classes: ${confirmation.direction}`, `Classes alinhadas: ${confirmation.classes.join(", ")}. Confirmação por preço, não fluxo financeiro observado.`, confirmation.direction === "RISK-ON" ? "positive" : "risk");
@@ -298,20 +287,6 @@ export default function MacroTerminal() {
         <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 22} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
       </section>
 
-      <section className="macro-breadth-section panel">
-        <div className="panelhead"><span className="paneltitle">BREADTH · PARTICIPAÇÃO POR CLASSE</span><span className="macro-tag">MOVIMENTO NORMALIZADO POR VOLATILIDADE</span></div>
-        <div className="macro-breadth-grid">{(["indices", "usd", "energy", "metals", "yields"] as const).map(key => {
-          const group = snapshot?.breadth[key];
-          if (!group) return <article className="macro-breadth-card" key={key}><strong>{key}</strong><span className="muted">AQUECENDO</span></article>;
-          return <article className="macro-breadth-card" key={key}>
-            <small>{group.label}</small><strong className={group.score == null ? "muted" : group.score >= 0 ? "pos" : "neg"}>{group.score == null ? "—" : `${group.score > 0 ? "+" : ""}${group.score}`}</strong>
-            <span className="macro-breadth-counts"><i className="pos">{group.advancing} ↑</i><i className="muted">{group.neutral} =</i><i className="neg">{group.declining} ↓</i></span>
-            <span className="macro-breadth-coverage">{group.available}/{group.total} com amostra · {group.coverage}% cobertura</span>
-          </article>;
-        })}</div>
-        <div className="macro-breadth-confirmation"><strong>CONFIRMAÇÃO ENTRE CLASSES</strong><span>{snapshot?.breadth.confirmation.direction ?? "AQUECENDO"}</span><small>{snapshot?.breadth.confirmation.classes.length ? snapshot.breadth.confirmation.classes.join(" · ") : "Sem duas classes independentes alinhadas"}</small></div>
-      </section>
-
       <MarketRotationRadar points={rotationPoints} category={rotationCategory} onCategoryChange={setRotationCategory}/>
 
       <section className="macro-yield-strip" aria-label="Curva de juros dos Treasuries">
@@ -377,21 +352,6 @@ export default function MacroTerminal() {
           }) ?? <div className="loading">Aguardando histórico sincronizado…</div>}</div>
           </div><div className="macro-table-foot">Z-score compara o movimento com a volatilidade recente do próprio ativo. Yields: variação em pontos-base; demais ativos: retorno percentual. Aceleração compara os dois blocos de 5 min anteriores. Arraste horizontalmente para ver todas as janelas.</div>
         </section>
-        <section className="panel macro-relationships-panel">
-          <div className="panelhead"><span className="paneltitle">MATRIZ DE CORRELAÇÃO DINÂMICA</span><div className="macro-window-tabs" role="group" aria-label="Janela da matriz de correlação">{([15, 30, 60] as const).map(window => <button key={window} type="button" aria-pressed={correlationWindow === window} onClick={() => setCorrelationWindow(window)}>{window}M</button>)}</div></div>
-          <div className="macro-matrix-scroll"><table className="macro-matrix"><thead><tr><th scope="col">ATIVO</th>{snapshot?.correlationMatrix.assets.map(asset => <th scope="col" key={asset.key} title={asset.label}>{asset.key.replace("NASDAQ100", "NAS").replace("RUSSELL2000", "R2K").replace("WBRLUSDC", "WBRL").replace("EURUSD", "EURUSD")}</th>)}</tr></thead>
-            <tbody>{snapshot?.correlationMatrix.assets.map((row, rowIndex) => <tr key={row.key}><th scope="row" title={row.label}>{row.key.replace("NASDAQ100", "NAS").replace("RUSSELL2000", "R2K").replace("WBRLUSDC", "WBRL")}</th>{snapshot.correlationMatrix.assets.map((column, columnIndex) => {
-              const data = snapshot.correlationMatrix.windows[String(correlationWindow)];
-              const value = data?.values[rowIndex]?.[columnIndex] ?? null;
-              const observations = data?.observations[rowIndex]?.[columnIndex] ?? 0;
-              const opacity = value == null ? 0 : 0.10 + Math.abs(value) * 0.42;
-              const backgroundColor = value == null ? "transparent" : value >= 0 ? `rgba(72,214,154,${opacity})` : `rgba(255,115,145,${opacity})`;
-              return <td key={column.key} title={`${row.label} × ${column.label}: ${value == null ? "sem amostra suficiente" : value.toFixed(3)} · ${observations} retornos sincronizados`} style={{ backgroundColor }} className={value == null ? "muted" : ""}>{value == null ? "·" : value.toFixed(2)}</td>;
-            })}</tr>)}</tbody>
-          </table></div>
-          <div className="macro-correlation-shifts">{snapshot?.correlationShifts.slice(0, 5).map(item => <span key={`${item.leftKey}:${item.rightKey}`} title={`15m ${item.shortCorrelation}; 60m ${item.baselineCorrelation}`} className="warning">{item.leftKey} × {item.rightKey} · {item.type === "inversion" ? "inverteu" : "enfraqueceu"}</span>)}</div>
-          <div className="macro-corr-note">Pearson sobre retornos de 1 minuto alinhados; exige pelo menos 75% das amostras da janela. Vermelho/verde indicam correlação negativa/positiva. A comparação 15m × 60m é intradiária, não uma relação histórica de longo prazo.</div>
-        </section>
       </div>
 
       <section className="panel macro-divergence-panel">
@@ -403,7 +363,7 @@ export default function MacroTerminal() {
         <div className="panelhead"><span className="paneltitle"><Bell size={13}/> ALERTAS QUANTITATIVOS</span><div className="macro-alert-actions"><span className="macro-tag">{alertPreferences.enabled ? "MONITORAMENTO ATIVO" : "PAUSADO"}</span><button type="button" onClick={() => setShowAlertSettings(value => !value)} aria-expanded={showAlertSettings}>{showAlertSettings ? "OCULTAR CONFIGURAÇÃO" : "CONFIGURAR"}</button>{notificationSupported && notificationStatus !== "granted" && <button type="button" onClick={requestNotifications}><BellRing size={12}/> NOTIFICAÇÕES DO NAVEGADOR</button>}{notificationSupported && notificationStatus === "granted" && <span className="macro-tag">NOTIFICAÇÕES PERMITIDAS</span>}</div></div>
         {showAlertSettings && <div className="macro-alert-settings">
           <label className="macro-alert-toggle"><input type="checkbox" checked={alertPreferences.enabled} onChange={event => updateAlertPreferences({ enabled: event.target.checked })}/> Monitorar alertas</label>
-          {([ ["regime", "Mudança de regime"], ["exceptionalMove", "Movimento excepcional por Z-score"], ["divergence", "Divergência intermercado confirmada"], ["correlationShift", "Enfraquecimento/inversão 15m × 60m"], ["multiClass", "Confirmação simultânea entre classes"] ] as const).map(([key, label]) => <label className="macro-alert-toggle" key={key}><input type="checkbox" checked={alertPreferences[key]} onChange={event => updateAlertPreferences({ [key]: event.target.checked })}/>{label}</label>)}
+          {([ ["regime", "Mudança de regime"], ["exceptionalMove", "Movimento excepcional por Z-score"], ["divergence", "Divergência intermercado confirmada"], ["multiClass", "Confirmação simultânea entre classes"] ] as const).map(([key, label]) => <label className="macro-alert-toggle" key={key}><input type="checkbox" checked={alertPreferences[key]} onChange={event => updateAlertPreferences({ [key]: event.target.checked })}/>{label}</label>)}
           <label className="macro-alert-range">Limiar de Z-score <strong>{alertPreferences.zThreshold.toFixed(2)}σ</strong><input type="range" min="1" max="4" step="0.25" value={alertPreferences.zThreshold} onChange={event => updateAlertPreferences({ zThreshold: Number(event.target.value) })}/></label>
           <label className="macro-alert-cooldown">Cooldown<select value={alertPreferences.cooldownMinutes} onChange={event => updateAlertPreferences({ cooldownMinutes: Number(event.target.value) })}><option value={5}>5 min</option><option value={10}>10 min</option><option value={15}>15 min</option><option value={30}>30 min</option></select></label>
         </div>}

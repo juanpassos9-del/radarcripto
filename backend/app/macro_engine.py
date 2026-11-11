@@ -30,8 +30,6 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
 }
 
 MOMENTUM_WINDOWS = (1, 5, 15, 60)
-CORRELATION_WINDOWS = (15, 30, 60)
-CORRELATION_ASSET_KEYS = tuple(item["key"] for item in MACRO_ASSETS.values())
 
 
 def _bounded(value: float, low: float = -1.0, high: float = 1.0) -> float:
@@ -41,82 +39,6 @@ def _bounded(value: float, low: float = -1.0, high: float = 1.0) -> float:
 def _near_price(points: list[dict[str, Any]], target_ms: int, tolerance_ms: int = 120_000) -> dict[str, Any] | None:
     match = next((point for point in reversed(points) if point["time"] <= target_ms), None)
     return match if match and target_ms - match["time"] <= tolerance_ms else None
-
-
-def _pearson(left: list[float], right: list[float]) -> float | None:
-    count = min(len(left), len(right))
-    if count < 6:
-        return None
-    left, right = left[-count:], right[-count:]
-    mean_left, mean_right = sum(left) / count, sum(right) / count
-    covariance = sum((x - mean_left) * (y - mean_right) for x, y in zip(left, right))
-    variance_left = sum((x - mean_left) ** 2 for x in left)
-    variance_right = sum((y - mean_right) ** 2 for y in right)
-    denominator = math.sqrt(variance_left * variance_right)
-    return _bounded(covariance / denominator) if denominator else None
-
-
-def _returns_by_minute(points: list[dict[str, Any]], is_yield: bool) -> dict[int, float]:
-    prices = {int(point["time"]): float(point["price"]) for point in points if point.get("price", 0) > 0}
-    result: dict[int, float] = {}
-    for timestamp, price in prices.items():
-        previous = prices.get(timestamp - 60_000)
-        if previous is not None and previous > 0:
-            result[timestamp] = (price - previous) * 100 if is_yield else (price / previous - 1) * 100
-    return result
-
-
-def _build_correlation_matrix(
-    measures: dict[str, dict[str, Any]], histories: dict[str, list[dict[str, Any]]], now_ms: int,
-) -> dict[str, Any]:
-    assets = [{"key": item["key"], "label": item["label"]} for item in MACRO_ASSETS.values()]
-    returns: dict[str, dict[int, float]] = {}
-    for item in MACRO_ASSETS.values():
-        key, symbol = item["key"], measures[item["key"]]["symbol"]
-        returns[key] = _returns_by_minute(histories.get(symbol, []), item.get("unit") == "yield_pct")
-
-    windows: dict[str, dict[str, list[list[Any]]]] = {}
-    breakouts: list[dict[str, Any]] = []
-    for minutes in CORRELATION_WINDOWS:
-        min_observations = max(8, math.ceil(minutes * 0.75))
-        values: list[list[float | None]] = [[None for _ in assets] for _ in assets]
-        observations: list[list[int]] = [[0 for _ in assets] for _ in assets]
-        for left_index, left in enumerate(assets):
-            for right_index in range(left_index, len(assets)):
-                right = assets[right_index]
-                shared = sorted(set(returns[left["key"]]) & set(returns[right["key"]]))
-                shared = [timestamp for timestamp in shared if now_ms - timestamp <= 65 * 60_000][-minutes:]
-                if not shared or now_ms - shared[-1] > 3 * 60_000:
-                    shared = []
-                samples = len(shared)
-                corr = _pearson([returns[left["key"]][t] for t in shared], [returns[right["key"]][t] for t in shared]) if samples >= min_observations else None
-                values[left_index][right_index] = round(corr, 3) if corr is not None else None
-                values[right_index][left_index] = values[left_index][right_index]
-                observations[left_index][right_index] = samples
-                observations[right_index][left_index] = samples
-        windows[str(minutes)] = {"values": values, "observations": observations}
-
-    short, long = windows["15"], windows["60"]
-    for left_index, left in enumerate(assets):
-        for right_index in range(left_index + 1, len(assets)):
-            right = assets[right_index]
-            corr15 = short["values"][left_index][right_index]
-            corr60 = long["values"][left_index][right_index]
-            count15 = short["observations"][left_index][right_index]
-            count60 = long["observations"][left_index][right_index]
-            if corr15 is None or corr60 is None or count15 < 12 or count60 < 48 or abs(corr60) < 0.6:
-                continue
-            sign_flip = corr15 * corr60 < 0 and abs(corr15) >= 0.3
-            weakened = abs(corr15) <= 0.2
-            if sign_flip or weakened:
-                breakouts.append({
-                    "leftKey": left["key"], "rightKey": right["key"],
-                    "leftLabel": left["label"], "rightLabel": right["label"],
-                    "shortCorrelation": corr15, "baselineCorrelation": corr60,
-                    "observations15m": count15, "observations60m": count60,
-                    "type": "inversion" if sign_flip else "weakening",
-                })
-    return {"assets": assets, "windows": windows, "correlationShifts": breakouts}
 
 
 def build_macro_snapshot(
@@ -337,25 +259,6 @@ def build_macro_snapshot(
         gold_title = "Ouro com momentum positivo" if gold_bias == "favorable" else "Ouro perdendo força" if gold_bias == "caution" else "Ouro sem direção clara"
         outlook.append({"group": "METALS", "bias": gold_bias, "title": gold_title, "detail": "Ouro é proxy defensiva, mas também responde a dólar e juros; não confirma aversão a risco isoladamente."})
 
-    correlation_matrix = _build_correlation_matrix(measures, histories, now_ms)
-    correlation_keys = [item["key"] for item in correlation_matrix["assets"]]
-    correlation_30 = correlation_matrix["windows"]["30"]
-    pair_specs = [
-        ("DXY", "EURUSD", "Dólar × EUR/USD"), ("DXY", "SP500", "Dólar × S&P 500"),
-        ("WTI", "SP500", "Petróleo × S&P 500"), ("GOLD", "DXY", "Ouro × dólar"),
-        ("UST2Y", "SP500", "Treasury 2Y × S&P 500"), ("UST10Y", "TLT", "Treasury 10Y × TLT"),
-        ("UST30Y", "TLT", "Treasury 30Y × TLT"), ("DXY", "EWZ", "Dólar × EWZ"),
-    ]
-    relationships = []
-    for left, right, label in pair_specs:
-        left_index, right_index = correlation_keys.index(left), correlation_keys.index(right)
-        relationships.append({
-            "left": left, "right": right, "label": label,
-            "correlation": correlation_30["values"][left_index][right_index],
-            "observations": correlation_30["observations"][left_index][right_index],
-            "windowMinutes": 30,
-        })
-
     insights: list[dict[str, str]] = []
     if usd_state == "USD COMPRADO":
         insights.append({"tone": "risk", "title": "Pressão compradora no dólar", "detail": "DXY e pares cambiais disponíveis apontam fortalecimento relativo do USD; índices e commodities cotadas em dólar podem sentir pressão."})
@@ -392,10 +295,9 @@ def build_macro_snapshot(
         "oil": {"state": oil_state, "pressureScore": round(oil_pressure * 100) if oil_pressure is not None else None},
         "assets": list(measures.values()), "accelerators": accelerators, "outlook": outlook,
         "yieldCurve": _build_yield_curve(histories, live, now_ms),
-        "relationships": relationships, "correlationMatrix": correlation_matrix, "correlationShifts": correlation_matrix["correlationShifts"],
         "divergences": divergences, "insights": insights, "chart": {"windowMinutes": 60, "series": chart_series},
-        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasury corrobora o contexto cruzado e yields sozinhos não definem regime. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras. A matriz calcula Pearson de retornos sincronizados nas janelas de 15/30/60 min e exige cobertura mínima de 75% da janela; ruptura compara 15 min com 60 min.",
-        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Correlação de 60 min não é uma referência histórica diária; os alertas comparam apenas janelas curtas. Não há matriz diária nem backtest fora da amostra.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
+        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasury corrobora o contexto cruzado e yields sozinhos não definem regime. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
+        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
 
 
