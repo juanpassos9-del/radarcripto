@@ -70,7 +70,7 @@ Trate o app atual como versão de validação local. Antes de disponibilizar dad
 
 O arquivo `render.yaml` descreve dois Web Services Docker gratuitos: `nexus-terminal-web` (Next.js) e `nexus-terminal-api` (FastAPI). No painel do Render, crie um Blueprint a partir do repositório e confira os dois serviços e as variáveis de ambiente antes de aplicar. O `NEXUS_API_ORIGIN` é preenchido pela URL do serviço API. Se escolher outros nomes de serviço, atualize as URLs `*.onrender.com` correspondentes no `render.yaml`.
 
-O Next.js lê `NEXUS_API_ORIGIN` durante o build, então a URL da API precisa estar disponível na criação/build do Blueprint. O serviço FastAPI responde na porta `PORT` do Render. A URL WebSocket pública usa `wss://`. Os serviços gratuitos podem dormir após 15 minutos sem tráfego recebido, demorar aproximadamente um minuto para acordar e não têm armazenamento persistente; são adequados para demonstração, não para disponibilidade prometida a assinantes. O Render pode suspender serviços sem forma de pagamento se os limites incluídos de uso ou tráfego forem excedidos.
+O frontend encaminha as chamadas REST pelo proxy Next.js, que lê `NEXUS_API_ORIGIN` em tempo de execução; as rotas locais de autenticação ficam no próprio frontend. O serviço FastAPI responde na porta `PORT` do Render. A URL WebSocket pública usa `wss://`. Os serviços gratuitos podem dormir após 15 minutos sem tráfego recebido, demorar aproximadamente um minuto para acordar e não têm armazenamento persistente; são adequados para demonstração, não para disponibilidade prometida a assinantes. O Render pode suspender serviços sem forma de pagamento se os limites incluídos de uso ou tráfego forem excedidos.
 
 ### Proteção das rotas de mercado
 

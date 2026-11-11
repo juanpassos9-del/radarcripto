@@ -11,7 +11,7 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - fromGroup: nexus-market-auth
       - key: NEXUS_API_ORIGIN
