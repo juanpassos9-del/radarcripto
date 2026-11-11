@@ -48,6 +48,7 @@ def build_macro_snapshot(
     instruments = {item["symbol"]: item for item in catalog}
     measures: dict[str, dict[str, Any]] = {}
     chart_series: list[dict[str, Any]] = []
+    daily_chart_series: list[dict[str, Any]] = []
     oldest_sample: int | None = None
     live_count = 0
 
@@ -135,6 +136,20 @@ def build_macro_snapshot(
                 "key": metadata["key"], "label": metadata["label"], "color": metadata["color"],
                 "values": [{"time": point["time"], "value": round((point["price"] / baseline - 1) * 100, 4)} for point in recent],
             })
+            day_baseline = _near_price(points, now_ms - 24 * 60 * 60_000, tolerance_ms=60 * 60_000)
+            if day_baseline and latest_is_fresh:
+                day_points = [point for point in points if day_baseline["time"] <= point["time"] <= now_ms]
+                buckets: dict[int, dict[str, Any]] = {}
+                for point in day_points:
+                    buckets[point["time"] // (5 * 60_000)] = point
+                baseline_bucket = day_baseline["time"] // (5 * 60_000)
+                sampled = [day_baseline, *(point for bucket, point in sorted(buckets.items()) if bucket != baseline_bucket)]
+                if day_points and (not sampled or sampled[-1]["time"] != day_points[-1]["time"]):
+                    sampled.append(day_points[-1])
+                daily_chart_series.append({
+                    "key": metadata["key"], "label": metadata["label"], "color": metadata["color"],
+                    "values": [{"time": point["time"], "value": round((point["price"] / day_baseline["price"] - 1) * 100, 4)} for point in sampled],
+                })
 
     def signal(key: str, invert: bool = False) -> float | None:
         z_value = measures.get(key, {}).get("z5m")
@@ -300,7 +315,8 @@ def build_macro_snapshot(
             "correlationShifts": [],
         },
         "correlationShifts": [],
-        "divergences": divergences, "insights": insights, "chart": {"windowMinutes": 60, "series": chart_series},
+        "divergences": divergences, "insights": insights,
+        "chart": {"windowMinutes": 60, "series": chart_series, "dailyWindowHours": 24, "dailySeries": daily_chart_series},
         "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasury corrobora o contexto cruzado e yields sozinhos não definem regime. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
         "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }

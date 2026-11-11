@@ -42,15 +42,15 @@ type MacroSnapshot = {
   divergences: { id: string; leftKey: string; rightKey: string; label: string; leftZ5m: number; rightZ5m: number; strength: number; note: string; persistenceMinutes?: number; confirmed?: boolean }[];
   insights: { tone: string; title: string; detail: string }[];
   outlook: { group: string; bias: string; title: string; detail: string }[];
-  chart: { windowMinutes: number; series: MacroSeries[] };
+  chart: { windowMinutes: number; series: MacroSeries[]; dailyWindowHours?: number; dailySeries?: MacroSeries[] };
   yieldCurve?: { spreadBps: number | null; change5mBps: number | null; longSpreadBps?: number | null; longChange5mBps?: number | null; status?: string; label?: string };
   method: string; limitations: string[];
 };
 
-function MacroLineChart({ series }: { series: MacroSeries[] }) {
+function MacroLineChart({ series, label, emptyMessage }: { series: MacroSeries[]; label: string; emptyMessage: string }) {
   const width = 1000, height = 330, left = 46, right = 18, top = 18, bottom = 26;
   const all = series.flatMap(item => item.values);
-  if (all.length < 4) return <div className="macro-chart-empty">Aguardando amostras sincronizadas da BingX e Hyperliquid para desenhar as relações de preço.</div>;
+  if (all.length < 4) return <div className="macro-chart-empty">{emptyMessage}</div>;
   const times = all.map(point => point.time), values = all.map(point => point.value);
   const minTime = Math.min(...times), maxTime = Math.max(...times);
   const minValue = Math.min(0, ...values), maxValue = Math.max(0, ...values);
@@ -59,12 +59,15 @@ function MacroLineChart({ series }: { series: MacroSeries[] }) {
   const x = (time: number) => left + (time - minTime) / Math.max(1, maxTime - minTime) * (width - left - right);
   const y = (value: number) => top + (yMax - value) / Math.max(1e-8, yMax - yMin) * (height - top - bottom);
   const ticks = Array.from({ length: 5 }, (_, index) => yMin + (yMax - yMin) * index / 4);
+  const formatTime = (time: number) => label === "últimas 24 horas"
+    ? new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(time)
+    : fmtTime(time);
   return <div className="macro-chart-wrap">
-    <svg className="macro-line-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="Variação percentual normalizada dos ativos nos últimos 60 minutos">
+    <svg className="macro-line-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`Variação percentual normalizada dos ativos: ${label}`}>
       {ticks.map((tick, index) => <g key={index}><line x1={left} x2={width - right} y1={y(tick)} y2={y(tick)} className={Math.abs(tick) < 1e-6 ? "macro-zero-line" : "macro-grid-line"}/><text x={left - 8} y={y(tick) + 3} textAnchor="end" className="macro-axis-label">{tick.toFixed(2)}%</text></g>)}
       <line x1={left} x2={left} y1={top} y2={height - bottom} className="macro-grid-line"/>
       {series.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="2.6" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
-      <text x={left} y={height - 5} className="macro-axis-label">{fmtTime(minTime)}</text><text x={width - right} y={height - 5} textAnchor="end" className="macro-axis-label">{fmtTime(maxTime)}</text>
+      <text x={left} y={height - 5} className="macro-axis-label">{formatTime(minTime)}</text><text x={width - right} y={height - 5} textAnchor="end" className="macro-axis-label">{formatTime(maxTime)}</text>
     </svg>
     <div className="macro-legend">{series.map(item => <span key={item.key}><i style={{ background: item.color, boxShadow: `0 0 8px ${item.color}` }}/>{item.label}</span>)}</div>
   </div>;
@@ -251,6 +254,17 @@ export default function MacroTerminal() {
     const value = last.value + (latestPrice / basisPrice - 1) * 100;
     return { ...series, color, values: [...series.values.slice(0, -1), { time: Date.now(), value }] };
   }), [snapshot, quotes]);
+  const dailyChartSeries = useMemo(() => (snapshot?.chart.dailySeries ?? []).map(series => {
+    const color = CHART_SERIES_COLORS[series.key] ?? series.color;
+    const latestPrice = quotes[snapshot?.assets.find(asset => asset.key === series.key)?.symbol ?? ""];
+    if (!latestPrice || !series.values.length) return { ...series, color };
+    const asset = snapshot?.assets.find(item => item.key === series.key);
+    const basisPrice = asset?.price;
+    if (!basisPrice) return { ...series, color };
+    const last = series.values[series.values.length - 1];
+    const value = last.value + (latestPrice / basisPrice - 1) * 100;
+    return { ...series, color, values: [...series.values.slice(0, -1), { time: Date.now(), value }] };
+  }), [snapshot, quotes]);
   const rotationPoints = useMemo(() => (snapshot?.assets ?? []).flatMap(asset => {
     const z5 = asset.windows?.["5"]?.z, z15 = asset.windows?.["15"]?.z, z60 = asset.windows?.["60"]?.z;
     if (!asset.available || z5 == null || z15 == null || z60 == null || asset.ageMs == null || asset.ageMs > 120_000) return [];
@@ -303,19 +317,25 @@ export default function MacroTerminal() {
         <div className="macro-outlook-grid">{snapshot?.outlook.map(item => <article className={`macro-outlook-card ${item.bias}`} key={item.group}><small>{item.group}</small><strong>{item.title}</strong><p>{item.detail}</p><span>{item.bias === "favorable" ? "MOMENTUM FAVORÁVEL" : item.bias === "caution" ? "PRESSÃO / CAUTELA" : "OBSERVAR CONFIRMAÇÃO"}</span></article>) ?? <div className="loading">Aguardando fatores alinhados para estimar exposição…</div>}</div>
       </section>
 
-      <div className="macro-grid">
+      <div className="macro-price-maps">
         <section className="panel macro-chart-panel">
-          <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · VARIAÇÃO NORMALIZADA</span><span className="macro-tag"><i/> ÚLTIMOS 60 MIN</span></div>
+          <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · INTRADIA</span><span className="macro-tag"><i/> ÚLTIMOS 60 MIN</span></div>
           <p className="macro-chart-subtitle">Cada linha começa em 0% no início da janela. A escala comum evidencia divergência e confluência entre os ativos.</p>
-          <MacroLineChart series={chartSeries}/>
+          <MacroLineChart series={chartSeries} label="últimos 60 minutos" emptyMessage="Aguardando amostras recentes sincronizadas para desenhar o mapa intradia."/>
           <div className="macro-chart-foot"><span>HORÁRIO SÃO PAULO · {snapshot ? fmtTime(snapshot.asOf) : "—"}</span><span>{snapshot?.chart.series.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
-        <section className="panel macro-insight-panel">
-          <div className="panelhead"><span className="paneltitle">LEITURA DO REGIME</span><span className="macro-tag"><i/></span></div>
-          <div className="macro-insights">{snapshot?.insights.map((insight, index) => <article className={`macro-insight ${insight.tone}`} key={`${insight.title}-${index}`}><span className="macro-insight-mark"><ArrowUpRight size={15}/></span><div><strong>{insight.title}</strong><p>{insight.detail}</p></div></article>) ?? <div className="loading">Carregando fatores macro observados…</div>}</div>
-          <div className="macro-insight-note">Viés estimado por preços recentes; confirme com o comportamento do próprio índice e com o horário de negociação.</div>
+        <section className="panel macro-chart-panel">
+          <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · DIÁRIO</span><span className="macro-tag"><i/> ÚLTIMAS 24 HORAS</span></div>
+          <p className="macro-chart-subtitle">Rebase em 0% no preço de aproximadamente 24h atrás. O ativo aparece apenas com histórico próximo do período e cotação recente.</p>
+          <MacroLineChart series={dailyChartSeries} label="últimas 24 horas" emptyMessage="Aquecendo histórico diário. Cada ativo entra após acumular uma base próxima de 24 horas."/>
+          <div className="macro-chart-foot"><span>BASE MÍNIMA · 23H DE HISTÓRICO</span><span>{snapshot?.chart.dailySeries?.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
       </div>
+      <section className="panel macro-insight-panel">
+        <div className="panelhead"><span className="paneltitle">LEITURA DO REGIME</span><span className="macro-tag"><i/></span></div>
+        <div className="macro-insights">{snapshot?.insights.map((insight, index) => <article className={`macro-insight ${insight.tone}`} key={`${insight.title}-${index}`}><span className="macro-insight-mark"><ArrowUpRight size={15}/></span><div><strong>{insight.title}</strong><p>{insight.detail}</p></div></article>) ?? <div className="loading">Carregando fatores macro observados…</div>}</div>
+        <div className="macro-insight-note">Viés estimado por preços recentes; confirme com o comportamento do próprio índice e com o horário de negociação.</div>
+      </section>
 
       <div className="macro-grid macro-lower">
         <section className="panel macro-assets-panel">

@@ -56,7 +56,9 @@
 .macro-yield-strip span.pos { color:#48d69a; }
 .macro-yield-strip span.neg { color:#ff7391; }
 .macro-grid { display:grid; grid-template-columns:minmax(0,1.8fr) minmax(280px,.8fr); gap:12px; margin-bottom:12px; }
+.macro-price-maps { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-bottom:12px; }
 .macro-chart-panel,.macro-insight-panel,.macro-assets-panel { min-width:0; overflow:hidden; }
+.macro-insight-panel { margin-bottom:12px; }
 .macro-panel-head .paneltitle { color:#c6d4e0; }
 .macro-tag { display:inline-flex; align-items:center; gap:6px; color:#79899a; font:8px 'DM Mono',monospace; }
 .macro-error-banner { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 12px; }
@@ -172,7 +174,7 @@
 .neg { color:#ff7189; }
 .muted { color:#758395; }
 .warning { color:#efb45d; }
-@media(max-width:1050px) { .macro-overview { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-yield-strip { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-grid,.macro-lower { grid-template-columns:minmax(0,1fr); } .macro-outlook-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-line-chart { height:245px; } }
+@media(max-width:1050px) { .macro-overview { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-yield-strip { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-grid,.macro-lower,.macro-price-maps { grid-template-columns:minmax(0,1fr); } .macro-outlook-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-line-chart { height:245px; } }
 @media(max-width:720px) {
   .macro-wrap { padding:15px 12px 22px; }
   .macro-heading { align-items:flex-start; flex-direction:column; gap:9px; margin-top:2px; }

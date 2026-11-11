@@ -233,7 +233,7 @@ class MarketService:
             try:
                 rows = await bingx_tradfi_request(
                     "/openApi/swap/v2/quote/klines",
-                    {"symbol": instrument["symbol"], "interval": "1m", "limit": 90},
+                    {"symbol": instrument["symbol"], "interval": "1m", "limit": 1440},
                     300,
                 )
                 samples = []
@@ -247,7 +247,12 @@ class MarketService:
                 log.info("BingX macro history seed unavailable", extra={"symbol": instrument["symbol"], "error": str(error)})
                 return []
 
-        loaded = await asyncio.gather(*(load_symbol(item) for item in instruments))
+        # Kline requests share a conservative per-IP limit; serialize the one-time seed.
+        loaded = []
+        for index, instrument in enumerate(instruments):
+            loaded.append(await load_symbol(instrument))
+            if index + 1 < len(instruments):
+                await asyncio.sleep(1)
         rows = [sample for batch in loaded for sample in batch]
         for symbol, sample_time, price, category in rows:
             self.tradfi_samples.setdefault(symbol, deque(maxlen=7 * 24 * 60)).append({"time": sample_time, "price": price, "category": category})
@@ -1496,21 +1501,21 @@ async def tradfi_watchlist(category: str = Query("indices")):
 async def tradfi_macro():
     service.ensure_tradfi_ticker_stream()
     async def build_snapshot() -> dict[str, Any]:
-        # Coalesce the dashboard's frequent refreshes so matrix calculations and history
-        # queries are shared across users instead of repeated for each browser poll.
+        # Coalesce the dashboard's frequent refreshes so daily history queries and chart
+        # series are shared across users instead of repeated for each browser poll.
         catalog = [{"symbol": symbol, "category": metadata["category"]} for symbol, metadata in MACRO_ASSETS.items()]
         now_ms = int(time.time() * 1000)
         symbols = [item["symbol"] for item in catalog]
         history: dict[str, list[dict[str, Any]]] = {}
         if service.flow_store:
             try:
-                history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 3 * 60 * 60_000)
+                history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 24 * 60 * 60_000)
             except Exception:
                 log.exception("TradFi macro history query failed")
         for symbol, points in service.tradfi_samples.items():
             if symbol in MACRO_ASSETS:
                 by_time = {item["time"]: item for item in history.get(symbol, [])}
-                by_time.update({item["time"]: item for item in points if item["time"] >= now_ms - 3 * 60 * 60_000})
+                by_time.update({item["time"]: item for item in points if item["time"] >= now_ms - 24 * 60 * 60_000})
                 history[symbol] = sorted(by_time.values(), key=lambda item: item["time"])
         snapshot = build_macro_snapshot(
             catalog, history, service.tradfi_prices, now_ms,
