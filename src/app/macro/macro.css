@@ -100,7 +100,7 @@
 .macro-window-value small.neg { color:#ff7391; }
 .macro-table-foot { padding:9px 12px; color:#6d7c8c; font-size:8px; line-height:1.45; border-top:1px solid #202833; }
 .macro-watchlist-panel { display:flex; flex-direction:column; }
-.macro-watchlist-scroll { max-height:560px; overflow:auto; overscroll-behavior:contain; }
+.macro-watchlist-scroll { overflow:visible; }
 .macro-watchlist-group h3 { display:flex; justify-content:space-between; margin:0; padding:10px 11px 6px; color:#6f8193; font:7px 'DM Mono',monospace; letter-spacing:.7px; background:#0e151c; border-bottom:1px solid #202833; }
 .macro-watchlist-group h3 span { color:#485968; }
 .macro-watchlist-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(62px,.7fr) minmax(74px,.8fr); align-items:center; gap:6px; min-height:38px; padding:6px 10px; border-bottom:1px solid #ffffff09; }
@@ -210,7 +210,6 @@
   .macro-chart-foot { font-size:7px; }
   .macro-table-head,.macro-asset-row { grid-template-columns:minmax(160px,1.5fr) 70px repeat(4,62px) 58px 86px; min-width:900px; gap:4px; padding:8px 7px; }
   .macro-table-head { font-size:6px; letter-spacing:0; }
-  .macro-watchlist-scroll { max-height:460px; }
   .macro-watchlist-row { grid-template-columns:minmax(0,1fr) 72px 75px; gap:4px; padding-inline:8px; }
   .macro-asset-row>span:not(:first-child),.macro-asset-row>strong { font-size:7px; }
   .macro-asset-label strong { font-size:8px; }
