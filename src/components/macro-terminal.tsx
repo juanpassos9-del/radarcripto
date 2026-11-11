@@ -23,6 +23,8 @@ const CHART_SERIES_COLORS: Record<string, string> = {
   EWZ: "#55E6A5",
   TLT: "#F36CCF",
   WBRLUSDC: "#B8E986",
+  DRAM: "#75D7FF",
+  SOXL: "#FF80BF",
 };
 type MacroSnapshot = {
   asOf: number; source: string; status: string;
@@ -151,7 +153,7 @@ export default function MacroTerminal() {
         </article>
         <article className="macro-metric-card usd"><div className="macro-card-kicker"><Waves size={14}/> PRESSÃO NO DÓLAR</div><strong>{snapshot?.usd.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.usd.strengthScore == null ? "—" : `${snapshot.usd.strengthScore > 0 ? "+" : ""}${snapshot.usd.strengthScore}`}<small>/100</small></div><p>DXY + cesta EUR, GBP, AUD, NZD e JPY</p></article>
         <article className="macro-metric-card oil"><div className="macro-card-kicker"><Activity size={14}/> PRESSÃO DE ENERGIA</div><strong>{snapshot?.oil.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.oil.pressureScore == null ? "—" : `${snapshot.oil.pressureScore > 0 ? "+" : ""}${snapshot.oil.pressureScore}`}<small>/100</small></div><p>Brent & WTI · proxy de custo e inflação</p></article>
-        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 20} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
+        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 22} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
       </section>
 
       <section className="macro-yield-strip" aria-label="Curva de juros dos Treasuries">

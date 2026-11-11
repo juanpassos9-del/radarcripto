@@ -22,7 +22,9 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "HL:para:2Y": {"key": "UST2Y", "label": "Treasury 2Y · yield", "category": "rates", "color": "#65d5ef", "source": "Hyperliquid · Paragon", "unit": "yield_pct", "riskDirection": "inverse"},
     "HL:para:10Y": {"key": "UST10Y", "label": "Treasury 10Y · yield", "category": "rates", "color": "#f29cdd", "source": "Hyperliquid · Paragon", "unit": "yield_pct", "riskDirection": "inverse"},
     "HL:para:30Y": {"key": "UST30Y", "label": "Treasury 30Y · yield", "category": "rates", "color": "#ff9d68", "source": "Hyperliquid · Paragon", "unit": "yield_pct", "riskDirection": "inverse"},
+    "HL:xyz:DRAM": {"key": "DRAM", "label": "DRAM/USDC · perpétuo sintético", "category": "equity", "color": "#75d7ff", "source": "Hyperliquid · XYZ", "unit": "USDC"},
     "HL:xyz:EWZ": {"key": "EWZ", "label": "EWZ sintético", "category": "equity", "color": "#57d69a", "source": "Hyperliquid · XYZ"},
+    "HL:xyz:SOXL": {"key": "SOXL", "label": "SOXL/USDC · perpétuo sintético", "category": "equity", "color": "#ff80bf", "source": "Hyperliquid · XYZ", "unit": "USDC"},
     "HL:xyz:TLT": {"key": "TLT", "label": "TLT sintético", "category": "bond", "color": "#e3bd65", "source": "Hyperliquid · XYZ"},
     "HL:spot:WBRL-USDC": {"key": "WBRLUSDC", "label": "WBRL/USDC · real empacotado", "category": "fx", "color": "#b8e986", "source": "Hyperliquid Spot", "unit": "USDC por WBRL"},
 }
@@ -122,7 +124,7 @@ def build_macro_snapshot(
             "sampleCount": sample_count, "ageMs": age_ms,
             "status": "live" if has_live else "history" if latest else "warming",
         }
-        if metadata["key"] in {"DXY", "EURUSD", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "EWZ", "TLT", "WBRLUSDC"} and len(recent) >= 2:
+        if metadata["key"] in {"DXY", "EURUSD", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "EWZ", "TLT", "WBRLUSDC", "DRAM", "SOXL"} and len(recent) >= 2:
             baseline = recent[0]["price"]
             chart_series.append({
                 "key": metadata["key"], "label": metadata["label"], "color": metadata["color"],
