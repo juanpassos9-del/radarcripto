@@ -23,7 +23,7 @@ type MacroSnapshot = {
   insights: { tone: string; title: string; detail: string }[];
   outlook: { group: string; bias: string; title: string; detail: string }[];
   chart: { windowMinutes: number; series: MacroSeries[] };
-  yieldCurve: { spreadBps: number | null; change5mBps: number | null; status: string; label: string };
+  yieldCurve: { spreadBps: number | null; change5mBps: number | null; longSpreadBps: number | null; longChange5mBps: number | null; status: string; label: string };
   method: string; limitations: string[];
 };
 
@@ -138,16 +138,18 @@ export default function MacroTerminal() {
         </article>
         <article className="macro-metric-card usd"><div className="macro-card-kicker"><Waves size={14}/> PRESSÃO NO DÓLAR</div><strong>{snapshot?.usd.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.usd.strengthScore == null ? "—" : `${snapshot.usd.strengthScore > 0 ? "+" : ""}${snapshot.usd.strengthScore}`}<small>/100</small></div><p>DXY + cesta EUR, GBP, AUD, NZD e JPY</p></article>
         <article className="macro-metric-card oil"><div className="macro-card-kicker"><Activity size={14}/> PRESSÃO DE ENERGIA</div><strong>{snapshot?.oil.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.oil.pressureScore == null ? "—" : `${snapshot.oil.pressureScore > 0 ? "+" : ""}${snapshot.oil.pressureScore}`}<small>/100</small></div><p>Brent & WTI · proxy de custo e inflação</p></article>
-        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 18} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
+        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 19} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
       </section>
 
       <section className="macro-yield-strip" aria-label="Curva de juros dos Treasuries">
-        {["UST2Y", "UST10Y"].map(key => {
+        {["UST2Y", "UST10Y", "UST30Y"].map(key => {
           const asset = snapshot?.assets.find(item => item.key === key);
           const movement = asset?.change5mBps;
-          return <article key={key}><small>{asset?.label ?? (key === "UST2Y" ? "Treasury 2Y · yield" : "Treasury 10Y · yield")}</small><strong>{asset?.price == null ? "AQUECENDO" : `${asset.price.toFixed(3)}%`}</strong><span className={movement == null ? "muted" : movement >= 0 ? "neg" : "pos"}>{movement == null ? "—" : `${movement > 0 ? "+" : ""}${movement.toFixed(2)} bps · 5 min`}</span></article>;
+          const fallback = key === "UST2Y" ? "Treasury 2Y · yield" : key === "UST10Y" ? "Treasury 10Y · yield" : "Treasury 30Y · yield";
+          return <article key={key}><small>{asset?.label ?? fallback}</small><strong>{asset?.price == null ? "AQUECENDO" : `${asset.price.toFixed(3)}%`}</strong><span className={movement == null ? "muted" : movement >= 0 ? "neg" : "pos"}>{movement == null ? "—" : `${movement > 0 ? "+" : ""}${movement.toFixed(2)} bps · 5 min`}</span></article>;
         })}
-        <article><small>INCLINAÇÃO DA CURVA · 10Y−2Y</small><strong>{snapshot?.yieldCurve.spreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.spreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve.change5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.change5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.change5mBps.toFixed(2)} bps · 5 min`}</span></article>
+        <article><small>INCLINAÇÃO · 10Y−2Y</small><strong>{snapshot?.yieldCurve.spreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.spreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve.change5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.change5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.change5mBps.toFixed(2)} bps · 5 min`}</span></article>
+        <article><small>INCLINAÇÃO LONGA · 30Y−10Y</small><strong>{snapshot?.yieldCurve.longSpreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.longSpreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve.longChange5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.longChange5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.longChange5mBps.toFixed(2)} bps · 5 min`}</span></article>
       </section>
 
       <div className="macro-grid">

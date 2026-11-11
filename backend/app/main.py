@@ -28,6 +28,7 @@ from .macro_engine import MACRO_ASSETS, build_macro_snapshot
 HYPERLIQUID_ASSETS: dict[str, dict[str, str]] = {
     "HL:para:2Y": {"coin": "para:2Y", "dex": "para", "category": "rates"},
     "HL:para:10Y": {"coin": "para:10Y", "dex": "para", "category": "rates"},
+    "HL:para:30Y": {"coin": "para:30Y", "dex": "para", "category": "rates"},
     "HL:xyz:EWZ": {"coin": "xyz:EWZ", "dex": "xyz", "category": "equity"},
     "HL:xyz:TLT": {"coin": "xyz:TLT", "dex": "xyz", "category": "bond"},
 }

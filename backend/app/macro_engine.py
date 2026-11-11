@@ -21,6 +21,7 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "NCCO724COPPER2USD-USDT": {"key": "COPPER", "label": "Cobre", "category": "metal", "color": "#dd8a59"},
     "HL:para:2Y": {"key": "UST2Y", "label": "Treasury 2Y · yield", "category": "rates", "color": "#65d5ef", "source": "Hyperliquid · Paragon", "unit": "yield_pct", "riskDirection": "inverse"},
     "HL:para:10Y": {"key": "UST10Y", "label": "Treasury 10Y · yield", "category": "rates", "color": "#f29cdd", "source": "Hyperliquid · Paragon", "unit": "yield_pct", "riskDirection": "inverse"},
+    "HL:para:30Y": {"key": "UST30Y", "label": "Treasury 30Y · yield", "category": "rates", "color": "#ff9d68", "source": "Hyperliquid · Paragon", "unit": "yield_pct", "riskDirection": "inverse"},
     "HL:xyz:EWZ": {"key": "EWZ", "label": "EWZ sintético", "category": "equity", "color": "#57d69a", "source": "Hyperliquid · XYZ"},
     "HL:xyz:TLT": {"key": "TLT", "label": "TLT sintético", "category": "bond", "color": "#e3bd65", "source": "Hyperliquid · XYZ"},
 }
@@ -141,7 +142,7 @@ def build_macro_snapshot(
     ])
     equity_breadth = mean_available([signal("SP500"), signal("NASDAQ100"), signal("RUSSELL2000"), signal("DOW")])
     cyclicals = mean_available([signal("COPPER"), signal("GOLD", True)])
-    rates_signal = mean_available([signal("UST2Y"), signal("UST10Y")])
+    rates_signal = mean_available([signal("UST2Y"), signal("UST10Y"), signal("UST30Y")])
     components = [
         {"key": "equities", "label": "Índices", "value": round(equity_breadth * 100) if equity_breadth is not None else None, "weight": 0.40},
         {"key": "usd", "label": "Dólar", "value": round(-usd_strength * 100) if usd_strength is not None else None, "weight": 0.30},
@@ -196,7 +197,7 @@ def build_macro_snapshot(
         return result
 
     relationships = []
-    for left, right, label in [("DXY", "EURUSD", "Dólar × EUR/USD"), ("DXY", "SP500", "Dólar × S&P 500"), ("WTI", "SP500", "Petróleo × S&P 500"), ("GOLD", "DXY", "Ouro × dólar"), ("UST2Y", "SP500", "Treasury 2Y × S&P 500"), ("UST10Y", "TLT", "Treasury 10Y × TLT"), ("DXY", "EWZ", "Dólar × EWZ")]:
+    for left, right, label in [("DXY", "EURUSD", "Dólar × EUR/USD"), ("DXY", "SP500", "Dólar × S&P 500"), ("WTI", "SP500", "Petróleo × S&P 500"), ("GOLD", "DXY", "Ouro × dólar"), ("UST2Y", "SP500", "Treasury 2Y × S&P 500"), ("UST10Y", "TLT", "Treasury 10Y × TLT"), ("UST30Y", "Treasury 30Y × TLT"), ("DXY", "EWZ", "Dólar × EWZ")]:
         left_times = histories.get(measures.get(left, {}).get("symbol", ""), [])
         right_times = histories.get(measures.get(right, {}).get("symbol", ""), [])
         shared = sorted({point["time"] for point in left_times} & {point["time"] for point in right_times})[-31:]
@@ -240,22 +241,32 @@ def build_macro_snapshot(
         "assets": list(measures.values()), "accelerators": accelerators, "outlook": outlook,
         "yieldCurve": _build_yield_curve(histories, live, now_ms),
         "relationships": relationships, "insights": insights, "chart": {"windowMinutes": 60, "series": chart_series},
-        "method": "Score composto de variações de 5 min normalizadas pela volatilidade de 1 min; pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e yields EUA 15%. Yields são medidos em pontos-base; o sinal de yields crescentes é tratado como possível pressão sobre risco, sem inferir causalidade. Correlações Pearson usam amostras de 1 min sincronizadas em até 30 min.",
-        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Os scores descrevem associação de curto prazo, não causalidade nem recomendação.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "2Y/10Y representam yields (não preço dos títulos); TLT e EWZ são contratos sintéticos perpétuos e podem divergir dos ETFs subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
+        "method": "Score composto de variações de 5 min normalizadas pela volatilidade de 1 min; pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e yields EUA 15%. Yields de 2Y/10Y/30Y são medidos em pontos-base; o sinal de yields crescentes é tratado como possível pressão sobre risco, sem inferir causalidade. Inclinações 10Y−2Y e 30Y−10Y usam pontos-base. Correlações Pearson usam amostras de 1 min sincronizadas em até 30 min.",
+        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Os scores descrevem associação de curto prazo, não causalidade nem recomendação.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT e EWZ são contratos sintéticos perpétuos e podem divergir dos ETFs subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
 
 
 def _build_yield_curve(histories: dict[str, list[dict[str, Any]]], live: dict[str, dict[str, Any]], now_ms: int) -> dict[str, Any]:
-    two_symbol, ten_symbol = "HL:para:2Y", "HL:para:10Y"
-    two_points = {point["time"]: point["price"] for point in histories.get(two_symbol, [])}
-    ten_points = {point["time"]: point["price"] for point in histories.get(ten_symbol, [])}
-    common = sorted(set(two_points) & set(ten_points))
-    two_live, ten_live = live.get(two_symbol), live.get(ten_symbol)
-    both_live = bool(two_live and ten_live and now_ms - int(two_live.get("receivedAt", 0)) <= 90_000 and now_ms - int(ten_live.get("receivedAt", 0)) <= 90_000)
-    current_two = two_live["price"] if both_live else (two_points[common[-1]] if common else None)
-    current_ten = ten_live["price"] if both_live else (ten_points[common[-1]] if common else None)
-    previous_time = next((timestamp for timestamp in reversed(common) if timestamp <= now_ms - 5 * 60_000), None)
-    current_spread = (float(current_ten) - float(current_two)) * 100 if current_ten is not None and current_two is not None else None
-    prior_spread = (ten_points[previous_time] - two_points[previous_time]) * 100 if previous_time is not None else None
-    live_spread = bool(current_spread is not None and both_live)
-    return {"spreadBps": round(current_spread, 2) if current_spread is not None else None, "change5mBps": round(current_spread - prior_spread, 2) if current_spread is not None and prior_spread is not None else None, "status": "live" if live_spread else "history" if current_spread is not None else "warming", "label": "Inclinação 10Y−2Y"}
+    def spread(long_symbol: str, short_symbol: str) -> dict[str, Any]:
+        long_points = {point["time"]: point["price"] for point in histories.get(long_symbol, [])}
+        short_points = {point["time"]: point["price"] for point in histories.get(short_symbol, [])}
+        common = sorted(set(long_points) & set(short_points))
+        long_live, short_live = live.get(long_symbol), live.get(short_symbol)
+        both_live = bool(long_live and short_live and now_ms - int(long_live.get("receivedAt", 0)) <= 90_000 and now_ms - int(short_live.get("receivedAt", 0)) <= 90_000)
+        current = (float(long_live["price"]) - float(short_live["price"])) * 100 if both_live else (long_points[common[-1]] - short_points[common[-1]]) * 100 if common else None
+        prior_time = next((timestamp for timestamp in reversed(common) if timestamp <= now_ms - 5 * 60_000), None)
+        prior = (long_points[prior_time] - short_points[prior_time]) * 100 if prior_time is not None else None
+        return {"spreadBps": round(current, 2) if current is not None else None, "change5mBps": round(current - prior, 2) if current is not None and prior is not None else None, "status": "live" if current is not None and both_live else "history" if current is not None else "warming"}
+
+    two_ten = spread("HL:para:10Y", "HL:para:2Y")
+    ten_thirty = spread("HL:para:30Y", "HL:para:10Y")
+    live_count = sum(1 for symbol in ("HL:para:2Y", "HL:para:10Y", "HL:para:30Y") if live.get(symbol) and now_ms - int(live[symbol].get("receivedAt", 0)) <= 90_000)
+    has_history = any(histories.get(symbol) for symbol in ("HL:para:2Y", "HL:para:10Y", "HL:para:30Y"))
+    return {
+        "spreadBps": two_ten["spreadBps"],
+        "change5mBps": two_ten["change5mBps"],
+        "longSpreadBps": ten_thirty["spreadBps"],
+        "longChange5mBps": ten_thirty["change5mBps"],
+        "status": "live" if live_count == 3 else "history" if has_history else "warming",
+        "label": "Inclinação 10Y−2Y e 30Y−10Y",
+    }
