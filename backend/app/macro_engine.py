@@ -51,11 +51,15 @@ def build_macro_snapshot(
     daily_chart_series: list[dict[str, Any]] = []
     oldest_sample: int | None = None
     live_count = 0
+    # Compare every market against the last stored sample before the UTC day
+    # boundary. This gives a consistent close reference across venues.
+    utc_day_start_ms = (now_ms // 86_400_000) * 86_400_000
+    previous_close_target_ms = utc_day_start_ms - 60_000
 
     for symbol, metadata in MACRO_ASSETS.items():
         instrument = instruments.get(symbol)
         if not instrument:
-            measures[metadata["key"]] = {"symbol": symbol, **metadata, "available": False, "price": None, "change5mPct": None, "change30mPct": None, "acceleration5mPp": None, "z5m": None, "windows": {}, "sampleCount": 0, "ageMs": None, "status": "unavailable"}
+            measures[metadata["key"]] = {"symbol": symbol, **metadata, "available": False, "price": None, "dailyChangePct": None, "dailyChangeBps": None, "previousDailyClose": None, "previousDailyCloseTime": None, "change5mPct": None, "change30mPct": None, "acceleration5mPp": None, "z5m": None, "windows": {}, "sampleCount": 0, "ageMs": None, "status": "unavailable"}
             continue
         points = sorted(histories.get(symbol, []), key=lambda point: point["time"])
         sample_count = len(points)
@@ -73,6 +77,9 @@ def build_macro_snapshot(
         first = points[0] if points else None
         latest = points[-1] if points else None
         is_yield = metadata.get("unit") == "yield_pct"
+        previous_daily_close = _near_price(points, previous_close_target_ms, tolerance_ms=60 * 60_000)
+        daily_change_pct = None
+        daily_change_bps = None
         recent = [point for point in points if now_ms - 60 * 60_000 <= point["time"] <= now_ms]
         one_minute_returns = [
             (right["price"] - left["price"]) * 100 if is_yield else (right["price"] / left["price"] - 1) * 100
@@ -86,6 +93,11 @@ def build_macro_snapshot(
             volatility_1m = math.sqrt(variance_1m)
         windows: dict[str, dict[str, float | None | str]] = {}
         latest_is_fresh = bool(latest and now_ms - latest["time"] <= 120_000)
+        if latest and previous_daily_close and latest_is_fresh:
+            if is_yield:
+                daily_change_bps = (latest["price"] - previous_daily_close["price"]) * 100
+            elif previous_daily_close["price"] > 0:
+                daily_change_pct = (latest["price"] / previous_daily_close["price"] - 1) * 100
         for minutes in (1, 5, 15, 30, 60):
             base = _near_price(points, now_ms - minutes * 60_000) if latest_is_fresh else None
             change = None
@@ -118,6 +130,10 @@ def build_macro_snapshot(
         measures[metadata["key"]] = {
             "symbol": symbol, **metadata, "available": True,
             "price": latest["price"] if latest else None,
+            "dailyChangePct": round(daily_change_pct, 4) if daily_change_pct is not None else None,
+            "dailyChangeBps": round(daily_change_bps, 2) if daily_change_bps is not None else None,
+            "previousDailyClose": previous_daily_close["price"] if previous_daily_close else None,
+            "previousDailyCloseTime": previous_daily_close["time"] if previous_daily_close else None,
             "quoteVolume24h": current.get("quoteVolume24h") if current else None,
             "change5mPct": round(change_5m, 4) if change_5m is not None else None,
             "change30mPct": round(change_30m, 4) if change_30m is not None else None,

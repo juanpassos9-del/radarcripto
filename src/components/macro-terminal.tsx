@@ -8,6 +8,7 @@ import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken } from "@/lib/
 type MacroAsset = {
   key: string; symbol: string; label: string; category: string; color: string;
   available: boolean; price: number | null; change5mPct: number | null; change30mPct: number | null;
+  previousDailyClose?: number | null; previousDailyCloseTime?: number | null;
   acceleration5mPp: number | null; change5mBps: number | null; change30mBps: number | null; acceleration5mBps: number | null;
   unit?: string; source?: string; quoteVolume24h?: number | null; z5m: number | null;
   windows?: Record<string, { change: number | null; velocityPerMinute: number | null; z: number | null; direction: string }>;
@@ -19,6 +20,12 @@ type BreadthGroup = { label: string; advancing: number; neutral: number; declini
 type AlertPreferences = { enabled: boolean; regime: boolean; exceptionalMove: boolean; divergence: boolean; multiClass: boolean; zThreshold: number; cooldownMinutes: number };
 type MacroAlert = { id: string; createdAt: number; title: string; detail: string; tone: "positive" | "risk" | "warning" };
 const DEFAULT_ALERT_PREFERENCES: AlertPreferences = { enabled: true, regime: true, exceptionalMove: true, divergence: true, multiClass: true, zThreshold: 2, cooldownMinutes: 10 };
+const WATCHLIST_CATEGORIES: { key: string; label: string }[] = [
+  { key: "fx", label: "MOEDAS & FX" }, { key: "index", label: "ÍNDICES" },
+  { key: "equity", label: "ETFs SINTÉTICOS" }, { key: "bond", label: "TÍTULOS" },
+  { key: "rates", label: "TREASURIES · YIELDS" }, { key: "energy", label: "ENERGIA" },
+  { key: "metal", label: "METAIS" },
+];
 const CHART_SERIES_COLORS: Record<string, string> = {
   DXY: "#45E1D0",
   EURUSD: "#B78CFF",
@@ -369,6 +376,38 @@ export default function MacroTerminal() {
             </div>;
           }) ?? <div className="loading">Aguardando histórico sincronizado…</div>}</div>
           </div><div className="macro-table-foot">Z-score compara o movimento com a volatilidade recente do próprio ativo. Yields: variação em pontos-base; demais ativos: retorno percentual. Aceleração compara os dois blocos de 5 min anteriores. Arraste horizontalmente para ver todas as janelas.</div>
+        </section>
+        <section className="panel macro-watchlist-panel">
+          <div className="panelhead"><span className="paneltitle">WATCHLIST · VARIAÇÃO DIÁRIA</span><span className="macro-tag">VS. FECHAMENTO UTC</span></div>
+          <div className="macro-watchlist-scroll">
+            {WATCHLIST_CATEGORIES.map(category => {
+              const assets = (snapshot?.assets ?? []).filter(asset => asset.category === category.key);
+              if (!assets.length) return null;
+              return <section className="macro-watchlist-group" key={category.key}>
+                <h3>{category.label}<span>{assets.length}</span></h3>
+                {assets.map(asset => {
+                  const price = quotes[asset.symbol] ?? asset.price;
+                  const isYield = asset.unit === "yield_pct";
+                  const change = price != null && asset.previousDailyClose != null
+                    ? isYield ? (price - asset.previousDailyClose) * 100
+                      : asset.previousDailyClose > 0 ? (price / asset.previousDailyClose - 1) * 100 : null
+                    : null;
+                  const unit = isYield ? "bps" : "%";
+                  const digits = isYield ? 2 : 2;
+                  const tooltip = asset.previousDailyCloseTime
+                    ? `Fechamento de referência: ${new Date(asset.previousDailyCloseTime).toLocaleString("pt-BR", { timeZone: "UTC", timeZoneName: "short" })}`
+                    : "Sem amostra próxima ao fechamento UTC anterior";
+                  return <div className="macro-watchlist-row" key={asset.key} title={tooltip}>
+                    <span className="macro-watchlist-name"><i style={{ background: asset.color }}/><strong>{asset.label}</strong><small>{asset.status === "live" ? "AO VIVO" : asset.available ? "HISTÓRICO" : "INDISPONÍVEL"}</small></span>
+                    <strong className="mono">{price == null ? "—" : isYield ? `${price.toFixed(3)}%` : fmtPrice(price, asset.category === "fx" ? 4 : 2)}</strong>
+                    <span className={`mono ${change == null ? "muted" : change >= 0 ? "pos" : "neg"}`}>{change == null ? "sem base" : `${change > 0 ? "+" : ""}${change.toFixed(digits)} ${unit}`}</span>
+                  </div>;
+                })}
+              </section>;
+            })}
+            {!snapshot && <div className="loading">Carregando cotações e histórico…</div>}
+          </div>
+          <div className="macro-watchlist-foot">Variação calculada contra a última amostra antes da virada do dia UTC. Yields em pontos-base. “Sem base” indica histórico insuficiente ou mercado sem cotação recente.</div>
         </section>
       </div>
 
