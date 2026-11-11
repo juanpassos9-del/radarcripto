@@ -48,8 +48,9 @@ export type VolatilityZones = {
 };
 
 export async function getJson<T>(path: string): Promise<T> {
-  const apiOrigin = process.env.NEXT_PUBLIC_MARKET_API_URL?.replace(/\/+$/, "");
-  const url = apiOrigin ? new URL(path, apiOrigin).toString() : path;
+  // Keep REST requests same-origin. Next.js forwards /api/* to the market API,
+  // avoiding browser CORS failures between the web and API Render services.
+  const url = path.startsWith("/") ? path : `/${path}`;
   const response = await authorizedFetch(url);
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json() as Promise<T>;
