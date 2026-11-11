@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Activity, ArrowLeft, ArrowUpRight, Database, Gauge, LogOut, Radio, Waves } from "lucide-react";
-import { fmtPrice, fmtTime, getJson, getMarketWsToken } from "@/lib/market";
+import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken } from "@/lib/market";
 
 type MacroAsset = {
   key: string; symbol: string; label: string; category: string; color: string;
   available: boolean; price: number | null; change5mPct: number | null; change30mPct: number | null;
   acceleration5mPp: number | null; change5mBps: number | null; change30mBps: number | null; acceleration5mBps: number | null;
-  unit?: string; source?: string; z5m: number | null; sampleCount: number; ageMs: number | null; status: string;
+  unit?: string; source?: string; quoteVolume24h?: number | null; z5m: number | null; sampleCount: number; ageMs: number | null; status: string;
 };
 type MacroSeries = { key: string; label: string; color: string; values: { time: number; value: number }[] };
 const CHART_SERIES_COLORS: Record<string, string> = {
@@ -22,6 +22,7 @@ const CHART_SERIES_COLORS: Record<string, string> = {
   COPPER: "#D88B55",
   EWZ: "#55E6A5",
   TLT: "#F36CCF",
+  WBRLUSDC: "#B8E986",
 };
 type MacroSnapshot = {
   asOf: number; source: string; status: string;
@@ -150,7 +151,7 @@ export default function MacroTerminal() {
         </article>
         <article className="macro-metric-card usd"><div className="macro-card-kicker"><Waves size={14}/> PRESSÃO NO DÓLAR</div><strong>{snapshot?.usd.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.usd.strengthScore == null ? "—" : `${snapshot.usd.strengthScore > 0 ? "+" : ""}${snapshot.usd.strengthScore}`}<small>/100</small></div><p>DXY + cesta EUR, GBP, AUD, NZD e JPY</p></article>
         <article className="macro-metric-card oil"><div className="macro-card-kicker"><Activity size={14}/> PRESSÃO DE ENERGIA</div><strong>{snapshot?.oil.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.oil.pressureScore == null ? "—" : `${snapshot.oil.pressureScore > 0 ? "+" : ""}${snapshot.oil.pressureScore}`}<small>/100</small></div><p>Brent & WTI · proxy de custo e inflação</p></article>
-        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 19} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
+        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 20} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
       </section>
 
       <section className="macro-yield-strip" aria-label="Curva de juros dos Treasuries">
@@ -194,7 +195,8 @@ export default function MacroTerminal() {
             const change30m = isYield ? asset.change30mBps : asset.change30mPct;
             const acceleration = isYield ? asset.acceleration5mBps : asset.acceleration5mPp;
             const unit = isYield ? " bps" : "%";
-            return <div className="macro-asset-row" key={asset.key}><span className="macro-asset-label"><i style={{ background: asset.color }}/><strong>{asset.label}</strong><small>{asset.source ?? "BingX USDT-M"} · {asset.status === "live" ? "AO VIVO" : "HISTÓRICO"}</small></span><strong className="mono">{price == null ? "—" : isYield ? `${price.toFixed(3)}%` : fmtPrice(price, asset.category === "fx" ? 4 : 2)}</strong><span className={`mono ${change5m == null ? "muted" : change5m >= 0 ? "pos" : "neg"}`}>{change5m == null ? "—" : `${change5m > 0 ? "+" : ""}${change5m.toFixed(isYield ? 2 : 3)}${unit}`}</span><span className={`mono ${change30m == null ? "muted" : change30m >= 0 ? "pos" : "neg"}`}>{change30m == null ? "—" : `${change30m > 0 ? "+" : ""}${change30m.toFixed(isYield ? 2 : 3)}${unit}`}</span><span className={`mono ${acceleration == null ? "muted" : acceleration >= 0 ? "pos" : "neg"}`}>{acceleration == null ? "AQUECENDO" : `${acceleration > 0 ? "+" : ""}${acceleration.toFixed(isYield ? 2 : 3)}${isYield ? " bps" : " pp"}`}</span></div>;
+            const volume = asset.quoteVolume24h;
+            return <div className="macro-asset-row" key={asset.key}><span className="macro-asset-label"><i style={{ background: asset.color }}/><strong>{asset.label}</strong><small>{asset.source ?? "BingX USDT-M"} · {asset.status === "live" ? "AO VIVO" : "HISTÓRICO"}{volume != null ? ` · Vol. 24h ${fmtCompact(volume)} USDC` : ""}</small></span><strong className="mono">{price == null ? "—" : isYield ? `${price.toFixed(3)}%` : fmtPrice(price, asset.category === "fx" ? 4 : 2)}</strong><span className={`mono ${change5m == null ? "muted" : change5m >= 0 ? "pos" : "neg"}`}>{change5m == null ? "—" : `${change5m > 0 ? "+" : ""}${change5m.toFixed(isYield ? 2 : 3)}${unit}`}</span><span className={`mono ${change30m == null ? "muted" : change30m >= 0 ? "pos" : "neg"}`}>{change30m == null ? "—" : `${change30m > 0 ? "+" : ""}${change30m.toFixed(isYield ? 2 : 3)}${unit}`}</span><span className={`mono ${acceleration == null ? "muted" : acceleration >= 0 ? "pos" : "neg"}`}>{acceleration == null ? "AQUECENDO" : `${acceleration > 0 ? "+" : ""}${acceleration.toFixed(isYield ? 2 : 3)}${isYield ? " bps" : " pp"}`}</span></div>;
           }) ?? <div className="loading">Aguardando histórico sincronizado…</div>}</div>
           <div className="macro-table-foot">Yields Hyperliquid: nível em %, mudanças em pontos-base. Outros ativos: retorno percentual. Aceleração compara os últimos 5 min com os 5 min anteriores.</div>
         </section>

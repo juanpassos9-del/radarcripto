@@ -31,6 +31,7 @@ HYPERLIQUID_ASSETS: dict[str, dict[str, str]] = {
     "HL:para:30Y": {"coin": "para:30Y", "dex": "para", "category": "rates"},
     "HL:xyz:EWZ": {"coin": "xyz:EWZ", "dex": "xyz", "category": "equity"},
     "HL:xyz:TLT": {"coin": "xyz:TLT", "dex": "xyz", "category": "bond"},
+    "HL:spot:WBRL-USDC": {"coin": "", "dex": "", "category": "fx", "market": "spot"},
 }
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -222,9 +223,14 @@ class MarketService:
                     log.exception("TradFi macro sample retention cleanup failed")
             await asyncio.sleep(max(1, 60 - (time.time() % 60)))
 
-    async def publish_tradfi_quote(self, symbol: str, price: float, event_time: int | None = None, source: str = "BingX") -> None:
+    async def publish_tradfi_quote(self, symbol: str, price: float, event_time: int | None = None, source: str = "BingX", quote_volume_24h: float | None = None) -> None:
         received_at = int(time.time() * 1000)
-        self.tradfi_prices[symbol] = {"price": price, "eventTime": event_time or received_at, "receivedAt": received_at, "source": source}
+        quote = {"price": price, "eventTime": event_time or received_at, "receivedAt": received_at, "source": source}
+        previous_quote = self.tradfi_prices.get(symbol, {})
+        volume = quote_volume_24h if quote_volume_24h is not None else previous_quote.get("quoteVolume24h")
+        if volume is not None:
+            quote["quoteVolume24h"] = volume
+        self.tradfi_prices[symbol] = quote
         category = self.tradfi_symbol_categories.get(symbol)
         if not category:
             return
@@ -236,7 +242,7 @@ class MarketService:
             "symbol": symbol, "price": price, "previousClose": previous_close,
             "changePercent": round(change, 4) if change is not None else None,
             "referenceTime": reference.get("candleTime") if previous_close is not None else None, "source": source,
-            "eventTime": event_time, "receivedAt": received_at,
+            "eventTime": event_time, "receivedAt": received_at, "quoteVolume24h": volume,
         }}
         subscribers = tuple(self.tradfi_watchlist_subscribers.get(category, ()))
         if subscribers:
@@ -314,6 +320,42 @@ class MarketService:
         response.raise_for_status()
         return response.json()
 
+    async def refresh_hyperliquid_wbrl_quote(self) -> None:
+        response = await self.hyperliquid_info({"type": "spotMetaAndAssetCtxs"})
+        metadata = response[0] if response else {}
+        contexts = response[1] if len(response) > 1 else []
+        token_names = {int(token["index"]): str(token["name"]) for token in metadata.get("tokens", [])}
+        for pair_position, pair in enumerate(metadata.get("universe", [])):
+            pair_tokens = {token_names.get(int(token_id)) for token_id in pair.get("tokens", [])}
+            if pair_tokens != {"WBRL", "USDC"} or pair.get("isDelisted"):
+                continue
+            context = contexts[pair_position] if pair_position < len(contexts) else {}
+            raw_price = context.get("midPx") or context.get("markPx")
+            if raw_price is None:
+                raise ValueError("Hyperliquid spot WBRL/USDC has no current mid or mark price")
+            symbol = "HL:spot:WBRL-USDC"
+            descriptor = HYPERLIQUID_ASSETS[symbol]
+            descriptor["coin"] = str(pair.get("name") or f"@{pair.get('index', pair_position)}")
+            self.tradfi_symbol_categories[symbol] = descriptor["category"]
+            volume = context.get("dayNtlVlm")
+            await self.publish_tradfi_quote(
+                symbol, float(raw_price), source="Hyperliquid Spot · WBRL/USDC",
+                quote_volume_24h=float(volume) if volume is not None else None,
+            )
+            return
+        self.tradfi_symbol_categories.pop("HL:spot:WBRL-USDC", None)
+        raise LookupError("Hyperliquid spot pair WBRL/USDC is not listed")
+
+    async def refresh_hyperliquid_wbrl_loop(self) -> None:
+        while True:
+            try:
+                await self.refresh_hyperliquid_wbrl_quote()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Hyperliquid WBRL/USDC spot refresh failed")
+            await asyncio.sleep(60)
+
     async def collect_hyperliquid_macro(self) -> None:
         reconnect_delay = 1.0
         while True:
@@ -338,6 +380,11 @@ class MarketService:
                         self.tradfi_symbol_categories[symbol] = descriptor["category"]
                         await self.publish_tradfi_quote(symbol, float(raw_price), source="Hyperliquid HIP-3")
 
+                try:
+                    await self.refresh_hyperliquid_wbrl_quote()
+                except Exception:
+                    log.exception("Hyperliquid WBRL/USDC spot bootstrap failed")
+
                 async with websockets.connect(
                     "wss://api.hyperliquid.xyz/ws", ping_interval=20, ping_timeout=20,
                     open_timeout=12, close_timeout=5, max_size=2**20, max_queue=2048,
@@ -345,22 +392,34 @@ class MarketService:
                     connected_since = time.monotonic()
                     for dex in ("para", "xyz"):
                         await upstream.send(json.dumps({"method": "subscribe", "subscription": {"type": "allMids", "dex": dex}}))
-                    async for raw in upstream:
-                        message = json.loads(raw)
-                        if message.get("channel") != "allMids":
-                            continue
-                        data = message.get("data") or {}
-                        mids = data.get("mids") or {}
-                        dex = str(data.get("dex") or "")
-                        for symbol, descriptor in HYPERLIQUID_ASSETS.items():
-                            if dex and descriptor["dex"] != dex:
+                    await upstream.send(json.dumps({"method": "subscribe", "subscription": {"type": "allMids"}}))
+                    spot_refresh_task = asyncio.create_task(self.refresh_hyperliquid_wbrl_loop())
+                    try:
+                        async for raw in upstream:
+                            message = json.loads(raw)
+                            if message.get("channel") != "allMids":
                                 continue
-                            coin = descriptor["coin"]
-                            mid = mids.get(coin) or mids.get(coin.split(":", 1)[-1])
-                            if mid is None:
-                                continue
-                            self.tradfi_symbol_categories[symbol] = descriptor["category"]
-                            await self.publish_tradfi_quote(symbol, float(mid), source="Hyperliquid HIP-3")
+                            data = message.get("data") or {}
+                            mids = data.get("mids") or {}
+                            dex = str(data.get("dex") or "")
+                            for symbol, descriptor in HYPERLIQUID_ASSETS.items():
+                                is_spot = descriptor.get("market") == "spot"
+                                if is_spot and dex:
+                                    continue
+                                if not is_spot and dex and descriptor["dex"] != dex:
+                                    continue
+                                coin = descriptor["coin"]
+                                if not coin:
+                                    continue
+                                mid = mids.get(coin) or mids.get(coin.split(":", 1)[-1])
+                                if mid is None:
+                                    continue
+                                self.tradfi_symbol_categories[symbol] = descriptor["category"]
+                                source = "Hyperliquid Spot · WBRL/USDC" if is_spot else "Hyperliquid HIP-3"
+                                await self.publish_tradfi_quote(symbol, float(mid), source=source)
+                    finally:
+                        spot_refresh_task.cancel()
+                        await asyncio.gather(spot_refresh_task, return_exceptions=True)
                     reconnect_delay = 1.0 if time.monotonic() - connected_since >= 20 else min(reconnect_delay * 2, 30.0)
             except asyncio.CancelledError:
                 raise

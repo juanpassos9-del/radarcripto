@@ -24,6 +24,7 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "HL:para:30Y": {"key": "UST30Y", "label": "Treasury 30Y · yield", "category": "rates", "color": "#ff9d68", "source": "Hyperliquid · Paragon", "unit": "yield_pct", "riskDirection": "inverse"},
     "HL:xyz:EWZ": {"key": "EWZ", "label": "EWZ sintético", "category": "equity", "color": "#57d69a", "source": "Hyperliquid · XYZ"},
     "HL:xyz:TLT": {"key": "TLT", "label": "TLT sintético", "category": "bond", "color": "#e3bd65", "source": "Hyperliquid · XYZ"},
+    "HL:spot:WBRL-USDC": {"key": "WBRLUSDC", "label": "WBRL/USDC · real empacotado", "category": "fx", "color": "#b8e986", "source": "Hyperliquid Spot", "unit": "USDC por WBRL"},
 }
 
 
@@ -110,6 +111,7 @@ def build_macro_snapshot(
         measures[metadata["key"]] = {
             "symbol": symbol, **metadata, "available": True,
             "price": latest["price"] if latest else None,
+            "quoteVolume24h": current.get("quoteVolume24h") if current else None,
             "change5mPct": round(change_5m, 4) if change_5m is not None else None,
             "change30mPct": round(change_30m, 4) if change_30m is not None else None,
             "acceleration5mPp": round(acceleration, 4) if acceleration is not None else None,
@@ -120,7 +122,7 @@ def build_macro_snapshot(
             "sampleCount": sample_count, "ageMs": age_ms,
             "status": "live" if has_live else "history" if latest else "warming",
         }
-        if metadata["key"] in {"DXY", "EURUSD", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "EWZ", "TLT"} and len(recent) >= 2:
+        if metadata["key"] in {"DXY", "EURUSD", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "EWZ", "TLT", "WBRLUSDC"} and len(recent) >= 2:
             baseline = recent[0]["price"]
             chart_series.append({
                 "key": metadata["key"], "label": metadata["label"], "color": metadata["color"],
@@ -240,7 +242,7 @@ def build_macro_snapshot(
     )[:6]
     usable_samples = sum(1 for item in measures.values() if item.get("sampleCount", 0) > 0)
     return {
-        "asOf": now_ms, "source": "BingX TradFi + Hyperliquid HIP-3 · cotações ao vivo; amostras alinhadas de 1 minuto",
+        "asOf": now_ms, "source": "BingX TradFi + Hyperliquid Spot/HIP-3 · cotações ao vivo; amostras alinhadas de 1 minuto",
         "storage": {"engine": storage, "durable": durable, "retentionDays": 7, "oldestSample": oldest_sample, "trackedAssets": len(MACRO_ASSETS), "assetsWithHistory": usable_samples},
         "status": "live" if live_count else "history" if usable_samples else "warming",
         "regime": {"label": regime, "score": risk_score, "coverage": coverage, "components": components},
@@ -250,7 +252,7 @@ def build_macro_snapshot(
         "yieldCurve": _build_yield_curve(histories, live, now_ms),
         "relationships": relationships, "insights": insights, "chart": {"windowMinutes": 60, "series": chart_series},
         "method": "Score composto de variações de 5 min normalizadas pela volatilidade de 1 min; pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasuries combina a intensidade do movimento dos yields de 2Y/10Y/30Y com a direção conjunta de índices, dólar e cíclicos; yields não definem o regime isoladamente. Risk-On/Off exige ao menos 55% de cobertura, índices disponíveis e confirmação independente por dólar ou cíclicos; sem isso, o estado fica AQUECENDO. Inclinações 10Y−2Y e 30Y−10Y usam pontos-base. Correlações Pearson usam amostras de 1 min sincronizadas em até 30 min.",
-        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Os scores descrevem associação de curto prazo, não causalidade nem recomendação.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT e EWZ são contratos sintéticos perpétuos e podem divergir dos ETFs subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
+        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Os scores descrevem associação de curto prazo, não causalidade nem recomendação.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT e EWZ são contratos sintéticos perpétuos e podem divergir dos ETFs subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
 
 
