@@ -38,6 +38,29 @@ def _near_price(points: list[dict[str, Any]], target_ms: int, tolerance_ms: int 
     return match if match and target_ms - match["time"] <= tolerance_ms else None
 
 
+def _finite_positive(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _clean_price_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned = []
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        price = _finite_positive(point.get("price"))
+        try:
+            timestamp = int(point.get("time"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if price is not None and timestamp > 0:
+            cleaned.append({**point, "time": timestamp, "price": price})
+    return sorted(cleaned, key=lambda point: point["time"])
+
+
 def build_macro_snapshot(
     catalog: list[dict[str, Any]],
     histories: dict[str, list[dict[str, Any]]],
@@ -48,6 +71,21 @@ def build_macro_snapshot(
     daily_closes: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     instruments = {item["symbol"]: item for item in catalog}
+    clean_histories = {symbol: _clean_price_points(points) for symbol, points in histories.items()}
+    clean_live: dict[str, dict[str, Any]] = {}
+    for symbol, quote in live.items():
+        if not isinstance(quote, dict):
+            continue
+        price = _finite_positive(quote.get("price"))
+        try:
+            received_at = int(quote.get("receivedAt", 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if price is not None and received_at > 0:
+            sanitized_quote = {**quote, "price": price, "receivedAt": received_at}
+            if "quoteVolume24h" in sanitized_quote:
+                sanitized_quote["quoteVolume24h"] = _finite_positive(sanitized_quote["quoteVolume24h"])
+            clean_live[symbol] = sanitized_quote
     measures: dict[str, dict[str, Any]] = {}
     chart_series: list[dict[str, Any]] = []
     daily_chart_series: list[dict[str, Any]] = []
@@ -63,10 +101,10 @@ def build_macro_snapshot(
         if not instrument:
             measures[metadata["key"]] = {"symbol": symbol, **metadata, "available": False, "price": None, "dailyChangePct": None, "dailyChangeBps": None, "previousDailyClose": None, "previousDailyCloseTime": None, "dailyCloseSource": None, "change5mPct": None, "change30mPct": None, "acceleration5mPp": None, "z5m": None, "windows": {}, "sampleCount": 0, "ageMs": None, "status": "unavailable"}
             continue
-        points = sorted(histories.get(symbol, []), key=lambda point: point["time"])
+        points = clean_histories.get(symbol, [])
         sample_count = len(points)
         # Add the latest feed value for the now leg; the baselines remain aligned 1-minute samples.
-        current = live.get(symbol)
+        current = clean_live.get(symbol)
         has_live = bool(current and now_ms - int(current.get("receivedAt", 0)) <= 90_000)
         if has_live:
             live_count += 1
@@ -82,10 +120,15 @@ def build_macro_snapshot(
         daily_reference = (daily_closes or {}).get(symbol)
         previous_daily_close = None
         daily_close_source = None
-        if daily_reference and daily_reference.get("close") is not None:
+        daily_close_price = _finite_positive(daily_reference.get("close")) if daily_reference else None
+        if daily_close_price is not None:
+            try:
+                close_time = int(daily_reference.get("candleTime", previous_close_target_ms // 1000)) * 1000
+            except (TypeError, ValueError, OverflowError):
+                close_time = previous_close_target_ms
             previous_daily_close = {
-                "price": float(daily_reference["close"]),
-                "time": int(daily_reference.get("candleTime", previous_close_target_ms // 1000)) * 1000,
+                "price": daily_close_price,
+                "time": close_time,
             }
             daily_close_source = "daily_candle"
         else:
@@ -344,7 +387,7 @@ def build_macro_snapshot(
         "usd": {"state": usd_state, "strengthScore": round(usd_strength * 100) if usd_strength is not None else None},
         "oil": {"state": oil_state, "pressureScore": round(oil_pressure * 100) if oil_pressure is not None else None},
         "assets": list(measures.values()), "accelerators": accelerators, "outlook": outlook,
-        "yieldCurve": _build_yield_curve(histories, live, now_ms),
+        "yieldCurve": _build_yield_curve(clean_histories, clean_live, now_ms),
         # Preserve the removed matrix response shape during independent web/API deploys.
         # Older browser bundles can render empty cells instead of crashing on missing fields.
         "relationships": [],
