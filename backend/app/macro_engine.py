@@ -11,6 +11,7 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "NCFXAUD2USD-USDT": {"key": "AUDUSD", "label": "AUD/USD", "category": "fx", "color": "#48d69a"},
     "NCFXNZD2USD-USDT": {"key": "NZDUSD", "label": "NZD/USD", "category": "fx", "color": "#56a9ff"},
     "NCFXUSD2JPY-USDT": {"key": "USDJPY", "label": "USD/JPY", "category": "fx", "color": "#ff7391"},
+    "NCFXAUD2JPY-USDT": {"key": "AUDJPY", "label": "AUD/JPY", "category": "fx", "color": "#71d7a5"},
     "NCSISP5002USD-USDT": {"key": "SP500", "label": "S&P 500", "category": "index", "color": "#ffca61"},
     "NCSINASDAQ1002USD-USDT": {"key": "NASDAQ100", "label": "NASDAQ 100", "category": "index", "color": "#63b6ff"},
     "NCSIRUSSELL20002USD-USDT": {"key": "RUSSELL2000", "label": "Russell 2000", "category": "index", "color": "#cf87ff"},
@@ -146,7 +147,7 @@ def build_macro_snapshot(
             "sampleCount": sample_count, "ageMs": age_ms,
             "status": "live" if has_live else "history" if latest else "warming",
         }
-        if metadata["key"] in {"DXY", "EURUSD", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "EWZ", "DRAM", "SOXL"} and len(recent) >= 2:
+        if metadata["key"] in {"DXY", "EURUSD", "USDJPY", "AUDJPY", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "EWZ", "DRAM", "SOXL"} and len(recent) >= 2:
             baseline = recent[0]["price"]
             chart_series.append({
                 "key": metadata["key"], "label": metadata["label"], "color": metadata["color"],
@@ -180,23 +181,27 @@ def build_macro_snapshot(
         signal("DXY"), signal("USDJPY"), signal("EURUSD", True), signal("GBPUSD", True),
         signal("AUDUSD", True), signal("NZDUSD", True),
     ])
+    # AUD/JPY is a carry-sensitive FX proxy: strength can align with risk-on,
+    # but it is price behavior rather than evidence of measured capital flows.
+    carry_fx = signal("AUDJPY")
     equity_breadth = mean_available([signal("SP500"), signal("NASDAQ100"), signal("RUSSELL2000"), signal("DOW")])
     cyclicals = mean_available([signal("COPPER"), signal("GOLD", True)])
     # Keep Treasury yield direction separate from its risk interpretation. Rates
     # corroborate the cross-asset backdrop; rising yields alone are not risk-off.
     yield_move = mean_available([signal("UST2Y", True), signal("UST10Y", True), signal("UST30Y", True)])
-    risk_context = mean_available([equity_breadth, -usd_strength if usd_strength is not None else None, cyclicals])
+    risk_context = mean_available([equity_breadth, -usd_strength if usd_strength is not None else None, cyclicals, carry_fx])
     rates_confirmation = risk_context * abs(yield_move) if risk_context is not None and yield_move is not None else None
     components = [
-        {"key": "equities", "label": "Índices", "value": round(equity_breadth * 100) if equity_breadth is not None else None, "weight": 0.40},
-        {"key": "usd", "label": "Dólar", "value": round(-usd_strength * 100) if usd_strength is not None else None, "weight": 0.30},
+        {"key": "equities", "label": "Índices", "value": round(equity_breadth * 100) if equity_breadth is not None else None, "weight": 0.35},
+        {"key": "usd", "label": "Dólar", "value": round(-usd_strength * 100) if usd_strength is not None else None, "weight": 0.25},
         {"key": "cyclicals", "label": "Cíclicos / ouro", "value": round(cyclicals * 100) if cyclicals is not None else None, "weight": 0.15},
+        {"key": "carry_fx", "label": "FX de carry · AUD/JPY", "value": round(carry_fx * 100) if carry_fx is not None else None, "weight": 0.10},
         {"key": "rates", "label": "Treasuries · contexto", "value": round(rates_confirmation * 100) if rates_confirmation is not None else None, "weight": 0.15},
     ]
     active_components = [item for item in components if item["value"] is not None]
     risk_score = round(sum(item["value"] * item["weight"] for item in active_components) / sum(item["weight"] for item in active_components)) if active_components else None
     coverage = round(sum(item["weight"] for item in active_components) * 100)
-    cross_asset_confirmation = equity_breadth is not None and (usd_strength is not None or cyclicals is not None)
+    cross_asset_confirmation = equity_breadth is not None and (usd_strength is not None or cyclicals is not None or carry_fx is not None)
     sufficient_coverage = coverage >= 55
     regime = "RISK-ON" if sufficient_coverage and cross_asset_confirmation and risk_score is not None and risk_score >= 20 else "RISK-OFF" if sufficient_coverage and cross_asset_confirmation and risk_score is not None and risk_score <= -20 else "MISTO" if sufficient_coverage and cross_asset_confirmation and risk_score is not None else "AQUECENDO"
     regime_qualified = sufficient_coverage and cross_asset_confirmation and risk_score is not None
@@ -226,6 +231,7 @@ def build_macro_snapshot(
         "Índices": equity_breadth,
         "USD": -usd_strength if usd_strength is not None else None,
         "Cíclicos / ouro": cyclicals,
+        "FX de carry · AUD/JPY": carry_fx,
     }
     on_classes = [name for name, value in risk_votes.items() if value is not None and value >= 0.2]
     off_classes = [name for name, value in risk_votes.items() if value is not None and value <= -0.2]
@@ -288,11 +294,11 @@ def build_macro_snapshot(
 
     insights: list[dict[str, str]] = []
     if usd_state == "USD COMPRADO":
-        insights.append({"tone": "risk", "title": "Pressão compradora no dólar", "detail": "DXY e pares cambiais disponíveis apontam fortalecimento relativo do USD; índices e commodities cotadas em dólar podem sentir pressão."})
+        insights.append({"tone": "risk", "title": "Pressão compradora no dólar", "detail": "DXY e pares cambiais disponíveis — incluindo USD/JPY — apontam fortalecimento relativo do USD; índices e commodities cotadas em dólar podem sentir pressão."})
     elif usd_state == "USD VENDIDO":
         insights.append({"tone": "positive", "title": "Pressão vendedora no dólar", "detail": "A cesta cambial sugere enfraquecimento relativo do USD; EUR/USD e ativos cotados em dólar podem encontrar suporte."})
     if regime == "RISK-ON":
-        insights.append({"tone": "positive", "title": "Confluência pró-risco", "detail": "Índices e proxies cambiais/cíclicos disponíveis favorecem um viés de risco positivo no horizonte curto."})
+        insights.append({"tone": "positive", "title": "Confluência pró-risco", "detail": "Índices, AUD/JPY e proxies cíclicos disponíveis favorecem um viés de risco positivo no horizonte curto."})
     elif regime == "RISK-OFF":
         insights.append({"tone": "risk", "title": "Confluência defensiva", "detail": "A cesta curta favorece redução de risco; monitore índices, força do dólar e ouro em conjunto."})
     if oil_state == "ACELERANDO":
@@ -333,8 +339,8 @@ def build_macro_snapshot(
         "correlationShifts": [],
         "divergences": divergences, "insights": insights,
         "chart": {"windowMinutes": 60, "series": chart_series, "dailyWindowHours": 24, "dailySeries": daily_chart_series},
-        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 40%, dólar 30%, cíclicos/ouro 15% e Treasuries 15%. O fator Treasury corrobora o contexto cruzado e yields sozinhos não definem regime. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
-        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
+        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 35%, dólar 25%, cíclicos/ouro 15%, FX de carry AUD/JPY 10% e Treasuries 15%. USD/JPY compõe a cesta de força do dólar; AUD/JPY é um proxy cambial pró-cíclico. O fator Treasury corrobora o contexto cruzado e yields sozinhos não definem regime. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
+        "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes. AUD/JPY é apenas um proxy de carry/risk appetite e pode divergir do regime observado em outros mercados.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
 
 
