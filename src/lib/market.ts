@@ -48,9 +48,10 @@ export type VolatilityZones = {
 };
 
 export async function getJson<T>(path: string): Promise<T> {
-  // Keep REST requests same-origin. Next.js forwards /api/* to the market API,
-  // avoiding browser CORS failures between the web and API Render services.
-  const url = path.startsWith("/") ? path : `/${path}`;
+  // Keep REST requests same-origin. The Next.js runtime proxy forwards them
+  // to the market API, avoiding browser CORS failures between Render services.
+  const apiPath = path.startsWith("/api/") ? path.slice("/api/".length) : path.replace(/^\/+/, "");
+  const url = `/api/market/${apiPath}`;
   const response = await authorizedFetch(url);
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json() as Promise<T>;
