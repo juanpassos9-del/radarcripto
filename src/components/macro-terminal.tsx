@@ -23,7 +23,7 @@ type MacroSnapshot = {
   insights: { tone: string; title: string; detail: string }[];
   outlook: { group: string; bias: string; title: string; detail: string }[];
   chart: { windowMinutes: number; series: MacroSeries[] };
-  yieldCurve: { spreadBps: number | null; change5mBps: number | null; longSpreadBps: number | null; longChange5mBps: number | null; status: string; label: string };
+  yieldCurve?: { spreadBps: number | null; change5mBps: number | null; longSpreadBps?: number | null; longChange5mBps?: number | null; status?: string; label?: string };
   method: string; limitations: string[];
 };
 
@@ -67,7 +67,7 @@ export default function MacroTerminal() {
     let refreshToken = false;
     const refresh = () => getJson<MacroSnapshot>("/api/tradfi/macro")
       .then(data => { if (active) { setSnapshot(data); setError(""); } })
-      .catch(() => { if (active) setError("Não foi possível carregar a leitura macro. A API ou o histórico pode estar aquecendo."); });
+      .catch((cause: unknown) => { if (active) setError(cause instanceof Error ? `Falha ao carregar o Macro Quant: ${cause.message}` : "Falha ao carregar o Macro Quant. Tente novamente."); });
     const connect = async () => {
       try {
         const token = await getMarketWsToken(refreshToken);
@@ -126,7 +126,8 @@ export default function MacroTerminal() {
       <div className="topright"><div className="live"><span className={`dot ${connected ? "" : "tradfi-offline"}`}/>{connected ? "MACRO · STREAM API AO VIVO" : "RECONECTANDO API"}</div><button className="iconbtn" title="Sair" aria-label="Sair" onClick={() => { window.location.href = "/api/auth/logout"; }}><LogOut size={16}/></button></div>
     </header>
     <div className="wrap macro-wrap">
-      <div className="macro-heading"><div><div className="eyebrow">NEXUS · REGIME & FLUXO MACRO</div><h1>Macro Quant <span>01</span></h1><p>Leitura quantitativa de moedas, índices, commodities, juros e ETFs sintéticos.</p></div><div className="macro-clock"><Radio size={13}/><span>{snapshot ? `ATUALIZADO ${fmtTime(snapshot.asOf)}` : "INICIANDO FEED"}</span><i className={connected ? "on" : ""}/></div></div>
+      <div className="macro-heading"><div><div className="eyebrow">NEXUS · REGIME & FLUXO MACRO</div><h1>Macro Quant <span>01</span></h1><p>Leitura quantitativa de moedas, índices, commodities, juros e ETFs sintéticos.</p></div><div className="macro-clock"><Radio size={13}/><span>{snapshot ? `ATUALIZADO ${fmtTime(snapshot.asOf)}` : error ? "API INDISPONÍVEL" : "INICIANDO FEED"}</span><i className={connected ? "on" : ""}/></div></div>
+      {error && <div className="dataerror macro-error-banner" role="alert"><span>{error}</span>{!snapshot && <button onClick={() => window.location.reload()}>Tentar novamente</button>}</div>}
 
       <section className="macro-overview">
         <article className={`macro-regime-card ${regimeClass}`}>
@@ -148,8 +149,8 @@ export default function MacroTerminal() {
           const fallback = key === "UST2Y" ? "Treasury 2Y · yield" : key === "UST10Y" ? "Treasury 10Y · yield" : "Treasury 30Y · yield";
           return <article key={key}><small>{asset?.label ?? fallback}</small><strong>{asset?.price == null ? "AQUECENDO" : `${asset.price.toFixed(3)}%`}</strong><span className={movement == null ? "muted" : movement >= 0 ? "neg" : "pos"}>{movement == null ? "—" : `${movement > 0 ? "+" : ""}${movement.toFixed(2)} bps · 5 min`}</span></article>;
         })}
-        <article><small>INCLINAÇÃO · 10Y−2Y</small><strong>{snapshot?.yieldCurve.spreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.spreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve.change5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.change5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.change5mBps.toFixed(2)} bps · 5 min`}</span></article>
-        <article><small>INCLINAÇÃO LONGA · 30Y−10Y</small><strong>{snapshot?.yieldCurve.longSpreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.longSpreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve.longChange5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.longChange5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.longChange5mBps.toFixed(2)} bps · 5 min`}</span></article>
+        <article><small>INCLINAÇÃO · 10Y−2Y</small><strong>{snapshot?.yieldCurve?.spreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.spreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve?.change5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.change5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.change5mBps.toFixed(2)} bps · 5 min`}</span></article>
+        <article><small>INCLINAÇÃO LONGA · 30Y−10Y</small><strong>{snapshot?.yieldCurve?.longSpreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.longSpreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve?.longChange5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.longChange5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.longChange5mBps.toFixed(2)} bps · 5 min`}</span></article>
       </section>
 
       <div className="macro-grid">
@@ -197,7 +198,6 @@ export default function MacroTerminal() {
         <button onClick={() => setShowMethod(value => !value)}><Activity size={13}/>{showMethod ? "OCULTAR MÉTODO E LIMITAÇÕES" : "MÉTODO, COBERTURA E LIMITAÇÕES"}<span>{snapshot?.storage.engine.toUpperCase()} · {snapshot?.storage.durable ? "RETENÇÃO DURÁVEL" : "ARMAZENAMENTO NÃO DURÁVEL"}</span></button>
         {showMethod && <div className="macro-method-content"><p>{snapshot?.method}</p><ul>{snapshot?.limitations.map(item => <li key={item}>{item}</li>)}</ul><p>Histórico: {snapshot?.storage.oldestSample ? `desde ${fmtTime(snapshot.storage.oldestSample)}` : "a coleta está começando"}. Fonte: {snapshot?.source}.</p></div>}
       </section>
-      {error && <div className="dataerror">{error}</div>}
       <footer className="tradfi-footer"><Link href="/tradfi">← Índices, Forex & Commodities</Link><span>MACRO QUANT · MODELO OBSERVACIONAL · SEM ORDENS</span></footer>
     </div>
   </main>;

@@ -109,7 +109,7 @@ class MarketService:
         self.tradfi_seed_complete = False
         self.tradfi_prices: dict[str, dict[str, Any]] = {}
         self.tradfi_samples: dict[str, deque[dict[str, Any]]] = {}
-        self.tradfi_symbol_categories: dict[str, str] = {}
+        self.tradfi_symbol_categories: dict[str, str] = {symbol: descriptor["category"] for symbol, descriptor in HYPERLIQUID_ASSETS.items()}
         self.tradfi_watchlist_subscribers: dict[str, set[WebSocket]] = {"indices": set(), "forex": set(), "commodities": set()}
         self.tradfi_macro_subscribers: set[WebSocket] = set()
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
@@ -1375,22 +1375,12 @@ async def tradfi_watchlist(category: str = Query("indices")):
 
 @app.get("/api/tradfi/macro")
 async def tradfi_macro():
-    catalog = await bingx_tradfi_catalog()
+    # The macro asset universe is static and already declared in the engine. Avoid waiting
+    # on the external BingX catalogue (or historical seeding) before responding to the UI.
+    catalog = [{"symbol": symbol, "category": metadata["category"]} for symbol, metadata in MACRO_ASSETS.items()]
     service.ensure_tradfi_ticker_stream()
-    if service.tradfi_seed_task:
-        try:
-            await asyncio.wait_for(asyncio.shield(service.tradfi_seed_task), timeout=12)
-        except asyncio.TimeoutError:
-            log.info("Macro history seed continues in background")
-        except Exception:
-            log.exception("Macro history seed failed")
     now_ms = int(time.time() * 1000)
-    selected = [item for item in catalog if item["symbol"] in MACRO_ASSETS]
-    selected.extend(
-        {"symbol": symbol, "category": descriptor["category"]}
-        for symbol, descriptor in HYPERLIQUID_ASSETS.items()
-        if descriptor["category"] == service.tradfi_symbol_categories.get(symbol)
-    )
+    selected = catalog
     symbols = [item["symbol"] for item in selected]
     history: dict[str, list[dict[str, Any]]] = {}
     if service.flow_store:
