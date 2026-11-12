@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { Activity, ArrowLeft, ArrowUpRight, Bell, BellRing, Database, Gauge, LogOut, Radio, Waves } from "lucide-react";
 import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken } from "@/lib/market";
 
@@ -59,10 +59,23 @@ type MacroSnapshot = {
   method: string; limitations: string[];
 };
 
-function MacroLineChart({ series, label, emptyMessage }: { series: MacroSeries[]; label: string; emptyMessage: string }) {
+function MacroLineChart({ series, label, emptyMessage, hiddenKeys, onToggleKey }: {
+  series: MacroSeries[]; label: string; emptyMessage: string;
+  hiddenKeys: Record<string, boolean>; onToggleKey: (key: string) => void;
+}) {
   const width = 1000, height = 330, left = 46, right = 18, top = 18, bottom = 26;
-  const all = series.flatMap(item => item.values);
-  if (all.length < 4) return <div className="macro-chart-empty">{emptyMessage}</div>;
+  const visibleSeries = series.filter(item => !hiddenKeys[item.key]);
+  const all = visibleSeries.flatMap(item => item.values);
+  const legend = <div className="macro-legend">{series.map(item => {
+    const visible = !hiddenKeys[item.key];
+    return <button type="button" key={item.key} aria-pressed={visible} title={`${visible ? "Ocultar" : "Mostrar"} ${item.label}`} onClick={() => onToggleKey(item.key)}>
+      <i style={{ background: item.color, boxShadow: visible ? `0 0 8px ${item.color}` : "none" }}/>{item.label}
+    </button>;
+  })}</div>;
+  if (all.length < 4) return <div className="macro-chart-wrap">
+    <div className="macro-chart-empty">{visibleSeries.length ? emptyMessage : "Todos os ativos estão ocultos. Clique nos nomes da legenda para reexibi-los."}</div>
+    {legend}
+  </div>;
   const times = all.map(point => point.time), values = all.map(point => point.value);
   const minTime = Math.min(...times), maxTime = Math.max(...times);
   const minValue = Math.min(0, ...values), maxValue = Math.max(0, ...values);
@@ -78,10 +91,10 @@ function MacroLineChart({ series, label, emptyMessage }: { series: MacroSeries[]
     <svg className="macro-line-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`Variação percentual normalizada dos ativos: ${label}`}>
       {ticks.map((tick, index) => <g key={index}><line x1={left} x2={width - right} y1={y(tick)} y2={y(tick)} className={Math.abs(tick) < 1e-6 ? "macro-zero-line" : "macro-grid-line"}/><text x={left - 8} y={y(tick) + 3} textAnchor="end" className="macro-axis-label">{tick.toFixed(2)}%</text></g>)}
       <line x1={left} x2={left} y1={top} y2={height - bottom} className="macro-grid-line"/>
-      {series.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
+      {visibleSeries.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
       <text x={left} y={height - 5} className="macro-axis-label">{formatTime(minTime)}</text><text x={width - right} y={height - 5} textAnchor="end" className="macro-axis-label">{formatTime(maxTime)}</text>
     </svg>
-    <div className="macro-legend">{series.map(item => <span key={item.key}><i style={{ background: item.color, boxShadow: `0 0 8px ${item.color}` }}/>{item.label}</span>)}</div>
+    {legend}
   </div>;
 }
 
@@ -121,6 +134,8 @@ function MarketRotationRadar({ points, category, onCategoryChange }: { points: R
 export default function MacroTerminal() {
   const [snapshot, setSnapshot] = useState<MacroSnapshot | null>(null);
   const [quotes, setQuotes] = useState<Record<string, number>>({});
+  const [hiddenIntradayKeys, setHiddenIntradayKeys] = useState<Record<string, boolean>>({});
+  const [hiddenDailyKeys, setHiddenDailyKeys] = useState<Record<string, boolean>>({});
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
   const [showMethod, setShowMethod] = useState(false);
@@ -254,6 +269,9 @@ export default function MacroTerminal() {
     setNotificationStatus(status);
   };
   const updateAlertPreferences = (patch: Partial<AlertPreferences>) => setAlertPreferences(current => ({ ...current, ...patch }));
+  const toggleChartKey = (setHidden: Dispatch<SetStateAction<Record<string, boolean>>>) => (key: string) => {
+    setHidden(current => current[key] ? Object.fromEntries(Object.entries(current).filter(([itemKey]) => itemKey !== key)) : { ...current, [key]: true });
+  };
 
   const chartSeries = useMemo(() => (snapshot?.chart.series ?? []).map(series => {
     const color = CHART_SERIES_COLORS[series.key] ?? series.color;
@@ -333,13 +351,13 @@ export default function MacroTerminal() {
         <section className="panel macro-chart-panel">
           <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · INTRADIA</span><span className="macro-tag"><i/> ÚLTIMOS 60 MIN</span></div>
           <p className="macro-chart-subtitle">Cada linha começa em 0% no início da janela. Treasuries mostram variação relativa do yield, não pontos-base.</p>
-          <MacroLineChart series={chartSeries} label="últimos 60 minutos" emptyMessage="Aguardando amostras recentes sincronizadas para desenhar o mapa intradia."/>
+          <MacroLineChart series={chartSeries} label="últimos 60 minutos" emptyMessage="Aguardando amostras recentes sincronizadas para desenhar o mapa intradia." hiddenKeys={hiddenIntradayKeys} onToggleKey={toggleChartKey(setHiddenIntradayKeys)}/>
           <div className="macro-chart-foot"><span>HORÁRIO SÃO PAULO · {snapshot ? fmtTime(snapshot.asOf) : "—"}</span><span>{snapshot?.chart.series.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
         <section className="panel macro-chart-panel">
           <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · DIÁRIO</span><span className="macro-tag"><i/> ÚLTIMAS 24 HORAS</span></div>
           <p className="macro-chart-subtitle">Rebase em 0% há aproximadamente 24h. Treasuries mostram variação relativa do yield, não pontos-base; séries entram com histórico e cotação recente.</p>
-          <MacroLineChart series={dailyChartSeries} label="últimas 24 horas" emptyMessage="Aquecendo histórico diário. Cada ativo entra após acumular uma base próxima de 24 horas."/>
+          <MacroLineChart series={dailyChartSeries} label="últimas 24 horas" emptyMessage="Aquecendo histórico diário. Cada ativo entra após acumular uma base próxima de 24 horas." hiddenKeys={hiddenDailyKeys} onToggleKey={toggleChartKey(setHiddenDailyKeys)}/>
           <div className="macro-chart-foot"><span>BASE MÍNIMA · 23H DE HISTÓRICO</span><span>{snapshot?.chart.dailySeries?.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
       </div>

@@ -70,7 +70,10 @@
 .macro-zero-line { stroke:#3a5360; stroke-width:1; stroke-dasharray:4 4; }
 .macro-axis-label { fill:#657587; font:10px 'DM Mono',monospace; }
 .macro-legend { display:flex; flex-wrap:wrap; justify-content:center; gap:8px 16px; padding:4px 8px 10px; }
-.macro-legend span { display:flex; align-items:center; gap:6px; color:#a8b4c2; font:9px 'DM Mono',monospace; }
+.macro-legend button { display:flex; align-items:center; gap:6px; padding:3px 4px; border:1px solid transparent; border-radius:3px; background:transparent; color:#a8b4c2; font:9px 'DM Mono',monospace; cursor:pointer; transition:opacity .15s,border-color .15s,background .15s; }
+.macro-legend button:hover { border-color:#354553; background:#121b23; }
+.macro-legend button:focus-visible { outline:1px solid #52d6d0; outline-offset:1px; }
+.macro-legend button[aria-pressed="false"] { opacity:.4; text-decoration:line-through; }
 .macro-legend i { width:24px; height:4px; border:1px solid #ffffff24; border-radius:3px; flex:0 0 24px; }
 .macro-chart-empty { height:260px; display:grid; place-items:center; padding:20px; color:#8190a0; text-align:center; font-size:10px; }
 .macro-chart-foot { display:flex; justify-content:space-between; border-top:1px solid #202833; padding:8px 12px; color:#6f7e8e; font:8px 'DM Mono',monospace; }
@@ -206,7 +209,7 @@
   .macro-chart-subtitle { font-size:8px; line-height:1.45; }
   .macro-chart-wrap { padding-inline:4px; }
   .macro-legend { gap:7px 10px; }
-  .macro-legend span { font-size:8px; }
+  .macro-legend button { font-size:8px; }
   .macro-chart-foot { font-size:7px; }
   .macro-table-head,.macro-asset-row { grid-template-columns:minmax(160px,1.5fr) 70px repeat(4,62px) 58px 86px; min-width:900px; gap:4px; padding:8px 7px; }
   .macro-table-head { font-size:6px; letter-spacing:0; }
