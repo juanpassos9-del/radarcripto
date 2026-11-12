@@ -36,6 +36,9 @@ const CHART_SERIES_COLORS: Record<string, string> = {
   WTI: "#FF4F91",
   GOLD: "#FFE66D",
   COPPER: "#E8753A",
+  UST2Y: "#B9EEFF",
+  UST10Y: "#D59BFF",
+  UST30Y: "#FF9C62",
   EWZ: "#20C98A",
   DRAM: "#E18BEA",
   SOXL: "#E6EDF5",
@@ -329,13 +332,13 @@ export default function MacroTerminal() {
       <div className="macro-price-maps">
         <section className="panel macro-chart-panel">
           <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · INTRADIA</span><span className="macro-tag"><i/> ÚLTIMOS 60 MIN</span></div>
-          <p className="macro-chart-subtitle">Cada linha começa em 0% no início da janela. A escala comum evidencia divergência e confluência entre os ativos.</p>
+          <p className="macro-chart-subtitle">Cada linha começa em 0% no início da janela. Treasuries mostram variação relativa do yield, não pontos-base.</p>
           <MacroLineChart series={chartSeries} label="últimos 60 minutos" emptyMessage="Aguardando amostras recentes sincronizadas para desenhar o mapa intradia."/>
           <div className="macro-chart-foot"><span>HORÁRIO SÃO PAULO · {snapshot ? fmtTime(snapshot.asOf) : "—"}</span><span>{snapshot?.chart.series.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
         <section className="panel macro-chart-panel">
           <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · DIÁRIO</span><span className="macro-tag"><i/> ÚLTIMAS 24 HORAS</span></div>
-          <p className="macro-chart-subtitle">Rebase em 0% no preço de aproximadamente 24h atrás. O ativo aparece apenas com histórico próximo do período e cotação recente.</p>
+          <p className="macro-chart-subtitle">Rebase em 0% há aproximadamente 24h. Treasuries mostram variação relativa do yield, não pontos-base; séries entram com histórico e cotação recente.</p>
           <MacroLineChart series={dailyChartSeries} label="últimas 24 horas" emptyMessage="Aquecendo histórico diário. Cada ativo entra após acumular uma base próxima de 24 horas."/>
           <div className="macro-chart-foot"><span>BASE MÍNIMA · 23H DE HISTÓRICO</span><span>{snapshot?.chart.dailySeries?.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
