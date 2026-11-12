@@ -331,12 +331,6 @@ def build_macro_snapshot(
     curve_change = yield_curve.get("change5mBps")
     curve_state = "SPREAD 10Y−2Y ABRINDO" if curve_change is not None and curve_change >= 0.2 else "SPREAD 10Y−2Y FECHANDO" if curve_change is not None and curve_change <= -0.2 else "SEM MUDANÇA CLARA" if curve_change is not None else "AQUECENDO"
     confirmations = [
-        {"key": "vix", "label": "Volatilidade implícita · VIX", "state": "INDISPONÍVEL",
-         "status": "unavailable", "value": None, "z5m": None,
-         "detail": "Não há VIX ativo nas fontes atuais: o contrato xyz:VIX da Hyperliquid está delistado e sem cotações; BingX não lista contrato VIX."},
-        {"key": "usdcnh", "label": "Câmbio · USD/CNH", "state": "INDISPONÍVEL",
-         "status": "unavailable", "value": None, "z5m": None,
-         "detail": "USDCNH não apareceu no catálogo público de contratos da BingX nem nos mercados Hyperliquid consultados."},
         {"key": "usdchf", "label": "Câmbio defensivo · USD/CHF", "state": usd_chf_state,
          "status": usd_chf.get("status", "warming"), "value": usd_chf.get("price"), "z5m": usd_chf_z,
          "detail": "Par perpétuo TradFi da BingX. Queda pode indicar CHF mais forte que USD; não confirma Risk-Off sozinho."},

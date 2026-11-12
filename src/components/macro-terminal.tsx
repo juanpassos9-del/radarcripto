@@ -347,14 +347,19 @@ export default function MacroTerminal() {
         <div className="panelhead"><span className="paneltitle">CONFIRMAÇÕES COMPLEMENTARES · FORA DO SCORE PRINCIPAL</span><span className="macro-tag">CONTEXTO, NÃO VOTO DIRECIONAL</span></div>
         <div className="macro-confirmation-grid">{snapshot?.confirmations?.map(item => {
           const tone = item.status === "unavailable" ? "warning" : item.key === "usdchf" ? "neutral" : /SUBINDO|SUPERA|ACELERANDO/.test(item.state) ? "negative" : /ALIVIANDO/.test(item.state) ? "positive" : "neutral";
-          const value = item.key === "vix" ? item.value == null ? "—" : `nível ${item.value.toFixed(2)}${item.z5m == null ? "" : ` · Z5m ${item.z5m > 0 ? "+" : ""}${item.z5m}`}`
-            : item.key === "usdchf" ? item.z5m == null ? "Z5m —" : `Z5m ${item.z5m > 0 ? "+" : ""}${item.z5m}`
-            : item.key === "energy" ? item.value == null ? "—" : `pressão ${item.value > 0 ? "+" : ""}${item.value}/100`
-            : item.key === "rates" ? item.value == null ? "inclinação —" : `10Y−2Y ${item.value > 0 ? "+" : ""}${item.value.toFixed(2)} bps · Δ5m ${snapshot?.yieldCurve?.change5mBps == null ? "—" : `${snapshot.yieldCurve.change5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.change5mBps.toFixed(2)}`} · 30Y−10Y ${snapshot?.yieldCurve?.longSpreadBps == null ? "—" : `${snapshot.yieldCurve.longSpreadBps > 0 ? "+" : ""}${snapshot.yieldCurve.longSpreadBps.toFixed(2)}`}`
-            : "sem contrato disponível";
+          let value = "—";
+          if (item.key === "usdchf") value = item.z5m == null ? "Z5m —" : `Z5m ${item.z5m > 0 ? "+" : ""}${item.z5m}`;
+          if (item.key === "energy" && item.value != null) value = `pressão ${item.value > 0 ? "+" : ""}${item.value}/100`;
+          if (item.key === "rates") {
+            const curve = snapshot?.yieldCurve;
+            const spread = item.value == null ? "—" : `${item.value > 0 ? "+" : ""}${item.value.toFixed(2)}`;
+            const delta = curve?.change5mBps == null ? "—" : `${curve.change5mBps > 0 ? "+" : ""}${curve.change5mBps.toFixed(2)}`;
+            const longSpread = curve?.longSpreadBps == null ? "—" : `${curve.longSpreadBps > 0 ? "+" : ""}${curve.longSpreadBps.toFixed(2)}`;
+            value = `10Y−2Y ${spread} bps · Δ5m ${delta} · 30Y−10Y ${longSpread}`;
+          }
           return <article className={`macro-confirmation-card ${tone}`} key={item.key}><small>{item.label}</small><strong>{item.state}</strong><span>{value}</span><p>{item.detail}</p></article>;
         }) ?? <div className="loading">Aguardando confirmações complementares…</div>}</div>
-        <div className="macro-confirmation-note">O perpétuo xyz:VIX encontrado na Hyperliquid está delistado; VIX não está disponível nas fontes atuais. USD/CNH também não foi encontrado. Petróleo e Treasuries são mostrados como contexto; os pesos do score Risk-On/Risk-Off permanecem iguais.</div>
+        <div className="macro-confirmation-note">Petróleo e Treasuries são mostrados como contexto; os pesos do score Risk-On/Risk-Off permanecem iguais.</div>
       </section>
 
       <section className="macro-outlook-section">
