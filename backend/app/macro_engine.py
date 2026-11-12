@@ -229,10 +229,14 @@ def build_macro_snapshot(
                     "values": [{"time": point["time"], "value": round((point["price"] / day_baseline["price"] - 1) * 100, 4)} for point in sampled],
                 })
 
-    def signal(key: str, invert: bool = False) -> float | None:
+    def raw_signal(key: str) -> float | None:
         z_value = measures.get(key, {}).get("z5m")
+        return math.tanh(z_value / 1.8) if z_value is not None else None
+
+    def signal(key: str, invert: bool = False) -> float | None:
+        value = raw_signal(key)
         reverse = invert or next((item.get("riskDirection") == "inverse" for item in MACRO_ASSETS.values() if item["key"] == key), False)
-        return math.tanh((-z_value if reverse else z_value) / 1.8) if z_value is not None else None
+        return -value if reverse and value is not None else value
 
     def mean_available(parts: list[float | None]) -> float | None:
         values = [value for value in parts if value is not None]
@@ -247,11 +251,17 @@ def build_macro_snapshot(
     carry_fx = signal("AUDJPY")
     equity_breadth = mean_available([signal("SP500"), signal("NASDAQ100"), signal("RUSSELL2000"), signal("DOW")])
     cyclicals = mean_available([signal("COPPER"), signal("GOLD", True)])
-    # Keep Treasury yield direction separate from its risk interpretation. Rates
-    # corroborate the cross-asset backdrop; rising yields alone are not risk-off.
+    # In risk-oriented terms, falling yields are positive and rising yields
+    # negative. Preserve the raw direction separately for diagnostics.
     yield_move = mean_available([signal("UST2Y", True), signal("UST10Y", True), signal("UST30Y", True)])
+    yield_direction = mean_available([raw_signal("UST2Y"), raw_signal("UST10Y"), raw_signal("UST30Y")])
     risk_context = mean_available([equity_breadth, -usd_strength if usd_strength is not None else None, cyclicals, carry_fx])
-    rates_confirmation = risk_context * abs(yield_move) if risk_context is not None and yield_move is not None else None
+    # Preserve the yield direction in the score, scaled by the strength of
+    # the cross-asset context. Falling yields support the risk score; rising
+    # yields weigh against it. Alignment is reported separately so a rate
+    # move is not mistaken for a causal explanation of the regime.
+    rates_confirmation = yield_move * abs(risk_context) if risk_context is not None and yield_move is not None else None
+    rates_alignment = yield_move * risk_context if risk_context is not None and yield_move is not None else None
     components = [
         {"key": "equities", "label": "Índices", "value": round(equity_breadth * 100) if equity_breadth is not None else None, "weight": 0.35},
         {"key": "usd", "label": "Dólar", "value": round(-usd_strength * 100) if usd_strength is not None else None, "weight": 0.25},
@@ -383,11 +393,11 @@ def build_macro_snapshot(
         insights.append({"tone": "warning", "title": "Petróleo acelera", "detail": "Brent/WTI adicionam pressão de custos e inflação; isso pode pesar sobre índices amplos, embora a reação varie por setor e sessão."})
     elif oil_state == "ALIVIANDO":
         insights.append({"tone": "positive", "title": "Petróleo perde força", "detail": "A pressão recente de energia está aliviando; observe se os índices confirmam esse movimento."})
-    if yield_move is not None:
-        yield_direction = "subindo" if yield_move >= 0.2 else "caindo" if yield_move <= -0.2 else "sem direção clara"
-        rates_tone = "positive" if rates_confirmation is not None and rates_confirmation >= 0.2 else "warning" if rates_confirmation is not None and rates_confirmation <= -0.2 else "neutral"
-        rates_context_label = "reforça o viés pró-risco" if rates_tone == "positive" else "reforça o viés defensivo" if rates_tone == "warning" else "sem confirmação cruzada"
-        insights.append({"tone": rates_tone, "title": f"Treasuries: yields {yield_direction} · {rates_context_label}", "detail": "Yields de 2Y/10Y/30Y são lidos junto com índices, dólar e cíclicos. O movimento de juros sozinho não define Risk-On ou Risk-Off."})
+    if yield_direction is not None:
+        yield_direction_label = "subindo" if yield_direction >= 0.2 else "caindo" if yield_direction <= -0.2 else "sem direção clara"
+        rates_tone = "positive" if rates_alignment is not None and rates_alignment >= 0.2 else "warning" if rates_alignment is not None and rates_alignment <= -0.2 else "neutral"
+        rates_context_label = "alinhadas ao contexto de risco" if rates_tone == "positive" else "divergem do contexto de risco" if rates_tone == "warning" else "sem alinhamento claro"
+        insights.append({"tone": rates_tone, "title": f"Treasuries: yields {yield_direction_label} · {rates_context_label}", "detail": "A direção das yields de 2Y/10Y/30Y entra no score pelo alinhamento assinado com índices, dólar, cíclicos e carry. Alta ou queda isolada não determina Risk-On/Risk-Off nem revela, por si só, a causa macroeconômica."})
     if not insights:
         insights.append({"tone": "neutral", "title": "Sinais macro sem confluência", "detail": "Os fatores disponíveis estão mistos ou ainda não têm histórico sincronizado suficiente para uma leitura direcional."})
 
@@ -418,7 +428,7 @@ def build_macro_snapshot(
         "correlationShifts": [],
         "divergences": divergences, "insights": insights,
         "chart": {"windowMinutes": 60, "series": chart_series, "dailyWindowHours": 24, "dailySeries": daily_chart_series},
-        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 35%, dólar 25%, cíclicos/ouro 15%, FX de carry AUD/JPY 10% e Treasuries 15%. USD/JPY compõe a cesta de força do dólar; AUD/JPY é um proxy cambial pró-cíclico. O fator Treasury corrobora o contexto cruzado e yields sozinhos não definem regime. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
+        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 35%, dólar 25%, cíclicos/ouro 15%, FX de carry AUD/JPY 10% e Treasuries 15%. USD/JPY compõe a cesta de força do dólar; AUD/JPY é um proxy cambial pró-cíclico. O componente Treasury mantém o sinal da direção inversa das yields, ponderado pela intensidade do contexto cruzado; yields em queda contribuem positivamente e em alta negativamente. O painel também indica se o movimento está alinhado ao contexto observado. Isso não determina a causa macroeconômica nem define regime isoladamente. Spreads 10Y−2Y e 30Y−10Y permanecem como contexto separado. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
         "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes. AUD/JPY é apenas um proxy de carry/risk appetite e pode divergir do regime observado em outros mercados.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
 
