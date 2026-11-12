@@ -50,6 +50,7 @@ type MacroSnapshot = {
   breadth: { indices: BreadthGroup; usd: BreadthGroup; energy: BreadthGroup; metals: BreadthGroup; yields: BreadthGroup; confirmation: { direction: string; classes: string[]; votes: Record<string, number | null> } };
   usd: { state: string; strengthScore: number | null };
   oil: { state: string; pressureScore: number | null };
+  confirmations: { key: string; label: string; state: string; status: string; value: number | null; z5m: number | null; detail: string }[];
   assets: MacroAsset[]; accelerators: MacroAsset[];
   divergences: { id: string; leftKey: string; rightKey: string; label: string; leftZ5m: number; rightZ5m: number; strength: number; note: string; persistenceMinutes?: number; confirmed?: boolean }[];
   insights: { tone: string; title: string; detail: string }[];
@@ -326,7 +327,7 @@ export default function MacroTerminal() {
         </article>
         <article className="macro-metric-card usd"><div className="macro-card-kicker"><Waves size={14}/> PRESSÃO NO DÓLAR</div><strong>{snapshot?.usd.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.usd.strengthScore == null ? "—" : `${snapshot.usd.strengthScore > 0 ? "+" : ""}${snapshot.usd.strengthScore}`}<small>/100</small></div><p>DXY + cesta EUR, GBP, AUD, NZD e JPY</p></article>
         <article className="macro-metric-card oil"><div className="macro-card-kicker"><Activity size={14}/> PRESSÃO DE ENERGIA</div><strong>{snapshot?.oil.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.oil.pressureScore == null ? "—" : `${snapshot.oil.pressureScore > 0 ? "+" : ""}${snapshot.oil.pressureScore}`}<small>/100</small></div><p>Brent & WTI · proxy de custo e inflação</p></article>
-        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 22} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
+        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 24} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
       </section>
 
       <MarketRotationRadar points={rotationPoints} category={rotationCategory} onCategoryChange={setRotationCategory}/>
@@ -340,6 +341,20 @@ export default function MacroTerminal() {
         })}
         <article><small>INCLINAÇÃO · 10Y−2Y</small><strong>{snapshot?.yieldCurve?.spreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.spreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve?.change5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.change5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.change5mBps.toFixed(2)} bps · 5 min`}</span></article>
         <article><small>INCLINAÇÃO LONGA · 30Y−10Y</small><strong>{snapshot?.yieldCurve?.longSpreadBps == null ? "AQUECENDO" : `${snapshot.yieldCurve.longSpreadBps.toFixed(2)} bps`}</strong><span>{snapshot?.yieldCurve?.longChange5mBps == null ? "— · sem base sincronizada" : `${snapshot.yieldCurve.longChange5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.longChange5mBps.toFixed(2)} bps · 5 min`}</span></article>
+      </section>
+
+      <section className="panel macro-confirmations" aria-label="Confirmações macroeconômicas complementares">
+        <div className="panelhead"><span className="paneltitle">CONFIRMAÇÕES COMPLEMENTARES · FORA DO SCORE PRINCIPAL</span><span className="macro-tag">CONTEXTO, NÃO VOTO DIRECIONAL</span></div>
+        <div className="macro-confirmation-grid">{snapshot?.confirmations?.map(item => {
+          const tone = item.status === "unavailable" ? "warning" : item.key === "usdchf" ? "neutral" : /SUBINDO|SUPERA|ACELERANDO/.test(item.state) ? "negative" : /ALIVIANDO/.test(item.state) ? "positive" : "neutral";
+          const value = item.key === "vix" ? item.value == null ? "—" : `nível ${item.value.toFixed(2)}${item.z5m == null ? "" : ` · Z5m ${item.z5m > 0 ? "+" : ""}${item.z5m}`}`
+            : item.key === "usdchf" ? item.z5m == null ? "Z5m —" : `Z5m ${item.z5m > 0 ? "+" : ""}${item.z5m}`
+            : item.key === "energy" ? item.value == null ? "—" : `pressão ${item.value > 0 ? "+" : ""}${item.value}/100`
+            : item.key === "rates" ? item.value == null ? "inclinação —" : `10Y−2Y ${item.value > 0 ? "+" : ""}${item.value.toFixed(2)} bps · Δ5m ${snapshot?.yieldCurve?.change5mBps == null ? "—" : `${snapshot.yieldCurve.change5mBps > 0 ? "+" : ""}${snapshot.yieldCurve.change5mBps.toFixed(2)}`} · 30Y−10Y ${snapshot?.yieldCurve?.longSpreadBps == null ? "—" : `${snapshot.yieldCurve.longSpreadBps > 0 ? "+" : ""}${snapshot.yieldCurve.longSpreadBps.toFixed(2)}`}`
+            : "sem contrato disponível";
+          return <article className={`macro-confirmation-card ${tone}`} key={item.key}><small>{item.label}</small><strong>{item.state}</strong><span>{value}</span><p>{item.detail}</p></article>;
+        }) ?? <div className="loading">Aguardando confirmações complementares…</div>}</div>
+        <div className="macro-confirmation-note">O perpétuo xyz:VIX encontrado na Hyperliquid está delistado; VIX não está disponível nas fontes atuais. USD/CNH também não foi encontrado. Petróleo e Treasuries são mostrados como contexto; os pesos do score Risk-On/Risk-Off permanecem iguais.</div>
       </section>
 
       <section className="macro-outlook-section">

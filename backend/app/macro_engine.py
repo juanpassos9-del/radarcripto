@@ -11,6 +11,7 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "NCFXAUD2USD-USDT": {"key": "AUDUSD", "label": "AUD/USD", "category": "fx", "color": "#48d69a"},
     "NCFXNZD2USD-USDT": {"key": "NZDUSD", "label": "NZD/USD", "category": "fx", "color": "#56a9ff"},
     "NCFXUSD2JPY-USDT": {"key": "USDJPY", "label": "USD/JPY", "category": "fx", "color": "#ff7391"},
+    "NCFXUSD2CHF-USDT": {"key": "USDCHF", "label": "USD/CHF", "category": "fx", "color": "#c18cff"},
     "NCFXAUD2JPY-USDT": {"key": "AUDJPY", "label": "AUD/JPY", "category": "fx", "color": "#71d7a5"},
     "NCSISP5002USD-USDT": {"key": "SP500", "label": "S&P 500", "category": "index", "color": "#ffca61"},
     "NCSINASDAQ1002USD-USDT": {"key": "NASDAQ100", "label": "NASDAQ 100", "category": "index", "color": "#63b6ff"},
@@ -207,7 +208,7 @@ def build_macro_snapshot(
             "sampleCount": sample_count, "ageMs": age_ms,
             "status": "live" if has_live else "history" if latest else "warming",
         }
-        if metadata["key"] in {"DXY", "EURUSD", "USDJPY", "AUDJPY", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "UST2Y", "UST10Y", "UST30Y", "EWZ", "DRAM", "SOXL"} and len(recent) >= 2:
+        if metadata["key"] in {"DXY", "EURUSD", "USDJPY", "USDCHF", "AUDJPY", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "UST2Y", "UST10Y", "UST30Y", "EWZ", "DRAM", "SOXL"} and len(recent) >= 2:
             baseline = recent[0]["price"]
             chart_series.append({
                 "key": metadata["key"], "label": metadata["label"], "color": metadata["color"],
@@ -323,6 +324,29 @@ def build_macro_snapshot(
     usd_state = "USD COMPRADO" if usd_strength is not None and usd_strength >= 0.2 else "USD VENDIDO" if usd_strength is not None and usd_strength <= -0.2 else "USD MISTO" if usd_strength is not None else "SEM HISTÓRICO"
     oil_pressure = mean_available([signal("WTI"), signal("BRENT")])
     oil_state = "ACELERANDO" if oil_pressure is not None and oil_pressure >= 0.2 else "ALIVIANDO" if oil_pressure is not None and oil_pressure <= -0.2 else "SEM PRESSÃO DIRECIONAL" if oil_pressure is not None else "AGUARDANDO DADOS"
+    usd_chf = measures.get("USDCHF", {})
+    usd_chf_z = usd_chf.get("z5m")
+    usd_chf_state = "USD SUPERA CHF" if usd_chf_z is not None and usd_chf_z >= 0.15 else "CHF SUPERA USD" if usd_chf_z is not None and usd_chf_z <= -0.15 else "SEM DIFERENÇA CLARA" if usd_chf_z is not None else "AQUECENDO"
+    yield_curve = _build_yield_curve(clean_histories, clean_live, now_ms)
+    curve_change = yield_curve.get("change5mBps")
+    curve_state = "SPREAD 10Y−2Y ABRINDO" if curve_change is not None and curve_change >= 0.2 else "SPREAD 10Y−2Y FECHANDO" if curve_change is not None and curve_change <= -0.2 else "SEM MUDANÇA CLARA" if curve_change is not None else "AQUECENDO"
+    confirmations = [
+        {"key": "vix", "label": "Volatilidade implícita · VIX", "state": "INDISPONÍVEL",
+         "status": "unavailable", "value": None, "z5m": None,
+         "detail": "Não há VIX ativo nas fontes atuais: o contrato xyz:VIX da Hyperliquid está delistado e sem cotações; BingX não lista contrato VIX."},
+        {"key": "usdcnh", "label": "Câmbio · USD/CNH", "state": "INDISPONÍVEL",
+         "status": "unavailable", "value": None, "z5m": None,
+         "detail": "USDCNH não apareceu no catálogo público de contratos da BingX nem nos mercados Hyperliquid consultados."},
+        {"key": "usdchf", "label": "Câmbio defensivo · USD/CHF", "state": usd_chf_state,
+         "status": usd_chf.get("status", "warming"), "value": usd_chf.get("price"), "z5m": usd_chf_z,
+         "detail": "Par perpétuo TradFi da BingX. Queda pode indicar CHF mais forte que USD; não confirma Risk-Off sozinho."},
+        {"key": "energy", "label": "Energia · WTI / Brent", "state": oil_state,
+         "status": "live" if oil_pressure is not None else "warming", "value": round(oil_pressure * 100) if oil_pressure is not None else None, "z5m": None,
+         "detail": "Momentum de petróleo como pressão de custo/inflacionária. Alta também pode refletir demanda; não é voto automático de risco."},
+        {"key": "rates", "label": "Curva Treasury · 10Y−2Y / 30Y−10Y", "state": curve_state,
+         "status": yield_curve["status"], "value": yield_curve.get("spreadBps"), "z5m": None,
+         "detail": "Inclinação e variação em pontos-base exibidas separadamente; yields e inclinação não definem o regime isoladamente."},
+    ]
 
     outlook = []
     if equity_breadth is not None:
@@ -387,7 +411,8 @@ def build_macro_snapshot(
         "usd": {"state": usd_state, "strengthScore": round(usd_strength * 100) if usd_strength is not None else None},
         "oil": {"state": oil_state, "pressureScore": round(oil_pressure * 100) if oil_pressure is not None else None},
         "assets": list(measures.values()), "accelerators": accelerators, "outlook": outlook,
-        "yieldCurve": _build_yield_curve(clean_histories, clean_live, now_ms),
+        "yieldCurve": yield_curve,
+        "confirmations": confirmations,
         # Preserve the removed matrix response shape during independent web/API deploys.
         # Older browser bundles can render empty cells instead of crashing on missing fields.
         "relationships": [],
