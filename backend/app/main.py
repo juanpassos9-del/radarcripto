@@ -227,6 +227,9 @@ class MarketService:
             log.exception("BingX macro history seed could not load contract catalogue")
             return
         instruments = [item for item in catalog if item["symbol"] in MACRO_ASSETS]
+        # Make DXY available in the price maps immediately after a cold start;
+        # the remaining contracts continue warming in the normal rate-limited order.
+        instruments.sort(key=lambda item: (item["symbol"] != "NCSIDXY2USD-USDT", item["category"], item["name"]))
         now_bucket = int(time.time() // 60) * 60_000
 
         async def load_symbol(instrument: dict[str, Any]):
@@ -248,14 +251,17 @@ class MarketService:
                 return []
 
         # Kline requests share a conservative per-IP limit; serialize the one-time seed.
-        loaded = []
+        rows = []
         for index, instrument in enumerate(instruments):
-            loaded.append(await load_symbol(instrument))
+            samples = await load_symbol(instrument)
+            rows.extend(samples)
+            if samples:
+                symbol = instrument["symbol"]
+                by_time = {point["time"]: point for point in self.tradfi_samples.get(symbol, ())}
+                by_time.update({sample_time: {"time": sample_time, "price": price, "category": category} for _, sample_time, price, category in samples})
+                self.tradfi_samples[symbol] = deque(sorted(by_time.values(), key=lambda point: point["time"])[-(7 * 24 * 60):], maxlen=7 * 24 * 60)
             if index + 1 < len(instruments):
                 await asyncio.sleep(1)
-        rows = [sample for batch in loaded for sample in batch]
-        for symbol, sample_time, price, category in rows:
-            self.tradfi_samples.setdefault(symbol, deque(maxlen=7 * 24 * 60)).append({"time": sample_time, "price": price, "category": category})
         if rows and self.flow_store:
             await asyncio.to_thread(self.flow_store.save_tradfi_price_samples, rows)
         self.tradfi_seed_complete = True
