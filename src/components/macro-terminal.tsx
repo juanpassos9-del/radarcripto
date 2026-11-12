@@ -33,6 +33,8 @@ const CHART_SERIES_COLORS: Record<string, string> = {
   AUDJPY: "#B6E84A",
   SP500: "#FFC247",
   NASDAQ100: "#4F9BFF",
+  GER40: "#63D6C4",
+  NIKKEI225: "#ED8B72",
   WTI: "#FF4F91",
   GOLD: "#FFE66D",
   COPPER: "#E8753A",
@@ -46,11 +48,12 @@ const CHART_SERIES_COLORS: Record<string, string> = {
 type MacroSnapshot = {
   asOf: number; source: string; status: string;
   storage: { engine: string; durable: boolean; retentionDays: number; oldestSample: number | null; trackedAssets: number; assetsWithHistory: number };
-  regime: { label: string; candidate: string; qualified?: boolean; pendingSamples?: number; requiredSamples?: number; transitionPending?: boolean; score: number | null; coverage: number; components: { key: string; label: string; value: number | null; weight: number }[] };
+  regime: { label: string; candidate: string; qualified?: boolean; pendingSamples?: number; requiredSamples?: number; transitionPending?: boolean; score: number | null; coverage: number; scoreWindows?: Record<string, number | null>; acceleration?: { label: string; delta: number | null }; components: { key: string; label: string; value: number | null; weight: number }[] };
   breadth: { indices: BreadthGroup; usd: BreadthGroup; energy: BreadthGroup; metals: BreadthGroup; yields: BreadthGroup; confirmation: { direction: string; classes: string[]; votes: Record<string, number | null> } };
   usd: { state: string; strengthScore: number | null };
   oil: { state: string; pressureScore: number | null };
   confirmations: { key: string; label: string; state: string; status: string; value: number | null; z5m: number | null; detail: string }[];
+  macroScenario?: { key: string; label: string; tone: string; detail: string; evidence: { label: string; value: number; unit?: string }[] };
   assets: MacroAsset[]; accelerators: MacroAsset[];
   divergences: { id: string; leftKey: string; rightKey: string; label: string; leftZ5m: number; rightZ5m: number; strength: number; note: string; persistenceMinutes?: number; confirmed?: boolean }[];
   insights: { tone: string; title: string; detail: string }[];
@@ -305,6 +308,9 @@ export default function MacroTerminal() {
     return [{ asset, strength, acceleration, x: Math.max(-1, Math.min(1, strength / 3)), y: Math.max(-1, Math.min(1, acceleration / 2)) }];
   }), [snapshot]);
   const regimeClass = snapshot?.regime.label === "RISK-ON" ? "positive" : snapshot?.regime.label === "RISK-OFF" ? "negative" : "neutral";
+  const regimeScore5m = snapshot?.regime.scoreWindows?.["5"];
+  const regimeScore15m = snapshot?.regime.scoreWindows?.["15"];
+  const formatSignedScore = (value: number | null | undefined) => value == null ? "—" : `${value > 0 ? "+" : ""}${value}`;
   const markerLeft = `${Math.max(0, Math.min(100, ((snapshot?.regime.score ?? 0) + 100) / 2))}%`;
   return <main className="shell macro-shell">
     <header className="topbar">
@@ -324,11 +330,15 @@ export default function MacroTerminal() {
           <div className="macro-gauge"><i style={{ left: markerLeft }}/></div>
           <div className="macro-gauge-labels"><span>RISK-OFF</span><span>MISTO</span><span>RISK-ON</span></div>
           {snapshot?.regime.transitionPending && <div className="macro-regime-pending">CANDIDATO {snapshot.regime.candidate} · CONFIRMAÇÃO {snapshot.regime.pendingSamples ?? 0}/{snapshot.regime.requiredSamples ?? 3} AMOSTRAS DE 1 MIN</div>}
+          {snapshot?.regime.acceleration && <div className={`macro-regime-acceleration ${/RISK-ON|PRÓ-RISCO|RISK-OFF ALIVIANDO/.test(snapshot.regime.acceleration.label) ? "positive" : /RISK-OFF|DEFENSIVO/.test(snapshot.regime.acceleration.label) ? "negative" : "neutral"}`}>
+            <strong>{snapshot.regime.acceleration.label}</strong>
+            <span>5m {formatSignedScore(regimeScore5m)} · 15m {formatSignedScore(regimeScore15m)} · Δ {formatSignedScore(snapshot.regime.acceleration.delta)} pts</span>
+          </div>}
           <div className="macro-components">{snapshot?.regime.components.map(component => <div key={component.key}><span>{component.label}</span><strong className={component.value == null ? "muted" : component.value >= 0 ? "pos" : "neg"}>{component.value == null ? "—" : `${component.value > 0 ? "+" : ""}${component.value}`}</strong></div>)}</div>
         </article>
         <article className="macro-metric-card usd"><div className="macro-card-kicker"><Waves size={14}/> PRESSÃO NO DÓLAR</div><strong>{snapshot?.usd.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.usd.strengthScore == null ? "—" : `${snapshot.usd.strengthScore > 0 ? "+" : ""}${snapshot.usd.strengthScore}`}<small>/100</small></div><p>DXY + cesta EUR, GBP, AUD, NZD e JPY</p></article>
         <article className="macro-metric-card oil"><div className="macro-card-kicker"><Activity size={14}/> PRESSÃO DE ENERGIA</div><strong>{snapshot?.oil.state ?? "CALCULANDO"}</strong><div className="macro-metric-value">{snapshot?.oil.pressureScore == null ? "—" : `${snapshot.oil.pressureScore > 0 ? "+" : ""}${snapshot.oil.pressureScore}`}<small>/100</small></div><p>Brent & WTI · proxy de custo e inflação</p></article>
-        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 24} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
+        <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 26} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
       </section>
 
       <div className="macro-rotation-insights-layout">
@@ -339,6 +349,14 @@ export default function MacroTerminal() {
           <div className="macro-insight-note">Viés estimado por preços recentes; confirme com o comportamento do próprio índice e com o horário de negociação.</div>
         </section>
       </div>
+
+      <section className={`panel macro-scenario-panel ${snapshot?.macroScenario?.tone ?? "neutral"}`}>
+        <div className="panelhead"><span className="paneltitle">CENÁRIO MACRO COMPATÍVEL</span><span className="macro-tag">CONTEXTO · NÃO CAUSALIDADE</span></div>
+        <div className="macro-scenario-content">
+          <div><strong>{snapshot?.macroScenario?.label ?? "AGUARDANDO DADOS"}</strong><p>{snapshot?.macroScenario?.detail ?? "O cenário aparecerá quando houver dados suficientes e sincronizados."}</p></div>
+          <div className="macro-scenario-evidence">{snapshot?.macroScenario?.evidence.map(item => <span key={item.label}><small>{item.label}</small><b className={item.value > 0 ? "pos" : item.value < 0 ? "neg" : "muted"}>{item.value > 0 ? "+" : ""}{item.value}{item.unit}</b></span>)}</div>
+        </div>
+      </section>
 
       <section className="macro-yield-strip" aria-label="Curva de juros dos Treasuries">
         {["UST2Y", "UST10Y", "UST30Y"].map(key => {

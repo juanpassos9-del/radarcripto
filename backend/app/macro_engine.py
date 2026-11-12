@@ -17,6 +17,8 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "NCSINASDAQ1002USD-USDT": {"key": "NASDAQ100", "label": "NASDAQ 100", "category": "index", "color": "#63b6ff"},
     "NCSIRUSSELL20002USD-USDT": {"key": "RUSSELL2000", "label": "Russell 2000", "category": "index", "color": "#cf87ff"},
     "NCSIDOWJONES2USD-USDT": {"key": "DOW", "label": "Dow Jones", "category": "index", "color": "#f481a6"},
+    "NCSIGER2USD-USDT": {"key": "GER40", "label": "GER40 · Alemanha", "category": "index", "color": "#63d6c4"},
+    "NCSINIKKEI2252USD-USDT": {"key": "NIKKEI225", "label": "Nikkei 225 · Japão", "category": "index", "color": "#ed8b72"},
     "NCCO1OILWTI2USD-USDT": {"key": "WTI", "label": "WTI", "category": "energy", "color": "#ff795f"},
     "NCCO1OILBRENT2USD-USDT": {"key": "BRENT", "label": "Brent", "category": "energy", "color": "#ffad57"},
     "NCCOGOLD2USD-USDT": {"key": "GOLD", "label": "Ouro", "category": "metal", "color": "#f3d56a"},
@@ -208,7 +210,7 @@ def build_macro_snapshot(
             "sampleCount": sample_count, "ageMs": age_ms,
             "status": "live" if has_live else "history" if latest else "warming",
         }
-        if metadata["key"] in {"DXY", "EURUSD", "USDJPY", "USDCHF", "AUDJPY", "SP500", "NASDAQ100", "WTI", "GOLD", "COPPER", "UST2Y", "UST10Y", "UST30Y", "EWZ", "DRAM", "SOXL"} and len(recent) >= 2:
+        if metadata["key"] in {"DXY", "EURUSD", "USDJPY", "USDCHF", "AUDJPY", "SP500", "NASDAQ100", "RUSSELL2000", "DOW", "GER40", "NIKKEI225", "WTI", "GOLD", "COPPER", "UST2Y", "UST10Y", "UST30Y", "EWZ", "DRAM", "SOXL"} and len(recent) >= 2:
             baseline = recent[0]["price"]
             chart_series.append({
                 "key": metadata["key"], "label": metadata["label"], "color": metadata["color"],
@@ -242,6 +244,42 @@ def build_macro_snapshot(
         values = [value for value in parts if value is not None]
         return sum(values) / len(values) if values else None
 
+    def signal_for_window(key: str, minutes: int, invert: bool = False) -> float | None:
+        z_value = measures.get(key, {}).get("windows", {}).get(str(minutes), {}).get("z")
+        if z_value is None:
+            return None
+        value = math.tanh(z_value / 1.8)
+        reverse = invert or next((item.get("riskDirection") == "inverse" for item in MACRO_ASSETS.values() if item["key"] == key), False)
+        return -value if reverse else value
+
+    def score_for_window(minutes: int) -> int | None:
+        window_usd = mean_available([
+            signal_for_window("DXY", minutes), signal_for_window("USDJPY", minutes),
+            signal_for_window("EURUSD", minutes, True), signal_for_window("GBPUSD", minutes, True),
+            signal_for_window("AUDUSD", minutes, True), signal_for_window("NZDUSD", minutes, True),
+        ])
+        us_indices = mean_available([signal_for_window(key, minutes) for key in ("SP500", "NASDAQ100", "RUSSELL2000", "DOW")])
+        international_indices = mean_available([signal_for_window(key, minutes) for key in ("GER40", "NIKKEI225")])
+        window_indices = mean_available([us_indices, international_indices])
+        window_carry = signal_for_window("AUDJPY", minutes)
+        window_cyclicals = mean_available([signal_for_window("COPPER", minutes), signal_for_window("GOLD", minutes, True)])
+        window_yields = mean_available([signal_for_window(key, minutes, True) for key in ("UST2Y", "UST10Y", "UST30Y")])
+        window_context = mean_available([window_indices, -window_usd if window_usd is not None else None, window_cyclicals, window_carry])
+        window_rates = window_yields * abs(window_context) if window_yields is not None and window_context is not None else None
+        window_components = [
+            (window_indices, 0.35),
+            (-window_usd if window_usd is not None else None, 0.25),
+            (window_cyclicals, 0.15),
+            (window_carry, 0.10),
+            (window_rates, 0.15),
+        ]
+        active = [(value, weight) for value, weight in window_components if value is not None]
+        coverage = sum(weight for _, weight in active)
+        cross_confirmed = window_indices is not None and any(value is not None for value in (window_usd, window_cyclicals, window_carry))
+        if coverage < 0.55 or not cross_confirmed:
+            return None
+        return round(sum(value * weight for value, weight in active) / coverage * 100)
+
     usd_strength = mean_available([
         signal("DXY"), signal("USDJPY"), signal("EURUSD", True), signal("GBPUSD", True),
         signal("AUDUSD", True), signal("NZDUSD", True),
@@ -249,7 +287,11 @@ def build_macro_snapshot(
     # AUD/JPY is a carry-sensitive FX proxy: strength can align with risk-on,
     # but it is price behavior rather than evidence of measured capital flows.
     carry_fx = signal("AUDJPY")
-    equity_breadth = mean_available([signal("SP500"), signal("NASDAQ100"), signal("RUSSELL2000"), signal("DOW")])
+    us_equity_breadth = mean_available([signal("SP500"), signal("NASDAQ100"), signal("RUSSELL2000"), signal("DOW")])
+    international_equity_breadth = mean_available([signal("GER40"), signal("NIKKEI225")])
+    # Balance the existing US basket against the international basket so
+    # adding more US instruments does not automatically dominate the index vote.
+    equity_breadth = mean_available([us_equity_breadth, international_equity_breadth])
     cyclicals = mean_available([signal("COPPER"), signal("GOLD", True)])
     # In risk-oriented terms, falling yields are positive and rising yields
     # negative. Preserve the raw direction separately for diagnostics.
@@ -277,6 +319,26 @@ def build_macro_snapshot(
     regime = "RISK-ON" if sufficient_coverage and cross_asset_confirmation and risk_score is not None and risk_score >= 20 else "RISK-OFF" if sufficient_coverage and cross_asset_confirmation and risk_score is not None and risk_score <= -20 else "MISTO" if sufficient_coverage and cross_asset_confirmation and risk_score is not None else "AQUECENDO"
     regime_qualified = sufficient_coverage and cross_asset_confirmation and risk_score is not None
 
+    score_windows = {str(minutes): score_for_window(minutes) for minutes in (1, 5, 15, 60)}
+    score_5m, score_15m = score_windows["5"], score_windows["15"]
+    regime_acceleration = score_5m - score_15m if score_5m is not None and score_15m is not None else None
+    if regime_acceleration is None:
+        regime_acceleration_label = "AQUECENDO · DADOS INSUFICIENTES"
+    elif score_5m >= 20 and regime_acceleration >= 8:
+        regime_acceleration_label = "RISK-ON ACELERANDO"
+    elif score_15m >= 20 and regime_acceleration <= -8:
+        regime_acceleration_label = "RISK-ON PERDENDO FORÇA"
+    elif score_5m <= -20 and regime_acceleration <= -8:
+        regime_acceleration_label = "RISK-OFF ACELERANDO"
+    elif score_15m <= -20 and regime_acceleration >= 8:
+        regime_acceleration_label = "RISK-OFF ALIVIANDO"
+    elif regime_acceleration >= 8:
+        regime_acceleration_label = "IMPULSO PRÓ-RISCO AUMENTANDO"
+    elif regime_acceleration <= -8:
+        regime_acceleration_label = "IMPULSO DEFENSIVO AUMENTANDO"
+    else:
+        regime_acceleration_label = "SEM ACELERAÇÃO CLARA"
+
     def build_breadth(keys: list[str], inverted: set[str] | None = None) -> dict[str, Any]:
         inverted = inverted or set()
         values = [(-signal(key) if key in inverted and signal(key) is not None else signal(key)) for key in keys]
@@ -292,7 +354,7 @@ def build_macro_snapshot(
         }
 
     breadth = {
-        "indices": {"label": "Índices amplos", **build_breadth(["SP500", "NASDAQ100", "RUSSELL2000", "DOW"])},
+        "indices": {"label": "Índices globais", **build_breadth(["SP500", "NASDAQ100", "RUSSELL2000", "DOW", "GER40", "NIKKEI225"])},
         "usd": {"label": "Força do USD", **build_breadth(["DXY", "USDJPY", "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"], {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"})},
         "energy": {"label": "Energia", **build_breadth(["WTI", "BRENT"])},
         "metals": {"label": "Metais", **build_breadth(["GOLD", "COPPER"])},
@@ -352,6 +414,29 @@ def build_macro_snapshot(
          "detail": "Inclinação e variação em pontos-base exibidas separadamente; yields e inclinação não definem o regime isoladamente."},
     ]
 
+    copper_signal = signal("COPPER")
+    inflation_pressure = oil_pressure is not None and oil_pressure >= 0.2 and yield_direction is not None and yield_direction >= 0.15 and usd_strength is not None and usd_strength >= 0.15 and equity_breadth is not None and equity_breadth <= 0.15
+    liquidity_easing = equity_breadth is not None and equity_breadth >= 0.2 and usd_strength is not None and usd_strength <= -0.15 and yield_direction is not None and yield_direction <= -0.15
+    growth_demand = equity_breadth is not None and equity_breadth >= 0.2 and copper_signal is not None and copper_signal >= 0.15 and usd_strength is not None and usd_strength <= 0.15 and (oil_pressure is None or oil_pressure >= -0.2)
+    defensive_slowdown = equity_breadth is not None and equity_breadth <= -0.2 and usd_strength is not None and usd_strength >= 0.15 and copper_signal is not None and copper_signal <= 0.0
+    macro_scenario: dict[str, Any]
+    if inflation_pressure:
+        macro_scenario = {"key": "inflation_pressure", "label": "PRESSÃO INFLACIONÁRIA · COMPATÍVEL", "tone": "warning", "detail": "Energia e yields avançam enquanto dólar firme e índices sem força acompanham. Compatível com pressão inflacionária/condições financeiras mais apertadas; não identifica a causa do movimento."}
+    elif liquidity_easing:
+        macro_scenario = {"key": "liquidity_easing", "label": "ALÍVIO DE JUROS · COMPATÍVEL", "tone": "positive", "detail": "Índices sobem com dólar enfraquecido e yields em queda. Compatível com alívio das condições financeiras; não comprova que liquidez seja o motor."}
+    elif growth_demand:
+        macro_scenario = {"key": "growth_demand", "label": "CRESCIMENTO / DEMANDA · COMPATÍVEL", "tone": "positive", "detail": "Índices e cobre avançam sem pressão compradora dominante no dólar. Compatível com demanda/crescimento; petróleo é contexto adicional e pode refletir oferta ou demanda."}
+    elif defensive_slowdown:
+        macro_scenario = {"key": "defensive_slowdown", "label": "DEFESA / DESACELERAÇÃO · COMPATÍVEL", "tone": "risk", "detail": "Índices e cobre enfraquecem enquanto o dólar ganha força. Compatível com busca por proteção ou desaceleração, sem confirmar recessão."}
+    else:
+        macro_scenario = {"key": "mixed", "label": "SINAIS MISTOS · SEM CENÁRIO DOMINANTE", "tone": "neutral", "detail": "As combinações observadas não satisfazem os critérios de um cenário macro com confluência suficiente. Observe as classes e a cobertura antes de interpretar o regime."}
+    scenario_evidence = []
+    for label, value in (("Índices globais", equity_breadth), ("Força do USD", usd_strength), ("Cobre", copper_signal), ("Energia", oil_pressure), ("Yields", yield_direction)):
+        if value is not None:
+            unit = " · direção observada" if label == "Yields" else ""
+            scenario_evidence.append({"label": label, "value": round(value * 100), "unit": unit})
+    macro_scenario["evidence"] = scenario_evidence
+
     outlook = []
     if equity_breadth is not None:
         if equity_breadth >= 0.15 and (usd_strength is None or usd_strength <= 0.15):
@@ -360,7 +445,7 @@ def build_macro_snapshot(
             index_bias, index_title = "caution", "Índices EUA · pressão observada"
         else:
             index_bias, index_title = "watch", "Índices EUA · sinais mistos"
-        index_detail = "S&P 500, NASDAQ e Russell confirmam movimento pró-risco." if index_bias == "favorable" else "Dólar firme ou breadth negativo pode limitar índices amplos." if index_bias == "caution" else "Confirme direção entre os índices antes de assumir continuidade."
+        index_detail = "Cesta dos índices dos EUA, Alemanha e Japão confirma movimento pró-risco." if index_bias == "favorable" else "Dólar firme ou breadth global negativo pode limitar os índices." if index_bias == "caution" else "Confirme direção entre regiões antes de assumir continuidade."
         if oil_pressure is not None and oil_pressure >= 0.25:
             index_detail += " Petróleo acelerando adiciona risco de custo/inflação."
         outlook.append({"group": "EQUITIES", "bias": index_bias, "title": index_title, "detail": index_detail})
@@ -410,13 +495,14 @@ def build_macro_snapshot(
         "asOf": now_ms, "source": "BingX TradFi + Hyperliquid Spot/HIP-3 · cotações ao vivo; amostras alinhadas de 1 minuto",
         "storage": {"engine": storage, "durable": durable, "retentionDays": 7, "oldestSample": oldest_sample, "trackedAssets": len(MACRO_ASSETS), "assetsWithHistory": usable_samples},
         "status": "live" if live_count else "history" if usable_samples else "warming",
-        "regime": {"label": regime, "candidate": regime, "qualified": regime_qualified, "score": risk_score, "coverage": coverage, "components": components},
+        "regime": {"label": regime, "candidate": regime, "qualified": regime_qualified, "score": risk_score, "coverage": coverage, "components": components,
+                   "scoreWindows": score_windows, "acceleration": {"label": regime_acceleration_label, "delta": regime_acceleration}},
         "breadth": breadth,
         "usd": {"state": usd_state, "strengthScore": round(usd_strength * 100) if usd_strength is not None else None},
         "oil": {"state": oil_state, "pressureScore": round(oil_pressure * 100) if oil_pressure is not None else None},
         "assets": list(measures.values()), "accelerators": accelerators, "outlook": outlook,
         "yieldCurve": yield_curve,
-        "confirmations": confirmations,
+        "confirmations": confirmations, "macroScenario": macro_scenario,
         # Preserve the removed matrix response shape during independent web/API deploys.
         # Older browser bundles can render empty cells instead of crashing on missing fields.
         "relationships": [],
@@ -428,7 +514,7 @@ def build_macro_snapshot(
         "correlationShifts": [],
         "divergences": divergences, "insights": insights,
         "chart": {"windowMinutes": 60, "series": chart_series, "dailyWindowHours": 24, "dailySeries": daily_chart_series},
-        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off usa Z-score de 5 min com pesos: índices 35%, dólar 25%, cíclicos/ouro 15%, FX de carry AUD/JPY 10% e Treasuries 15%. USD/JPY compõe a cesta de força do dólar; AUD/JPY é um proxy cambial pró-cíclico. O componente Treasury mantém o sinal da direção inversa das yields, ponderado pela intensidade do contexto cruzado; yields em queda contribuem positivamente e em alta negativamente. O painel também indica se o movimento está alinhado ao contexto observado. Isso não determina a causa macroeconômica nem define regime isoladamente. Spreads 10Y−2Y e 30Y−10Y permanecem como contexto separado. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
+        "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off de 5 min usa pesos: índices 35%, dólar 25%, cíclicos/ouro 15%, FX de carry AUD/JPY 10% e Treasuries 15%; pesos renormalizados conforme cobertura. O score agregado também é calculado em 1/5/15/60 min; aceleração compara 5 min com 15 min, não representa previsão. A cesta de índices divide o voto entre EUA e a média Alemanha/Japão, quando disponíveis. USD/JPY compõe a força do dólar; AUD/JPY é proxy cambial pró-cíclico. Cenários de crescimento, alívio de juros, pressão inflacionária e defesa/desaceleração são compatibilidades de curto prazo, não identificação causal. O componente Treasury mantém o sinal da direção inversa das yields, ponderado pela intensidade do contexto cruzado; yields em queda contribuem positivamente e em alta negativamente. Spreads 10Y−2Y e 30Y−10Y permanecem como contexto separado. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
         "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes. AUD/JPY é apenas um proxy de carry/risk appetite e pode divergir do regime observado em outros mercados.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
 
