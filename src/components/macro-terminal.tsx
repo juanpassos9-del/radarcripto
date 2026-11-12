@@ -331,7 +331,14 @@ export default function MacroTerminal() {
         <article className="macro-metric-card storage"><div className="macro-card-kicker"><Database size={14}/> HISTÓRICO SINCRONIZADO</div><strong>{snapshot?.storage.assetsWithHistory ?? 0}<small> / {snapshot?.storage.trackedAssets ?? 24} ativos</small></strong><div className="macro-storage-line">{snapshot?.storage.engine.toUpperCase() ?? "—"}<span className={snapshot?.storage.durable ? "pos" : "warning"}>{snapshot?.storage.durable ? "DURÁVEL" : "VOLÁTIL"}</span></div><p>1 amostra/min · retenção {snapshot?.storage.retentionDays ?? 7} dias</p></article>
       </section>
 
-      <MarketRotationRadar points={rotationPoints} category={rotationCategory} onCategoryChange={setRotationCategory}/>
+      <div className="macro-rotation-insights-layout">
+        <MarketRotationRadar points={rotationPoints} category={rotationCategory} onCategoryChange={setRotationCategory}/>
+        <section className="panel macro-insight-panel">
+          <div className="panelhead"><span className="paneltitle">LEITURA DO REGIME</span><span className="macro-tag"><i/></span></div>
+          <div className="macro-insights">{snapshot?.insights.map((insight, index) => <article className={`macro-insight ${insight.tone}`} key={`${insight.title}-${index}`}><span className="macro-insight-mark"><ArrowUpRight size={15}/></span><div><strong>{insight.title}</strong><p>{insight.detail}</p></div></article>) ?? <div className="loading">Carregando fatores macro observados…</div>}</div>
+          <div className="macro-insight-note">Viés estimado por preços recentes; confirme com o comportamento do próprio índice e com o horário de negociação.</div>
+        </section>
+      </div>
 
       <section className="macro-yield-strip" aria-label="Curva de juros dos Treasuries">
         {["UST2Y", "UST10Y", "UST30Y"].map(key => {
@@ -382,12 +389,6 @@ export default function MacroTerminal() {
           <div className="macro-chart-foot"><span>BASE MÍNIMA · 23H DE HISTÓRICO</span><span>{snapshot?.chart.dailySeries?.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
       </div>
-      <section className="panel macro-insight-panel">
-        <div className="panelhead"><span className="paneltitle">LEITURA DO REGIME</span><span className="macro-tag"><i/></span></div>
-        <div className="macro-insights">{snapshot?.insights.map((insight, index) => <article className={`macro-insight ${insight.tone}`} key={`${insight.title}-${index}`}><span className="macro-insight-mark"><ArrowUpRight size={15}/></span><div><strong>{insight.title}</strong><p>{insight.detail}</p></div></article>) ?? <div className="loading">Carregando fatores macro observados…</div>}</div>
-        <div className="macro-insight-note">Viés estimado por preços recentes; confirme com o comportamento do próprio índice e com o horário de negociação.</div>
-      </section>
-
       <div className="macro-grid macro-lower">
         <section className="panel macro-assets-panel">
           <div className="panelhead"><span className="paneltitle">MOMENTUM NORMALIZADO · 1 / 5 / 15 / 60 MIN</span><span className="macro-tag">RETORNO · VELOCIDADE · Z-SCORE</span></div>

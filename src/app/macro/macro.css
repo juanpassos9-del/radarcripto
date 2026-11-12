@@ -128,6 +128,10 @@
 .macro-watchlist-name small { margin-top:2px; color:#677789; font:6px 'DM Mono',monospace; }
 .macro-watchlist-foot { padding:9px 10px; color:#6d7c8c; font-size:7px; line-height:1.45; border-top:1px solid #202833; }
 .macro-rotation-panel { margin:0 0 12px; overflow:hidden; }
+.macro-rotation-insights-layout { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr); gap:12px; align-items:stretch; margin-bottom:12px; }
+.macro-rotation-insights-layout .macro-rotation-panel,.macro-rotation-insights-layout .macro-insight-panel { height:100%; margin:0; }
+.macro-rotation-insights-layout .macro-insight-panel { display:flex; flex-direction:column; }
+.macro-rotation-insights-layout .macro-insights { flex:1; }
 .macro-rotation-head { align-items:center; gap:12px; }
 .macro-rotation-head>div:first-child { display:grid; gap:4px; }
 .macro-rotation-head>div:first-child small { color:#758697; font:7px 'DM Mono',monospace; }
@@ -202,7 +206,7 @@
 .neg { color:#ff7189; }
 .muted { color:#758395; }
 .warning { color:#efb45d; }
-@media(max-width:1050px) { .macro-overview { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-yield-strip { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-confirmation-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-grid,.macro-lower,.macro-price-maps { grid-template-columns:minmax(0,1fr); } .macro-outlook-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-line-chart { height:245px; } }
+@media(max-width:1050px) { .macro-overview { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-yield-strip { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-confirmation-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-rotation-insights-layout { grid-template-columns:minmax(0,1fr); } .macro-grid,.macro-lower,.macro-price-maps { grid-template-columns:minmax(0,1fr); } .macro-outlook-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-line-chart { height:245px; } }
 @media(max-width:720px) {
   .macro-wrap { padding:15px 12px 22px; }
   .macro-heading { align-items:flex-start; flex-direction:column; gap:9px; margin-top:2px; }
