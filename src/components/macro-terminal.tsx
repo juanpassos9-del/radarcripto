@@ -90,9 +90,10 @@ function MacroLineChart({ series, label, emptyMessage, hiddenKeys, onToggleKey }
     : fmtTime(time);
   return <div className="macro-chart-wrap">
     <svg className="macro-line-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`Variação percentual normalizada dos ativos: ${label}`}>
-      {ticks.map((tick, index) => <g key={index}><line x1={left} x2={width - right} y1={y(tick)} y2={y(tick)} className={Math.abs(tick) < 1e-6 ? "macro-zero-line" : "macro-grid-line"}/><text x={left - 8} y={y(tick) + 3} textAnchor="end" className="macro-axis-label">{tick.toFixed(2)}%</text></g>)}
+      {ticks.map((tick, index) => <g key={index}><line x1={left} x2={width - right} y1={y(tick)} y2={y(tick)} className="macro-grid-line"/><text x={left - 8} y={y(tick) + 3} textAnchor="end" className="macro-axis-label">{tick.toFixed(2)}%</text></g>)}
       <line x1={left} x2={left} y1={top} y2={height - bottom} className="macro-grid-line"/>
       {visibleSeries.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
+      <line x1={left} x2={width - right} y1={y(0)} y2={y(0)} className="macro-zero-line"/>
       <text x={left} y={height - 5} className="macro-axis-label">{formatTime(minTime)}</text><text x={width - right} y={height - 5} textAnchor="end" className="macro-axis-label">{formatTime(maxTime)}</text>
     </svg>
     {legend}
