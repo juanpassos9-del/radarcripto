@@ -27,16 +27,18 @@ const WATCHLIST_CATEGORIES: { key: string; label: string }[] = [
   { key: "metal", label: "METAIS" },
 ];
 const CHART_SERIES_COLORS: Record<string, string> = {
-  DXY: "#45E1D0",
-  EURUSD: "#B78CFF",
-  SP500: "#FFD166",
-  NASDAQ100: "#4DA3FF",
-  WTI: "#FF6B6B",
-  GOLD: "#F4E04D",
-  COPPER: "#D88B55",
-  EWZ: "#55E6A5",
-  DRAM: "#75D7FF",
-  SOXL: "#FF80BF",
+  DXY: "#00D9F5",
+  EURUSD: "#A783FF",
+  USDJPY: "#FF6464",
+  AUDJPY: "#B6E84A",
+  SP500: "#FFC247",
+  NASDAQ100: "#4F9BFF",
+  WTI: "#FF4F91",
+  GOLD: "#FFE66D",
+  COPPER: "#E8753A",
+  EWZ: "#20C98A",
+  DRAM: "#E18BEA",
+  SOXL: "#E6EDF5",
 };
 type MacroSnapshot = {
   asOf: number; source: string; status: string;
@@ -73,7 +75,7 @@ function MacroLineChart({ series, label, emptyMessage }: { series: MacroSeries[]
     <svg className="macro-line-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`Variação percentual normalizada dos ativos: ${label}`}>
       {ticks.map((tick, index) => <g key={index}><line x1={left} x2={width - right} y1={y(tick)} y2={y(tick)} className={Math.abs(tick) < 1e-6 ? "macro-zero-line" : "macro-grid-line"}/><text x={left - 8} y={y(tick) + 3} textAnchor="end" className="macro-axis-label">{tick.toFixed(2)}%</text></g>)}
       <line x1={left} x2={left} y1={top} y2={height - bottom} className="macro-grid-line"/>
-      {series.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="2.6" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
+      {series.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
       <text x={left} y={height - 5} className="macro-axis-label">{formatTime(minTime)}</text><text x={width - right} y={height - 5} textAnchor="end" className="macro-axis-label">{formatTime(maxTime)}</text>
     </svg>
     <div className="macro-legend">{series.map(item => <span key={item.key}><i style={{ background: item.color, boxShadow: `0 0 8px ${item.color}` }}/>{item.label}</span>)}</div>
