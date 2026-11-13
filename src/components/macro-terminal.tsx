@@ -15,7 +15,7 @@ type MacroAsset = {
   sampleCount: number; ageMs: number | null; status: string;
 };
 type RotationPoint = { asset: MacroAsset; x: number; y: number; strength: number; acceleration: number };
-type MacroSeries = { key: string; label: string; color: string; values: { time: number; value: number }[] };
+type MacroSeries = { key: string; label: string; color: string; category?: string; values: { time: number; value: number }[] };
 type BreadthGroup = { label: string; advancing: number; neutral: number; declining: number; available: number; total: number; score: number | null; coverage: number };
 type AlertPreferences = { enabled: boolean; regime: boolean; exceptionalMove: boolean; divergence: boolean; multiClass: boolean; zThreshold: number; cooldownMinutes: number };
 type MacroAlert = { id: string; createdAt: number; title: string; detail: string; tone: "positive" | "risk" | "warning" };
@@ -63,21 +63,40 @@ type MacroSnapshot = {
   method: string; limitations: string[];
 };
 
-function MacroLineChart({ series, label, emptyMessage, hiddenKeys, onToggleKey }: {
+const PRICE_MAP_CATEGORIES = [
+  ["all", "TODAS"], ["index", "ÍNDICES"], ["fx", "MOEDAS"],
+  ["commodities", "COMMODITIES"], ["rates", "JUROS"],
+] as const;
+
+function isInPriceMapCategory(series: MacroSeries, category: string) {
+  if (category === "all") return true;
+  if (category === "commodities") return series.category === "energy" || series.category === "metal";
+  if (category === "rates") return series.category === "rates" || series.category === "bond";
+  if (category === "index") return series.category === "index" || series.category === "equity";
+  return series.category === category;
+}
+
+function MacroLineChart({ series, label, emptyMessage, hiddenKeys, onToggleKey, category, onCategoryChange }: {
   series: MacroSeries[]; label: string; emptyMessage: string;
   hiddenKeys: Record<string, boolean>; onToggleKey: (key: string) => void;
+  category: string; onCategoryChange: (category: string) => void;
 }) {
   const width = 1000, height = 330, left = 46, right = 18, top = 18, bottom = 26;
-  const visibleSeries = series.filter(item => !hiddenKeys[item.key]);
+  const filteredSeries = series.filter(item => isInPriceMapCategory(item, category));
+  const visibleSeries = filteredSeries.filter(item => !hiddenKeys[item.key]);
   const all = visibleSeries.flatMap(item => item.values);
-  const legend = <div className="macro-legend">{series.map(item => {
+  const filters = <div className="macro-map-filters" role="group" aria-label={`Filtrar ativos do mapa ${label}`}>
+    {PRICE_MAP_CATEGORIES.map(([key, title]) => <button type="button" key={key} aria-pressed={category === key} onClick={() => onCategoryChange(key)}>{title}</button>)}
+  </div>;
+  const legend = <div className="macro-legend">{filteredSeries.map(item => {
     const visible = !hiddenKeys[item.key];
     return <button type="button" key={item.key} aria-pressed={visible} title={`${visible ? "Ocultar" : "Mostrar"} ${item.label}`} onClick={() => onToggleKey(item.key)}>
       <i style={{ background: item.color, boxShadow: visible ? `0 0 8px ${item.color}` : "none" }}/>{item.label}
     </button>;
   })}</div>;
   if (all.length < 4) return <div className="macro-chart-wrap">
-    <div className="macro-chart-empty">{visibleSeries.length ? emptyMessage : "Todos os ativos estão ocultos. Clique nos nomes da legenda para reexibi-los."}</div>
+    {filters}
+    <div className="macro-chart-empty">{!filteredSeries.length ? "Nenhum ativo desta categoria tem série disponível neste mapa." : visibleSeries.length ? emptyMessage : "Todos os ativos desta categoria estão ocultos. Clique nos nomes da legenda para reexibi-los."}</div>
     {legend}
   </div>;
   const times = all.map(point => point.time), values = all.map(point => point.value);
@@ -92,6 +111,7 @@ function MacroLineChart({ series, label, emptyMessage, hiddenKeys, onToggleKey }
     ? new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(time)
     : fmtTime(time);
   return <div className="macro-chart-wrap">
+    {filters}
     <svg className="macro-line-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`Variação percentual normalizada dos ativos: ${label}`}>
       {ticks.map((tick, index) => <g key={index}><line x1={left} x2={width - right} y1={y(tick)} y2={y(tick)} className="macro-grid-line"/><text x={left - 8} y={y(tick) + 3} textAnchor="end" className="macro-axis-label">{tick.toFixed(2)}%</text></g>)}
       <line x1={left} x2={left} y1={top} y2={height - bottom} className="macro-grid-line"/>
@@ -141,6 +161,8 @@ export default function MacroTerminal() {
   const [quotes, setQuotes] = useState<Record<string, number>>({});
   const [hiddenIntradayKeys, setHiddenIntradayKeys] = useState<Record<string, boolean>>({});
   const [hiddenDailyKeys, setHiddenDailyKeys] = useState<Record<string, boolean>>({});
+  const [intradayCategory, setIntradayCategory] = useState("all");
+  const [dailyCategory, setDailyCategory] = useState("all");
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
   const [showMethod, setShowMethod] = useState(false);
@@ -280,25 +302,27 @@ export default function MacroTerminal() {
 
   const chartSeries = useMemo(() => (snapshot?.chart.series ?? []).map(series => {
     const color = CHART_SERIES_COLORS[series.key] ?? series.color;
+    const category = snapshot?.assets.find(asset => asset.key === series.key)?.category;
     const latestPrice = quotes[snapshot?.assets.find(asset => asset.key === series.key)?.symbol ?? ""];
-    if (!latestPrice || !series.values.length) return { ...series, color };
+    if (!latestPrice || !series.values.length) return { ...series, color, category };
     const asset = snapshot?.assets.find(item => item.key === series.key);
     const basisPrice = asset?.price;
-    if (!basisPrice) return { ...series, color };
+    if (!basisPrice) return { ...series, color, category };
     const last = series.values[series.values.length - 1];
     const value = last.value + (latestPrice / basisPrice - 1) * 100;
-    return { ...series, color, values: [...series.values.slice(0, -1), { time: Date.now(), value }] };
+    return { ...series, color, category, values: [...series.values.slice(0, -1), { time: Date.now(), value }] };
   }), [snapshot, quotes]);
   const dailyChartSeries = useMemo(() => (snapshot?.chart.dailySeries ?? []).map(series => {
     const color = CHART_SERIES_COLORS[series.key] ?? series.color;
+    const category = snapshot?.assets.find(asset => asset.key === series.key)?.category;
     const latestPrice = quotes[snapshot?.assets.find(asset => asset.key === series.key)?.symbol ?? ""];
-    if (!latestPrice || !series.values.length) return { ...series, color };
+    if (!latestPrice || !series.values.length) return { ...series, color, category };
     const asset = snapshot?.assets.find(item => item.key === series.key);
     const basisPrice = asset?.price;
-    if (!basisPrice) return { ...series, color };
+    if (!basisPrice) return { ...series, color, category };
     const last = series.values[series.values.length - 1];
     const value = last.value + (latestPrice / basisPrice - 1) * 100;
-    return { ...series, color, values: [...series.values.slice(0, -1), { time: Date.now(), value }] };
+    return { ...series, color, category, values: [...series.values.slice(0, -1), { time: Date.now(), value }] };
   }), [snapshot, quotes]);
   const rotationPoints = useMemo(() => (snapshot?.assets ?? []).flatMap(asset => {
     const z5 = asset.windows?.["5"]?.z, z15 = asset.windows?.["15"]?.z, z60 = asset.windows?.["60"]?.z;
@@ -397,13 +421,13 @@ export default function MacroTerminal() {
         <section className="panel macro-chart-panel">
           <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · INTRADIA</span><span className="macro-tag"><i/> ÚLTIMOS 60 MIN</span></div>
           <p className="macro-chart-subtitle">Cada linha começa em 0% no início da janela. Treasuries mostram variação relativa do yield, não pontos-base.</p>
-          <MacroLineChart series={chartSeries} label="últimos 60 minutos" emptyMessage="Aguardando amostras recentes sincronizadas para desenhar o mapa intradia." hiddenKeys={hiddenIntradayKeys} onToggleKey={toggleChartKey(setHiddenIntradayKeys)}/>
+          <MacroLineChart series={chartSeries} label="últimos 60 minutos" emptyMessage="Aguardando amostras recentes sincronizadas para desenhar o mapa intradia." hiddenKeys={hiddenIntradayKeys} onToggleKey={toggleChartKey(setHiddenIntradayKeys)} category={intradayCategory} onCategoryChange={setIntradayCategory}/>
           <div className="macro-chart-foot"><span>HORÁRIO SÃO PAULO · {snapshot ? fmtTime(snapshot.asOf) : "—"}</span><span>{snapshot?.chart.series.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
         <section className="panel macro-chart-panel">
           <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE PREÇOS · DIÁRIO</span><span className="macro-tag"><i/> ÚLTIMAS 24 HORAS</span></div>
           <p className="macro-chart-subtitle">Rebase em 0% há aproximadamente 24h. Treasuries mostram variação relativa do yield, não pontos-base; séries entram com histórico e cotação recente.</p>
-          <MacroLineChart series={dailyChartSeries} label="últimas 24 horas" emptyMessage="Aquecendo histórico diário. Cada ativo entra após acumular uma base próxima de 24 horas." hiddenKeys={hiddenDailyKeys} onToggleKey={toggleChartKey(setHiddenDailyKeys)}/>
+          <MacroLineChart series={dailyChartSeries} label="últimas 24 horas" emptyMessage="Aquecendo histórico diário. Cada ativo entra após acumular uma base próxima de 24 horas." hiddenKeys={hiddenDailyKeys} onToggleKey={toggleChartKey(setHiddenDailyKeys)} category={dailyCategory} onCategoryChange={setDailyCategory}/>
           <div className="macro-chart-foot"><span>BASE MÍNIMA · 23H DE HISTÓRICO</span><span>{snapshot?.chart.dailySeries?.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
       </div>
