@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bell, CircleHelp, Crosshair, Database, LogOut, Maximize2, Radio, Search, Settings2, Wifi } from "lucide-react";
+import { Bell, ChevronLeft, CircleHelp, Crosshair, Database, LogOut, Maximize2, Radio, Search, Settings2, Wifi } from "lucide-react";
 import MarketChart from "@/components/market-chart";
 import FlowHistory from "@/components/flow-history";
 import MarketScanner from "@/components/market-scanner";
@@ -20,6 +20,7 @@ const nameOf = (symbol: string) => symbol.replace("USDT", "");
 
 export default function Terminal() {
   const [symbol, setSymbol] = useState("BTCUSDT");
+  const [watchlistCollapsed, setWatchlistCollapsed] = useState(false);
   const [interval, setInterval] = useState("5m");
   const [market] = useState<"spot">("spot");
   const selectedKeyRef = useRef("");
@@ -382,13 +383,19 @@ export default function Terminal() {
         })}
       </section>
 
-      <div className="layout">
-        <aside className="panel watchlist"><div className="panelhead"><span className="paneltitle">Watchlist</span><span className="badge">25 SPOT</span></div>
-          {assets.map((asset) => { const m = markets[asset]; const ticker = nameOf(asset); const icon = asset === "BTCUSDT" ? "₿" : asset === "ETHUSDT" ? "Ξ" : ticker.slice(0, 1); return <button key={asset} className={`watchrow ${symbol === asset ? "selected" : ""}`} onClick={() => setSymbol(asset)}>
-            <div className="coinicon">{icon}</div><div><div className="coinname">{ticker} <span style={{ color: "#697687", fontWeight: 400 }}>/ USDT</span></div><div className="coinsub">Binance Spot</div></div>
-            <div><div className="coinprice mono">{fmtPrice(m?.price, m?.price && m.price < 10 ? 4 : 2)}</div><div className={`change ${directionClass(m?.change24h)}`}>{m?.change24h == null ? "—" : `${m.change24h >= 0 ? "+" : ""}${m.change24h.toFixed(2)}%`}</div></div>
-          </button>; })}
-          <div className="watchfoot subtle">Mercado à vista USDT · Binance</div>
+      <div className={`layout ${watchlistCollapsed ? "watchlist-collapsed" : ""}`}>
+        <aside className={`panel watchlist ${watchlistCollapsed ? "collapsed" : ""}`}>
+          <div className="panelhead watchlist-head">
+            <span className="paneltitle">Watchlist</span><span className="badge">25 SPOT</span>
+            <button className="watchlist-toggle" type="button" aria-label={watchlistCollapsed ? "Expandir watchlist" : "Minimizar watchlist"} aria-expanded={!watchlistCollapsed} aria-controls="spot-watchlist-content" title={watchlistCollapsed ? "Expandir watchlist" : "Minimizar watchlist"} onClick={() => setWatchlistCollapsed(value => !value)}><ChevronLeft size={15}/></button>
+          </div>
+          <div id="spot-watchlist-content" className="watchlist-content" hidden={watchlistCollapsed}>
+            {assets.map((asset) => { const m = markets[asset]; const ticker = nameOf(asset); const icon = asset === "BTCUSDT" ? "₿" : asset === "ETHUSDT" ? "Ξ" : ticker.slice(0, 1); return <button key={asset} className={`watchrow ${symbol === asset ? "selected" : ""}`} onClick={() => setSymbol(asset)}>
+              <div className="coinicon">{icon}</div><div><div className="coinname">{ticker} <span style={{ color: "#697687", fontWeight: 400 }}>/ USDT</span></div><div className="coinsub">Binance Spot</div></div>
+              <div><div className="coinprice mono">{fmtPrice(m?.price, m?.price && m.price < 10 ? 4 : 2)}</div><div className={`change ${directionClass(m?.change24h)}`}>{m?.change24h == null ? "—" : `${m.change24h >= 0 ? "+" : ""}${m.change24h.toFixed(2)}%`}</div></div>
+            </button>; })}
+            <div className="watchfoot subtle">Mercado à vista USDT · Binance</div>
+          </div>
         </aside>
 
         <div className="chart-flow-column">
