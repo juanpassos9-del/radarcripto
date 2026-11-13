@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef } from "react";
-import { CandlestickSeries, ColorType, createChart, createSeriesMarkers, CrosshairMode, HistogramSeries, LineSeries, LineStyle, TickMarkType, type ISeriesApi, type ISeriesMarkersPluginApi, type Time, type UTCTimestamp } from "lightweight-charts";
+import { CandlestickSeries, ColorType, createChart, createSeriesMarkers, CrosshairMode, HistogramSeries, LineSeries, LineStyle, TickMarkType, type CreatePriceLineOptions, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type Time, type UTCTimestamp } from "lightweight-charts";
 import type { BreakoutSignal, Candle, ChartOverlays, ReversalSignal, VolatilityZones } from "@/lib/market";
 
 const CHART_TIME_ZONE = "America/Sao_Paulo";
@@ -24,7 +24,10 @@ const formatChartCrosshairTime = (time: Time) => new Intl.DateTimeFormat("pt-BR"
   hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
 }).format(chartDate(time));
 
-export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, signals, breakoutSignals }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[] }) {
+export type RiskRewardLevels = { entry: number | null; stop: number | null; target: number | null };
+type RiskRewardLevel = keyof RiskRewardLevels;
+
+export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, signals, breakoutSignals, riskRewardMode = false, riskRewardLevels, onRiskRewardPoint, onRiskRewardLevelChange }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[]; riskRewardMode?: boolean; riskRewardLevels?: RiskRewardLevels; onRiskRewardPoint?: (price: number) => void; onRiskRewardLevelChange?: (level: RiskRewardLevel, price: number) => void }) {
   const host = useRef<HTMLDivElement>(null);
   const hasMultipleCandles = candles.length >= 2;
   const firstCandleTime = candles[0]?.time;
@@ -36,6 +39,11 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
   const zoneSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const referenceSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const riskRewardLinesRef = useRef<Partial<Record<RiskRewardLevel, IPriceLine>>>({});
+  const riskRewardLevelsRef = useRef<RiskRewardLevels | undefined>(riskRewardLevels);
+  const onRiskRewardLevelChangeRef = useRef(onRiskRewardLevelChange);
+  riskRewardLevelsRef.current = riskRewardLevels;
+  onRiskRewardLevelChangeRef.current = onRiskRewardLevelChange;
 
   useEffect(() => {
     if (!host.current) return;
@@ -77,6 +85,92 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
     }));
     markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers].sort((a, b) => Number(a.time) - Number(b.time)));
   }, [signals, breakoutSignals]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candle = candleRef.current;
+    if (!chart || !candle || !riskRewardMode || !onRiskRewardPoint) return;
+    const handler = (param: { point?: { x: number; y: number } | null }) => {
+      const point = param.point;
+      const hostHeight = host.current?.clientHeight ?? 0;
+      if (!point || point.y < 0 || point.y > hostHeight * 0.78) return;
+      const price = (candle as { coordinateToPrice: (coordinate: number) => number | null }).coordinateToPrice(point.y);
+      if (price != null && Number.isFinite(price) && price > 0) onRiskRewardPoint(price);
+    };
+    chart.subscribeClick(handler);
+    return () => chart.unsubscribeClick(handler);
+  }, [riskRewardMode, onRiskRewardPoint]);
+
+  useEffect(() => {
+    const hostElement = host.current;
+    const candle = candleRef.current as { coordinateToPrice: (coordinate: number) => number | null; priceToCoordinate: (price: number) => number | null } | null;
+    if (!hostElement || !candle) return;
+    let dragging: RiskRewardLevel | null = null;
+    const onPointerDown = (event: PointerEvent) => {
+      if (riskRewardMode) return;
+      const levels = riskRewardLevelsRef.current;
+      if (!levels) return;
+      const rect = hostElement.getBoundingClientRect();
+      const y = event.clientY - rect.top;
+      if (y < 0 || y > hostElement.clientHeight * 0.78) return;
+      const candidates = (Object.entries(levels) as [RiskRewardLevel, number | null][])
+        .filter((entry): entry is [RiskRewardLevel, number] => entry[1] != null)
+        .map(([level, price]) => ({ level, distance: Math.abs((candle.priceToCoordinate(price) ?? Number.POSITIVE_INFINITY) - y) }))
+        .sort((a, b) => a.distance - b.distance);
+      const nearest = candidates[0];
+      if (!nearest || nearest.distance > 9) return;
+      dragging = nearest.level;
+      event.preventDefault();
+      event.stopPropagation();
+      hostElement.setPointerCapture(event.pointerId);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (!dragging) return;
+      const rect = hostElement.getBoundingClientRect();
+      const y = Math.max(0, Math.min(hostElement.clientHeight * 0.78, event.clientY - rect.top));
+      const price = candle.coordinateToPrice(y);
+      if (price != null && Number.isFinite(price) && price > 0) onRiskRewardLevelChangeRef.current?.(dragging, price);
+    };
+    const onPointerUp = () => { dragging = null; };
+    hostElement.addEventListener("pointerdown", onPointerDown, true);
+    hostElement.addEventListener("pointermove", onPointerMove);
+    hostElement.addEventListener("pointerup", onPointerUp);
+    hostElement.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      hostElement.removeEventListener("pointerdown", onPointerDown, true);
+      hostElement.removeEventListener("pointermove", onPointerMove);
+      hostElement.removeEventListener("pointerup", onPointerUp);
+      hostElement.removeEventListener("pointercancel", onPointerUp);
+    };
+  }, [riskRewardMode]);
+
+  useEffect(() => {
+    const candle = candleRef.current as { createPriceLine: (options: CreatePriceLineOptions) => IPriceLine; removePriceLine: (line: IPriceLine) => void } | null;
+    if (!candle) return;
+    const levels = riskRewardLevels ?? { entry: null, stop: null, target: null };
+    const risk = levels.entry != null && levels.stop != null ? Math.abs(levels.entry - levels.stop) : null;
+    const reward = levels.entry != null && levels.target != null ? Math.abs(levels.target - levels.entry) : null;
+    const ratio = risk && reward ? reward / risk : null;
+    const valid = levels.entry != null && levels.stop != null && levels.target != null
+      && (levels.target > levels.entry ? levels.stop < levels.entry : levels.stop > levels.entry);
+    const options: Record<RiskRewardLevel, { price: number | null; color: string; title: string; lineStyle: LineStyle }> = {
+      entry: { price: levels.entry, color: "#f0bd61", title: "ENTRADA", lineStyle: LineStyle.Solid },
+      stop: { price: levels.stop, color: "#ff667c", title: "STOP", lineStyle: LineStyle.Dashed },
+      target: { price: levels.target, color: "#44d49a", title: valid && ratio != null ? `ALVO · ${ratio.toFixed(1)}R` : "ALVO", lineStyle: LineStyle.Dashed },
+    };
+    for (const level of Object.keys(options) as RiskRewardLevel[]) {
+      const option = options[level];
+      const current = riskRewardLinesRef.current[level];
+      if (option.price == null) {
+        if (current) candle.removePriceLine(current);
+        delete riskRewardLinesRef.current[level];
+      } else if (current) {
+        current.applyOptions({ price: option.price, title: option.title });
+      } else {
+        riskRewardLinesRef.current[level] = candle.createPriceLine({ price: option.price, color: option.color, lineWidth: 2, lineStyle: option.lineStyle, axisLabelVisible: true, title: option.title });
+      }
+    }
+  }, [riskRewardLevels]);
 
   useEffect(() => {
     const candleSeries = candleRef.current as { setData: (data: unknown[]) => void; update: (data: unknown) => void } | null;
