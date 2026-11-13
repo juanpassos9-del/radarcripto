@@ -24,8 +24,9 @@ const formatChartCrosshairTime = (time: Time) => new Intl.DateTimeFormat("pt-BR"
   hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
 }).format(chartDate(time));
 
-export type RiskRewardLevels = { entry: number | null; stop: number | null; target: number | null };
+export type RiskRewardLevels = { entry: number | null; stop: number | null };
 type RiskRewardLevel = keyof RiskRewardLevels;
+type RiskRewardLine = RiskRewardLevel | "target1" | "target2";
 
 export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, signals, breakoutSignals, riskRewardMode = false, riskRewardLevels, onRiskRewardPoint, onRiskRewardLevelChange }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[]; riskRewardMode?: boolean; riskRewardLevels?: RiskRewardLevels; onRiskRewardPoint?: (price: number) => void; onRiskRewardLevelChange?: (level: RiskRewardLevel, price: number) => void }) {
   const host = useRef<HTMLDivElement>(null);
@@ -39,7 +40,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
   const zoneSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const referenceSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
-  const riskRewardLinesRef = useRef<Partial<Record<RiskRewardLevel, IPriceLine>>>({});
+  const riskRewardLinesRef = useRef<Partial<Record<RiskRewardLine, IPriceLine>>>({});
   const riskRewardLevelsRef = useRef<RiskRewardLevels | undefined>(riskRewardLevels);
   const onRiskRewardLevelChangeRef = useRef(onRiskRewardLevelChange);
   riskRewardLevelsRef.current = riskRewardLevels;
@@ -147,18 +148,18 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
   useEffect(() => {
     const candle = candleRef.current as { createPriceLine: (options: CreatePriceLineOptions) => IPriceLine; removePriceLine: (line: IPriceLine) => void } | null;
     if (!candle) return;
-    const levels = riskRewardLevels ?? { entry: null, stop: null, target: null };
+    const levels = riskRewardLevels ?? { entry: null, stop: null };
     const risk = levels.entry != null && levels.stop != null ? Math.abs(levels.entry - levels.stop) : null;
-    const reward = levels.entry != null && levels.target != null ? Math.abs(levels.target - levels.entry) : null;
-    const ratio = risk && reward ? reward / risk : null;
-    const valid = levels.entry != null && levels.stop != null && levels.target != null
-      && (levels.target > levels.entry ? levels.stop < levels.entry : levels.stop > levels.entry);
-    const options: Record<RiskRewardLevel, { price: number | null; color: string; title: string; lineStyle: LineStyle }> = {
+    const direction = levels.entry != null && levels.stop != null && levels.stop < levels.entry ? 1 : -1;
+    const target1 = risk != null && risk > 0 && levels.entry != null ? levels.entry + direction * risk : null;
+    const target2 = risk != null && risk > 0 && levels.entry != null ? levels.entry + direction * risk * 2 : null;
+    const options: Record<RiskRewardLine, { price: number | null; color: string; title: string; lineStyle: LineStyle }> = {
       entry: { price: levels.entry, color: "#f0bd61", title: "ENTRADA", lineStyle: LineStyle.Solid },
       stop: { price: levels.stop, color: "#ff667c", title: "STOP", lineStyle: LineStyle.Dashed },
-      target: { price: levels.target, color: "#44d49a", title: valid && ratio != null ? `ALVO · ${ratio.toFixed(1)}R` : "ALVO", lineStyle: LineStyle.Dashed },
+      target1: { price: target1, color: "#44d49a", title: "ALVO · 1R", lineStyle: LineStyle.Dashed },
+      target2: { price: target2, color: "#28a879", title: "ALVO · 2R", lineStyle: LineStyle.Dashed },
     };
-    for (const level of Object.keys(options) as RiskRewardLevel[]) {
+    for (const level of Object.keys(options) as RiskRewardLine[]) {
       const option = options[level];
       const current = riskRewardLinesRef.current[level];
       if (option.price == null) {

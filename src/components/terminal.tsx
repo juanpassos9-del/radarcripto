@@ -23,7 +23,7 @@ export default function Terminal() {
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(false);
   const [interval, setInterval] = useState("5m");
   const [riskRewardMode, setRiskRewardMode] = useState(false);
-  const [riskRewardLevels, setRiskRewardLevels] = useState<RiskRewardLevels>({ entry: null, stop: null, target: null });
+  const [riskRewardLevels, setRiskRewardLevels] = useState<RiskRewardLevels>({ entry: null, stop: null });
   const [market] = useState<"spot">("spot");
   const selectedKeyRef = useRef("");
   selectedKeyRef.current = `${symbol}|${interval}|${market}`;
@@ -364,10 +364,9 @@ export default function Terminal() {
   const coverage = Math.min(100, Math.round((trades.length / 60) * 100));
   const directionClass = (value: number | null | undefined) => value != null && value >= 0 ? "pos" : "neg";
   const placeRiskRewardPoint = useCallback((price: number) => {
-    if (riskRewardLevels.entry == null) setRiskRewardLevels({ entry: price, stop: null, target: null });
-    else if (riskRewardLevels.stop == null) setRiskRewardLevels(current => ({ ...current, stop: price }));
-    else if (riskRewardLevels.target == null) {
-      setRiskRewardLevels(current => ({ ...current, target: price }));
+    if (riskRewardLevels.entry == null) setRiskRewardLevels({ entry: price, stop: null });
+    else if (riskRewardLevels.stop == null) {
+      setRiskRewardLevels(current => ({ ...current, stop: price }));
       setRiskRewardMode(false);
     }
   }, [riskRewardLevels]);
@@ -375,22 +374,19 @@ export default function Terminal() {
     setRiskRewardLevels(current => ({ ...current, [level]: price }));
   }, []);
   const riskRewardRisk = riskRewardLevels.entry != null && riskRewardLevels.stop != null ? Math.abs(riskRewardLevels.entry - riskRewardLevels.stop) : null;
-  const riskRewardGain = riskRewardLevels.entry != null && riskRewardLevels.target != null ? Math.abs(riskRewardLevels.target - riskRewardLevels.entry) : null;
-  const riskRewardRatio = riskRewardRisk && riskRewardGain ? riskRewardGain / riskRewardRisk : null;
-  const riskRewardValid = riskRewardLevels.entry != null && riskRewardLevels.stop != null && riskRewardLevels.target != null
-    && (riskRewardLevels.target > riskRewardLevels.entry ? riskRewardLevels.stop < riskRewardLevels.entry : riskRewardLevels.stop > riskRewardLevels.entry);
   const riskRewardHasLevels = Object.values(riskRewardLevels).some(value => value != null);
+  const riskRewardComplete = riskRewardLevels.entry != null && riskRewardLevels.stop != null;
+  const riskRewardValid = riskRewardComplete && riskRewardRisk != null && riskRewardRisk > 0;
   const riskRewardGuide = riskRewardMode
-    ? riskRewardLevels.entry == null ? "Clique no gráfico para definir a entrada" : riskRewardLevels.stop == null ? "Agora clique para definir o stop" : "Agora clique para definir o alvo"
-    : riskRewardHasLevels && riskRewardLevels.entry != null && riskRewardLevels.stop != null && riskRewardLevels.target != null
-      ? riskRewardValid && riskRewardRatio != null
-        ? `${riskRewardLevels.target > riskRewardLevels.entry ? "LONG" : "SHORT"} · R:R 1:${riskRewardRatio.toFixed(2)} · risco ${(riskRewardRisk! / riskRewardLevels.entry * 100).toFixed(2)}% · ganho ${(riskRewardGain! / riskRewardLevels.entry * 100).toFixed(2)}%`
-        : "Stop e alvo devem ficar em lados opostos da entrada"
+    ? riskRewardLevels.entry == null ? "Clique no gráfico para definir a entrada" : "Agora clique para definir o stop"
+    : riskRewardHasLevels && riskRewardLevels.entry != null && riskRewardLevels.stop != null && riskRewardRisk != null && riskRewardRisk > 0
+      ? `${riskRewardLevels.stop < riskRewardLevels.entry ? "LONG" : "SHORT"} · 1R ${fmtPrice(riskRewardLevels.entry + (riskRewardLevels.stop < riskRewardLevels.entry ? riskRewardRisk : -riskRewardRisk))} · 2R ${fmtPrice(riskRewardLevels.entry + (riskRewardLevels.stop < riskRewardLevels.entry ? riskRewardRisk : -riskRewardRisk) * 2)} · risco ${(riskRewardRisk / riskRewardLevels.entry * 100).toFixed(2)}%`
+      : riskRewardHasLevels ? "Defina entrada e stop em preços diferentes para calcular os alvos"
       : "";
 
   useEffect(() => {
     setRiskRewardMode(false);
-    setRiskRewardLevels({ entry: null, stop: null, target: null });
+    setRiskRewardLevels({ entry: null, stop: null });
   }, [symbol, interval]);
 
   return <main className="shell">
@@ -431,7 +427,7 @@ export default function Terminal() {
 
         <div className="chart-flow-column">
         <section className="panel mainchart"><div className="assetbar"><div><h2>{nameOf(symbol)} <span style={{ color: "#7b8795", fontWeight: 400 }}>/ USDT</span></h2><span className="subtle">BINANCE · SPOT</span></div><span className="largeprice mono">{fmtPrice(current?.price, current?.price && current.price < 10 ? 4 : 2)}</span><span className={`asset-change ${directionClass(current?.change24h)}`}>{current?.change24h == null ? "—" : `${current.change24h >= 0 ? "+" : ""}${current.change24h.toFixed(2)}%`}</span><button className="iconbtn" title="Tela cheia" onClick={() => document.querySelector(".mainchart")?.requestFullscreen()}><Maximize2 size={14}/></button></div>
-          <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><button className={`volume-toggle ${riskRewardMode ? "active" : ""}`} title="Defina entrada, stop e alvo clicando no gráfico; depois arraste os níveis para ajustar" aria-pressed={riskRewardMode} onClick={() => { setRiskRewardLevels({ entry: null, stop: null, target: null }); setRiskRewardMode(value => !value); }}>R:R</button>{riskRewardHasLevels && <button className="volume-toggle" title="Limpar desenho de risco e ganho" onClick={() => { setRiskRewardLevels({ entry: null, stop: null, target: null }); setRiskRewardMode(false); }}>LIMPAR R:R</button>}{riskRewardGuide && <span className={`risk-reward-guide ${riskRewardMode ? "drawing" : riskRewardValid ? "valid" : riskRewardHasLevels ? "invalid" : ""}`} aria-live="polite">{riskRewardGuide}</span>}<span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
+          <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><button className={`volume-toggle ${riskRewardMode ? "active" : ""}`} title="Marque entrada e stop; os alvos de 1R e 2R são projetados automaticamente" aria-pressed={riskRewardMode} onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(value => !value); }}>R:R</button>{riskRewardHasLevels && <button className="volume-toggle" title="Limpar desenho de risco e ganho" onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(false); }}>LIMPAR R:R</button>}{riskRewardGuide && <span className={`risk-reward-guide ${riskRewardMode ? "drawing" : riskRewardValid ? "valid" : riskRewardHasLevels ? "invalid" : ""}`} aria-live="polite">{riskRewardGuide}</span>}<span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
           <div className="chart-overlay-strip"><div className="chart-overlay-legend">{showAnchoredVwaps && <><span><i style={{ background: "#f0bd61" }}/>VWAP D</span><span><i style={{ background: "#4d9bff" }}/>VWAP S</span><span><i style={{ background: "#bd82ff" }}/>VWAP M</span></>}{showPreviousLevels && <><span><i style={{ background: "linear-gradient(90deg,#ff667c 50%,#44d49a 50%)" }}/>D−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#ff9a58 50%,#28d6c5 50%)" }}/>S−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#e86cff 50%,#7aa2ff 50%)" }}/>M−1 H/L</span></>}</div></div>
           <div className={`chartarea ${riskRewardMode ? "risk-reward-active" : riskRewardHasLevels ? "risk-reward-placed" : ""}`}><span className="chartlabel">{symbol} · {interval} · OHLCV SPOT · BINANCE · HORÁRIO SÃO PAULO (UTC−3)</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} signals={chartSignals} breakoutSignals={chartBreakoutSignals} riskRewardMode={riskRewardMode} riskRewardLevels={riskRewardLevels} onRiskRewardPoint={placeRiskRewardPoint} onRiskRewardLevelChange={changeRiskRewardLevel}/> : <div className="chartfallback">Candles indisponíveis · verifique a conexão com a API local</div>}</div>
           <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">PREÇO SPOT</div><div className="statvalue mono">{fmtPrice(current?.price)}</div></div></div>
