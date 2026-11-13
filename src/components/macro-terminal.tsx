@@ -70,9 +70,9 @@ const PRICE_MAP_CATEGORIES = [
 
 function isInPriceMapCategory(series: MacroSeries, category: string) {
   if (category === "all") return true;
-  if (category === "commodities") return series.category === "energy" || series.category === "metal";
+  if (category === "commodities") return series.category === "energy" || series.category === "metal" || series.key === "DRAM" || series.key === "SOXL";
   if (category === "rates") return series.category === "rates" || series.category === "bond";
-  if (category === "index") return series.category === "index" || series.category === "equity";
+  if (category === "index") return series.category === "index" || (series.category === "equity" && series.key !== "DRAM" && series.key !== "SOXL");
   return series.category === category;
 }
 
