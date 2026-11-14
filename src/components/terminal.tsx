@@ -6,7 +6,7 @@ import FlowHistory from "@/components/flow-history";
 import MarketScanner from "@/components/market-scanner";
 import MarketAlerts from "@/components/market-alerts";
 import MarketContext from "@/components/market-context";
-import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken, marketDataLabel, type BookData, type BreakoutSignalData, type Candle, type ChartOverlays, type MarketSnapshot, type ReversalSignalData, type ScannerFlowSnapshot, type Trade, type VolatilityZones } from "@/lib/market";
+import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken, marketDataLabel, type BookData, type BreakoutSignalData, type Candle, type ChartOverlays, type MarketSnapshot, type ReversalSignalData, type ScannerFlowSnapshot, type Trade, type VolatilityZones, type VwapDeviationSignalData } from "@/lib/market";
 
 const assets = [
   "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
@@ -39,6 +39,12 @@ export default function Terminal() {
   const [flowQuality, setFlowQuality] = useState<{ status: string; connected: boolean; lastEventTime: number | null; lastLatencyMs: number | null; events: number; reconnects: number; possibleIdGaps: number; backfillRowsQueued?: number; backfillSkippedIds?: number; backfillFailures?: number; storedTrades: number; oldestTradeTime: number | null; storedFlowBars?: number; oldestFlowBarTime?: number | null; aggregateRetentionDays?: number | null; queueDropped: number; storage: string; storageBytes: number; storageDurable: boolean; rawRetentionHours: number } | null>(null);
   const [reversalData, setReversalData] = useState<ReversalSignalData | null>(null);
   const [breakoutData, setBreakoutData] = useState<BreakoutSignalData | null>(null);
+  const [vwapDeviationData, setVwapDeviationData] = useState<VwapDeviationSignalData | null>(null);
+  const [vwapDeviationError, setVwapDeviationError] = useState(false);
+  const [showVwapDeviation, setShowVwapDeviation] = useState(true);
+  const [vwapDeviationVolumeMultiple, setVwapDeviationVolumeMultiple] = useState(1.2);
+  const [vwapDeviationWickBody, setVwapDeviationWickBody] = useState(1.5);
+  const [vwapDeviationCooldown, setVwapDeviationCooldown] = useState(10);
   const [breakoutError, setBreakoutError] = useState(false);
   const [breakoutBuyEnabled, setBreakoutBuyEnabled] = useState(true);
   const [breakoutSellEnabled, setBreakoutSellEnabled] = useState(true);
@@ -46,6 +52,7 @@ export default function Terminal() {
   const [breakoutVolumeMultiple, setBreakoutVolumeMultiple] = useState(1.5);
   const [breakoutAtrMultiple, setBreakoutAtrMultiple] = useState(0.15);
   const breakoutRequestRef = useRef(0);
+  const vwapDeviationRequestRef = useRef(0);
   const [reversalError, setReversalError] = useState(false);
   const [buyEnabled, setBuyEnabled] = useState(true);
   const [sellEnabled, setSellEnabled] = useState(true);
@@ -169,12 +176,33 @@ export default function Terminal() {
     }
   }, [symbol, interval, market, breakoutPercentile, breakoutVolumeMultiple, breakoutAtrMultiple, breakoutBuyEnabled, breakoutSellEnabled]);
 
+  const loadVwapDeviationSignals = useCallback(async () => {
+    const requestId = ++vwapDeviationRequestRef.current;
+    const params = new URLSearchParams({
+      symbol, interval, market, volume_multiple: String(vwapDeviationVolumeMultiple),
+      rejection_wick_body: String(vwapDeviationWickBody), cooldown: String(vwapDeviationCooldown),
+    });
+    try {
+      const data = await getJson<VwapDeviationSignalData>(`/api/vwap-deviation-signals?${params}`);
+      if (requestId === vwapDeviationRequestRef.current) { setVwapDeviationData(data); setVwapDeviationError(false); }
+    } catch {
+      if (requestId === vwapDeviationRequestRef.current) { setVwapDeviationData(null); setVwapDeviationError(true); }
+    }
+  }, [symbol, interval, market, vwapDeviationVolumeMultiple, vwapDeviationWickBody, vwapDeviationCooldown]);
+
   useEffect(() => {
     setBreakoutData(null);
     void loadBreakoutSignals();
     const timer = window.setInterval(() => { if (document.visibilityState === "visible") void loadBreakoutSignals(); }, 60_000);
     return () => window.clearInterval(timer);
   }, [loadBreakoutSignals]);
+
+  useEffect(() => {
+    setVwapDeviationData(null);
+    void loadVwapDeviationSignals();
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void loadVwapDeviationSignals(); }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [loadVwapDeviationSignals]);
 
   useEffect(() => {
     setReversalData(null);
@@ -269,7 +297,7 @@ export default function Terminal() {
           } else if (message.type === "candle") {
             const candle = message.data as Candle;
             setCandles(current => { const next = [...current]; const i = next.findIndex(c => c.time === candle.time); if (i >= 0) next[i] = candle; else next.push(candle); return next.slice(-260); });
-            if (message.closed) { void loadReversalSignals(); void loadBreakoutSignals(); }
+            if (message.closed) { void loadReversalSignals(); void loadBreakoutSignals(); void loadVwapDeviationSignals(); }
           }
         } catch { /* invalid event is ignored; REST refresh continues */ }
       };
@@ -296,7 +324,7 @@ export default function Terminal() {
     };
     connect();
     return () => { active = false; socket?.close(); if (poll) window.clearInterval(poll); };
-  }, [symbol, interval, market, loadAsset, loadReversalSignals, loadBreakoutSignals]);
+  }, [symbol, interval, market, loadAsset, loadReversalSignals, loadBreakoutSignals, loadVwapDeviationSignals]);
 
   const current = markets[symbol];
   const latestReversal = reversalData?.latest ?? null;
@@ -310,6 +338,11 @@ export default function Terminal() {
     const candleTimes = new Set(candles.map(candle => candle.time));
     return (breakoutData?.signals ?? []).filter(item => candleTimes.has(item.time));
   }, [candles, breakoutData]);
+  const chartVwapDeviationSignals = useMemo(() => {
+    const candleTimes = new Set(candles.map(candle => candle.time));
+    return showVwapDeviation ? (vwapDeviationData?.signals ?? []).filter(item => candleTimes.has(item.time)) : [];
+  }, [candles, showVwapDeviation, vwapDeviationData]);
+  const latestVwapDeviation = vwapDeviationData?.latest ?? null;
   const sigmaDistance = current?.price != null && volatility?.reference != null && volatility.garch?.dailyVol ? Math.log(current.price / volatility.reference) / volatility.garch.dailyVol : null;
   const sigmaZone = sigmaDistance == null ? "Sem dados" : Math.abs(sigmaDistance) < 0.5 ? "Neutra" : Math.abs(sigmaDistance) < 1 ? "Moderada" : Math.abs(sigmaDistance) < 2 ? "Atenção" : Math.abs(sigmaDistance) < 3 ? "Extrema" : "Anomalia";
   const bestBid = book?.bids[0]?.price ?? null;
@@ -427,9 +460,9 @@ export default function Terminal() {
 
         <div className="chart-flow-column">
         <section className="panel mainchart"><div className="assetbar"><div><h2>{nameOf(symbol)} <span style={{ color: "#7b8795", fontWeight: 400 }}>/ USDT</span></h2><span className="subtle">BINANCE · SPOT</span></div><span className="largeprice mono">{fmtPrice(current?.price, current?.price && current.price < 10 ? 4 : 2)}</span><span className={`asset-change ${directionClass(current?.change24h)}`}>{current?.change24h == null ? "—" : `${current.change24h >= 0 ? "+" : ""}${current.change24h.toFixed(2)}%`}</span><button className="iconbtn" title="Tela cheia" onClick={() => document.querySelector(".mainchart")?.requestFullscreen()}><Maximize2 size={14}/></button></div>
-          <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><button className={`volume-toggle ${riskRewardMode ? "active" : ""}`} title="Marque entrada e stop; os alvos de 1R e 2R são projetados automaticamente" aria-pressed={riskRewardMode} onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(value => !value); }}>R:R</button>{riskRewardHasLevels && <button className="volume-toggle" title="Limpar desenho de risco e ganho" onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(false); }}>LIMPAR R:R</button>}{riskRewardGuide && <span className={`risk-reward-guide ${riskRewardMode ? "drawing" : riskRewardValid ? "valid" : riskRewardHasLevels ? "invalid" : ""}`} aria-live="polite">{riskRewardGuide}</span>}<span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
+          <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><button className={`volume-toggle ${showVwapDeviation ? "active" : ""}`} title="Sinais DV de rejeição em desvios da VWAP diária" aria-pressed={showVwapDeviation} onClick={() => setShowVwapDeviation(value => !value)}>DV</button><button className={`volume-toggle ${riskRewardMode ? "active" : ""}`} title="Marque entrada e stop; os alvos de 1R e 2R são projetados automaticamente" aria-pressed={riskRewardMode} onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(value => !value); }}>R:R</button>{riskRewardHasLevels && <button className="volume-toggle" title="Limpar desenho de risco e ganho" onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(false); }}>LIMPAR R:R</button>}{riskRewardGuide && <span className={`risk-reward-guide ${riskRewardMode ? "drawing" : riskRewardValid ? "valid" : riskRewardHasLevels ? "invalid" : ""}`} aria-live="polite">{riskRewardGuide}</span>}<span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
           <div className="chart-overlay-strip"><div className="chart-overlay-legend">{showAnchoredVwaps && <><span><i style={{ background: "#f0bd61" }}/>VWAP D</span><span><i style={{ background: "#4d9bff" }}/>VWAP S</span><span><i style={{ background: "#bd82ff" }}/>VWAP M</span></>}{showPreviousLevels && <><span><i style={{ background: "linear-gradient(90deg,#ff667c 50%,#44d49a 50%)" }}/>D−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#ff9a58 50%,#28d6c5 50%)" }}/>S−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#e86cff 50%,#7aa2ff 50%)" }}/>M−1 H/L</span></>}</div></div>
-          <div className={`chartarea ${riskRewardMode ? "risk-reward-active" : riskRewardHasLevels ? "risk-reward-placed" : ""}`}><span className="chartlabel">{symbol} · {interval} · OHLCV SPOT · BINANCE · HORÁRIO SÃO PAULO (UTC−3)</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} signals={chartSignals} breakoutSignals={chartBreakoutSignals} riskRewardMode={riskRewardMode} riskRewardLevels={riskRewardLevels} onRiskRewardPoint={placeRiskRewardPoint} onRiskRewardLevelChange={changeRiskRewardLevel}/> : <div className="chartfallback">Candles indisponíveis · verifique a conexão com a API local</div>}</div>
+          <div className={`chartarea ${riskRewardMode ? "risk-reward-active" : riskRewardHasLevels ? "risk-reward-placed" : ""}`}><span className="chartlabel">{symbol} · {interval} · OHLCV SPOT · BINANCE · HORÁRIO SÃO PAULO (UTC−3)</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} signals={chartSignals} breakoutSignals={chartBreakoutSignals} vwapDeviationSignals={chartVwapDeviationSignals} riskRewardMode={riskRewardMode} riskRewardLevels={riskRewardLevels} onRiskRewardPoint={placeRiskRewardPoint} onRiskRewardLevelChange={changeRiskRewardLevel}/> : <div className="chartfallback">Candles indisponíveis · verifique a conexão com a API local</div>}</div>
           <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">PREÇO SPOT</div><div className="statvalue mono">{fmtPrice(current?.price)}</div></div></div>
         </section>
 
@@ -494,6 +527,15 @@ export default function Terminal() {
               <div className="signal-toggles"><button className={`signal-toggle buy ${breakoutBuyEnabled ? "active" : ""}`} onClick={() => setBreakoutBuyEnabled(value => !value)}>BUY</button><button className={`signal-toggle sell ${breakoutSellEnabled ? "active" : ""}`} onClick={() => setBreakoutSellEnabled(value => !value)}>SELL</button></div>
               <div className="signal-config"><label>Compressão · percentil<input type="number" min="1" max="50" step="1" value={breakoutPercentile} onChange={event => setBreakoutPercentile(Math.min(50, Math.max(1, Number(event.target.value) || 20)))}/></label><label>Volume mínimo · × mediana<input type="number" min="1" max="10" step="0.1" value={breakoutVolumeMultiple} onChange={event => setBreakoutVolumeMultiple(Math.min(10, Math.max(1, Number(event.target.value) || 1.5)))}/></label><label>Margem além da faixa · ATR<input type="number" min="0" max="2" step="0.05" value={breakoutAtrMultiple} onChange={event => setBreakoutAtrMultiple(Math.min(2, Math.max(0, Number(event.target.value) || 0)))}/></label></div>
               <div className="reversal-foot">BB(20) comprimida no percentil {breakoutPercentile} dos últimos 100 candles · fechamento além da faixa de 20 candles por ≥{breakoutAtrMultiple.toFixed(2)} ATR(14) · volume ≥{breakoutVolumeMultiple.toFixed(1)}× mediana dos 20 anteriores · cooldown 10 candles. Regra independente da reversão; análise spot, sem ordens.</div>
+            </div>
+          </section>
+
+          <section className="panel" id="vwap-deviation-signals"><div className="panelhead"><span className="paneltitle">Retorno à VWAP · DV {nameOf(symbol)}</span><span className={`badge ${latestVwapDeviation?.direction === "BUY" ? "good" : latestVwapDeviation?.direction === "SELL" ? "neg" : ""}`}>{vwapDeviationError ? "INDISPONÍVEL" : latestVwapDeviation ? `ÚLTIMO ${latestVwapDeviation.direction}` : "SEM SINAL"}</span></div>
+            <div className="reversal-body">
+              {vwapDeviationError ? <div className="loading">Sinais DV indisponíveis no momento.</div> : vwapDeviationData?.status === "unsupported_interval" ? <div className="loading compact">DV disponível apenas em períodos intradiários.</div> : vwapDeviationData?.status === "insufficient_history" ? <div className="loading compact">Aguardando histórico para validar volume e desvio da sessão.</div> : latestVwapDeviation ? <><div className={`reversal-score ${latestVwapDeviation.direction === "BUY" ? "pos" : "neg"}`}><strong>DV · {latestVwapDeviation.direction}</strong><span>REJEIÇÃO {latestVwapDeviation.sigma}σ</span></div><div className="reversal-description">Fechamento {fmtPrice(latestVwapDeviation.price)} · VWAP {fmtPrice(latestVwapDeviation.vwap)}</div><div className="reversal-description">Volume {latestVwapDeviation.volumeRatio.toFixed(2)}× mediana · pavio/corpo {latestVwapDeviation.wickBodyRatio.toFixed(2)}×</div><div className="reversal-description">Candle fechado · {fmtTime(latestVwapDeviation.time * 1000)}</div></> : <div className="loading compact">Aguardando rejeição confirmada nas bandas da VWAP com volume elevado.</div>}
+              <div className="signal-toggles"><button className={`signal-toggle ${showVwapDeviation ? "active" : ""}`} onClick={() => setShowVwapDeviation(value => !value)}>{showVwapDeviation ? "DV NO GRÁFICO" : "DV OCULTO"}</button></div>
+              <div className="signal-config"><label>Volume mínimo · × mediana<input type="number" min="1" max="10" step="0.1" value={vwapDeviationVolumeMultiple} onChange={event => setVwapDeviationVolumeMultiple(Math.min(10, Math.max(1, Number(event.target.value) || 1.2)))}/></label><label>Pavio/corpo mínimo<input type="number" min="0.5" max="10" step="0.1" value={vwapDeviationWickBody} onChange={event => setVwapDeviationWickBody(Math.min(10, Math.max(0.5, Number(event.target.value) || 1.5)))}/></label><label>Cooldown · candles<input type="number" min="0" max="500" step="1" value={vwapDeviationCooldown} onChange={event => setVwapDeviationCooldown(Math.min(500, Math.max(0, Number(event.target.value) || 0)))}/></label></div>
+              <div className="reversal-foot">VWAP diária e bandas ±1σ, ±2σ e ±3σ calculadas internamente em UTC. Só os sinais DV são plotados; volume compara com a mediana dos 20 candles anteriores. OHLCV estimado, sem ordens.</div>
             </div>
           </section>
 

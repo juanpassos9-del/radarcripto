@@ -40,6 +40,16 @@ export type BreakoutSignalData = {
   signals: BreakoutSignal[]; latest: BreakoutSignal | null; lastCandidate?: BreakoutSignal | null;
   settings: { bbPeriod: number; compressionLookback: number; compressionPercentile: number; compressionRecentBars: number; rangeLookback: number; volumeLookback: number; volumeMultiple: number; breakoutAtrMultiple: number; atrPeriod: number; cooldown: number; buyEnabled: boolean; sellEnabled: boolean };
 };
+export type VwapDeviationSignal = {
+  time: number; symbol: string; interval: string; direction: "BUY" | "SELL"; price: number;
+  vwap: number; bandPrice: number; sigma: 1 | 2 | 3; volumeRatio: number; volumeMedian: number;
+  wickBodyRatio: number; qualified: boolean;
+};
+export type VwapDeviationSignalData = {
+  symbol: string; interval: string; status: string; signals: VwapDeviationSignal[]; latest: VwapDeviationSignal | null;
+  settings: { sigmaLevels: number[]; volumeMultiple: number; volumeLookback: number; rejectionWickBody: number; cooldown: number; resetTimezone: string };
+  source: string; observedCandles?: number; receivedAt?: number;
+};
 export type VolatilityZones = {
   symbol: string; status: string; source?: string; reference?: number; referenceMode?: string; asOf?: number; receivedAt?: number; observations?: number; required?: number;
   garch?: { dailyVol: number; annualizedVol: number; bands: Record<string, { upper: number; lower: number }> };

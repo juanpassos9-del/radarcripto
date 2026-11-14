@@ -22,6 +22,7 @@ from .schemas import BookSnapshot, Candle, Level, MarketSnapshot, Trade
 from .flow_store import FlowStore
 from .reversal_engine import build_reversal_signals
 from .breakout_engine import build_breakout_signals
+from .vwap_deviation_engine import INTERVAL_MS as VWAP_INTERVAL_MS, build_vwap_deviation_signals
 from .volatility import calculate_zones
 from .macro_engine import MACRO_ASSETS, build_macro_snapshot
 
@@ -1643,16 +1644,22 @@ async def tradfi_candles(symbol: str = Query(...), interval: str = Query("5m"), 
         raise HTTPException(502, "Candles BingX indisponíveis para este ativo ou sessão.") from error
 
 @app.get("/api/tradfi/indicators")
-async def tradfi_indicators(symbol: str = Query(...), interval: str = Query("5m")):
+async def tradfi_indicators(
+    symbol: str = Query(...), interval: str = Query("5m"),
+    dv_volume_multiple: float = Query(1.2, ge=1, le=10),
+    dv_rejection_wick_body: float = Query(1.5, ge=0.5, le=10),
+    dv_cooldown: int = Query(10, ge=0, le=500),
+):
     """Volatility, anchored levels and deterministic signals from BingX TradFi OHLCV."""
     symbol = await validate_bingx_tradfi_symbol(symbol)
     if interval not in {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}:
         raise HTTPException(400, "Intervalo TradFi inválido.")
     try:
-        rows, daily_rows, hourly_rows = await asyncio.gather(
+        rows, daily_rows, hourly_rows, vwap_source_rows = await asyncio.gather(
             bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": interval, "limit": 300}, 20),
             bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "1d", "limit": 400}, 300),
             bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "1h", "limit": 500}, 60),
+            bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "5m", "limit": 301}, 20),
         )
 
         def normalize(row: dict[str, Any]) -> dict[str, Any]:
@@ -1661,6 +1668,7 @@ async def tradfi_indicators(symbol: str = Query(...), interval: str = Query("5m"
         candles = [normalize(row) for row in rows or []]
         daily = [normalize(row) for row in daily_rows or []]
         hourly = [normalize(row) for row in hourly_rows or []]
+        vwap_candles = [normalize(row) for row in vwap_source_rows or [] if int(row["time"]) + 300_000 <= int(time.time() * 1000)]
         zones = calculate_zones(symbol, daily)
         zones["source"] = "BingX USDT-M TradFi daily klines"
 
@@ -1691,6 +1699,14 @@ async def tradfi_indicators(symbol: str = Query(...), interval: str = Query("5m"
         )
         breakout = build_breakout_signals(symbol, interval, closed_candles)
         breakout["source"] = "BingX USDT-M TradFi OHLCV; candles fechados; compressão sem dados futuros"
+        utc_day_start_ms = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        vwap_deviation = build_vwap_deviation_signals(
+            symbol, interval, closed_candles, vwap_candles, signal_start_ms=utc_day_start_ms,
+            source="BingX USDT-M OHLCV · VWAP aproximada por candles de 5 min",
+            volume_multiple=dv_volume_multiple, rejection_wick_body=dv_rejection_wick_body,
+            cooldown=dv_cooldown,
+            vwap_interval_ms=300_000,
+        )
 
         # Candle VWAP is an OHLCV estimate, not trade-by-trade VWAP. Seed the
         # visible curves with prior daily candles from the active UTC period.
@@ -1757,8 +1773,8 @@ async def tradfi_indicators(symbol: str = Query(...), interval: str = Query("5m"
         overlays = {"symbol": symbol, "interval": interval, "timezone": "UTC", "vwap": series, "previous": previous,
                     "source": "BingX OHLCV · VWAP aproximada por preço típico e volume dos candles", "receivedAt": now_ms}
         return {"symbol": symbol, "interval": interval, "zones": zones, "overlays": overlays,
-                "reversal": reversal, "breakout": breakout, "receivedAt": now_ms,
-                "limitations": ["VWAPs estimadas com OHLCV (preço típico × volume), não com cada negócio.", "Níveis anteriores usam candles diários UTC da BingX; ativos TradFi podem ter pausas e sessões próprias.", "Sinais são calculados somente em candles fechados e não enviam ordens."]}
+                "reversal": reversal, "breakout": breakout, "vwapDeviation": vwap_deviation, "receivedAt": now_ms,
+                "limitations": ["VWAPs e desvios são estimados com OHLCV, não com cada negócio individual.", "VWAP diária reinicia em 00:00 UTC; contratos TradFi podem ter pausas e sessões próprias.", "Sinais são calculados somente em candles fechados e não enviam ordens."]}
     except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as error:
         log.warning("BingX TradFi indicators unavailable", extra={"symbol": symbol, "interval": interval, "error": str(error)})
         raise HTTPException(502, "Não foi possível calcular os indicadores TradFi com o histórico BingX disponível.") from error
@@ -2260,6 +2276,59 @@ async def breakout_signals(
         )
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
         raise HTTPException(502, f"Unable to calculate breakout signals: {error}") from error
+
+@app.get("/api/vwap-deviation-signals")
+async def vwap_deviation_signals(
+    symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"),
+    volume_multiple: float = Query(1.2, ge=1, le=10), volume_lookback: int = Query(20, ge=5, le=100),
+    rejection_wick_body: float = Query(1.5, ge=0.5, le=10), cooldown: int = Query(10, ge=0, le=500),
+):
+    """Closed-candle daily VWAP deviation rejections for the chart's current UTC session."""
+    symbol, market = validate_symbol(symbol), validate_market(market)
+    if interval not in INTERVALS:
+        raise HTTPException(400, "Unsupported candle interval")
+    if interval not in VWAP_INTERVAL_MS:
+        return build_vwap_deviation_signals(symbol, interval, [], [], source=f"{service.market_source(market)} OHLCV")
+    base, path = service.base_and_path(market, "klines")
+    now_ms = int(time.time() * 1000)
+    day_start_ms = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+    interval_ms = VWAP_INTERVAL_MS[interval]
+    cursor = day_start_ms - volume_lookback * interval_ms
+    rows: list[list[Any]] = []
+    try:
+        # Binance Spot limits kline pages. Page the current UTC session so 1m
+        # charts still have a complete VWAP anchor late in the day.
+        for _ in range(3):
+            page = await service.request(base, path, {"symbol": symbol, "interval": interval, "startTime": cursor, "limit": 1000})
+            if not page:
+                break
+            rows.extend(page)
+            next_cursor = int(page[-1][0]) + interval_ms
+            if len(page) < 1000 or next_cursor <= cursor or next_cursor >= now_ms:
+                break
+            cursor = next_cursor
+        closed_rows = [row for row in rows if int(row[6]) + 1 <= now_ms]
+        candles = [
+            {"time": int(row[0] // 1000), "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5])}
+            for row in closed_rows
+        ]
+        vwap_candles = []
+        for row in closed_rows:
+            volume = float(row[5])
+            quote_volume = float(row[7]) if len(row) > 7 else 0.0
+            vwap_candles.append({
+                "time": int(row[0] // 1000), "open": float(row[1]), "high": float(row[2]),
+                "low": float(row[3]), "close": float(row[4]), "volume": volume,
+                "vwapPrice": quote_volume / volume if volume > 0 and quote_volume > 0 else None,
+            })
+        return build_vwap_deviation_signals(
+            symbol, interval, candles, vwap_candles, volume_multiple=volume_multiple,
+            volume_lookback=volume_lookback, rejection_wick_body=rejection_wick_body,
+            cooldown=cooldown, signal_start_ms=day_start_ms,
+            source=f"{service.market_source(market)} OHLCV · volume cotado/base",
+        )
+    except (httpx.HTTPError, HTTPException, KeyError, ValueError, IndexError, TypeError) as error:
+        raise HTTPException(502, f"Não foi possível calcular o DV com os candles disponíveis: {error}") from error
 
 @app.get("/api/volatility")
 async def volatility(symbol: str = Query("BTCUSDT"), market: str = Query("spot")):
