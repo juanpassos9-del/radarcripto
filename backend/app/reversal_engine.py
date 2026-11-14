@@ -117,7 +117,7 @@ def build_reversal_signals(
                     sigma = float(multiple_text)
                 except (TypeError, ValueError):
                     continue
-                if sigma < min_sigma:
+                if sigma < min_sigma or sigma > 5:
                     continue
                 for side, field in (("BUY", "lower"), ("SELL", "upper")):
                     if (side == "BUY" and not buy_enabled) or (side == "SELL" and not sell_enabled):

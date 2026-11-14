@@ -2110,7 +2110,7 @@ async def reversal_signals(
     symbol: str = Query("BTCUSDT"),
     interval: str = Query("5m"),
     market: str = Query("spot"),
-    min_sigma: float = Query(1.0, ge=1.0, le=3),
+    min_sigma: float = Query(1.0, ge=1.0, le=5),
     touch_tolerance: float = Query(0.001, ge=0, le=0.02),
     min_score: int = Query(50, ge=0, le=100),
     cooldown: int = Query(10, ge=0, le=500),

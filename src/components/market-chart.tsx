@@ -100,7 +100,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       time: signal.time as UTCTimestamp,
       position: "aboveBar" as const,
       shape: "circle" as const,
-      color: signal.direction === "BUY" ? "#32c9df" : "#ffae55",
+      color: signal.direction === "BUY" ? "#44d49a" : "#ff667c",
       text: "",
       size: 2,
     }));
@@ -118,7 +118,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       time: signal.time as UTCTimestamp,
       position: "aboveBar" as const,
       shape: "circle" as const,
-      color: signal.direction === "BUY" ? "#a970ff" : "#ff3fa4",
+      color: signal.direction === "BUY" ? "#44d49a" : "#ff667c",
       text: "",
       size: 2,
     }));
@@ -260,17 +260,22 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
     const levels: { title: string; value: number | null | undefined; color: string; width?: 1 | 2 | 3 | 4; style?: LineStyle }[] = [];
     levels.push({ title: "0σ", value: zones.reference, color: "#f0bd61", width: 2 });
     if (showGarch && zones.garch) {
-      const palette: Record<string, string> = { "0.5": "#f47a8c", "1": "#ff667c", "1.5": "#fa8494", "2": "#ff415e", "2.5": "#e53955", "3": "#bd334a" };
+      const upperPalette: Record<string, string> = { "0.5": "#f47a8c", "1": "#ff667c", "1.5": "#fa8494", "2": "#ff415e", "2.5": "#e53955", "3": "#bd334a", "3.5": "#a62843", "4": "#90233c", "4.5": "#7c1f36", "5": "#681a30" };
+      const lowerPalette: Record<string, string> = { "0.5": "#9ad7bb", "1": "#80ceaa", "1.5": "#68c59b", "2": "#53b98b", "2.5": "#43a77d", "3": "#368f6b", "3.5": "#307f61", "4": "#296f56", "4.5": "#245f4c", "5": "#1e4f41" };
       for (const [multiple, band] of Object.entries(zones.garch.bands)) {
-        if (multiple === "2.5") continue;
-        const color = palette[multiple] ?? "#ff667c";
-        levels.push({ title: `+${multiple}σ`, value: band.upper, color, width: multiple === "2" || multiple === "3" ? 2 : 1, style: multiple === "0.5" || multiple === "1.5" ? LineStyle.Dashed : LineStyle.Solid });
-        levels.push({ title: `−${multiple}σ`, value: band.lower, color: multiple === "3" ? "#43d49a" : "#49bd91", width: multiple === "2" || multiple === "3" ? 2 : 1, style: multiple === "0.5" || multiple === "1.5" ? LineStyle.Dashed : LineStyle.Solid });
+        const width = ["2", "3", "4", "5"].includes(multiple) ? 2 : 1;
+        const style = multiple.endsWith(".5") ? LineStyle.Dashed : LineStyle.Solid;
+        levels.push({ title: `+${multiple}σ`, value: band.upper, color: upperPalette[multiple] ?? "#ff667c", width, style });
+        levels.push({ title: `−${multiple}σ`, value: band.lower, color: lowerPalette[multiple] ?? "#49bd91", width, style });
       }
     }
-    if (showHv && zones.hv252?.bands["1"]?.upper != null) {
-      levels.push({ title: "+1σ", value: zones.hv252.bands["1"].upper, color: "#4d9bff", width: 2, style: LineStyle.Dashed });
-      levels.push({ title: "−1σ", value: zones.hv252.bands["1"].lower, color: "#4d9bff", width: 2, style: LineStyle.Dashed });
+    if (showHv && zones.hv252) {
+      const upperPalette: Record<string, string> = { "1": "#65a9ff", "2": "#4d9bff", "3": "#397fe0", "4": "#2c66c4", "5": "#2453a3" };
+      const lowerPalette: Record<string, string> = { "1": "#68d4e8", "2": "#51bfd5", "3": "#399fba", "4": "#307f9b", "5": "#28677f" };
+      for (const [multiple, band] of Object.entries(zones.hv252.bands)) {
+        levels.push({ title: `+${multiple}σ`, value: band.upper, color: upperPalette[multiple] ?? "#4d9bff", width: 2, style: LineStyle.Dashed });
+        levels.push({ title: `−${multiple}σ`, value: band.lower, color: lowerPalette[multiple] ?? "#51bfd5", width: 2, style: LineStyle.Dashed });
+      }
     }
     for (const level of levels) {
       if (level.value == null || !Number.isFinite(level.value)) continue;

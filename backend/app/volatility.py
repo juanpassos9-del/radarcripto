@@ -55,10 +55,10 @@ def calculate_zones(
         "receivedAt": int(time.time() * 1000),
         "observations": len(returns),
         "garch": {"dailyVol": garch_daily, "annualizedVol": garch_daily * math.sqrt(252), "omega": omega, "alpha": alpha, "beta": beta, "initialPeriod": initial_period,
-                  "bands": {str(mult): band(garch_daily, mult) for mult in (0.5, 1, 1.5, 2, 2.5, 3)}},
+                  "bands": {str(mult): band(garch_daily, mult) for mult in (0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5)}},
         "hv252": {"status": "ready" if hv_daily is not None else "insufficient_history", "dailyVol": hv_daily, "annualizedVol": hv_daily * math.sqrt(252) if hv_daily is not None else None,
                   "period": hv_period, "observations": len(hv_sample),
-                  "bands": {str(mult): band(hv_daily, mult) for mult in (1, 2, 3)}},
+                  "bands": {str(mult): band(hv_daily, mult) for mult in (1, 2, 3, 4, 5)}},
         "method": "Lognormal exp(±σ)",
         "lookahead": "excluded current unfinished daily candle; bands anchored to last closed daily close",
     }
