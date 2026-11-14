@@ -89,7 +89,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       time: signal.time as UTCTimestamp,
       position: signal.direction === "BUY" ? "belowBar" as const : "aboveBar" as const,
       shape: signal.direction === "BUY" ? "arrowUp" as const : "arrowDown" as const,
-      color: signal.direction === "BUY" ? "#44d49a" : "#ff667c",
+      color: signal.direction === "BUY" ? "#a970ff" : "#ff3fa4",
       text: "DV",
       size: 1,
     }));
