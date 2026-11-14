@@ -1646,9 +1646,12 @@ async def tradfi_candles(symbol: str = Query(...), interval: str = Query("5m"), 
 @app.get("/api/tradfi/indicators")
 async def tradfi_indicators(
     symbol: str = Query(...), interval: str = Query("5m"),
-    dv_volume_multiple: float = Query(1.2, ge=1, le=10),
-    dv_rejection_wick_body: float = Query(1.5, ge=0.5, le=10),
-    dv_cooldown: int = Query(10, ge=0, le=500),
+    dv_volume_high: float = Query(1.8, ge=1, le=10),
+    dv_volume_low: float = Query(0.7, ge=0, le=2),
+    dv_spread_wide: float = Query(1.5, ge=0.1, le=10),
+    dv_spread_narrow: float = Query(0.7, ge=0, le=2),
+    dv_close_extreme: float = Query(0.7, ge=0.5, le=1),
+    dv_average_periods: int = Query(20, ge=5, le=100),
 ):
     """Volatility, anchored levels and deterministic signals from BingX TradFi OHLCV."""
     symbol = await validate_bingx_tradfi_symbol(symbol)
@@ -1703,8 +1706,9 @@ async def tradfi_indicators(
         vwap_deviation = build_vwap_deviation_signals(
             symbol, interval, closed_candles, vwap_candles, signal_start_ms=utc_day_start_ms,
             source="BingX USDT-M OHLCV · VWAP aproximada por candles de 5 min",
-            volume_multiple=dv_volume_multiple, rejection_wick_body=dv_rejection_wick_body,
-            cooldown=dv_cooldown,
+            volume_high=dv_volume_high, volume_low=dv_volume_low,
+            spread_wide=dv_spread_wide, spread_narrow=dv_spread_narrow,
+            close_extreme=dv_close_extreme, average_periods=dv_average_periods,
             vwap_interval_ms=300_000,
         )
 
@@ -2280,8 +2284,9 @@ async def breakout_signals(
 @app.get("/api/vwap-deviation-signals")
 async def vwap_deviation_signals(
     symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"),
-    volume_multiple: float = Query(1.2, ge=1, le=10), volume_lookback: int = Query(20, ge=5, le=100),
-    rejection_wick_body: float = Query(1.5, ge=0.5, le=10), cooldown: int = Query(10, ge=0, le=500),
+    volume_high: float = Query(1.8, ge=1, le=10), volume_low: float = Query(0.7, ge=0, le=2),
+    spread_wide: float = Query(1.5, ge=0.1, le=10), spread_narrow: float = Query(0.7, ge=0, le=2),
+    close_extreme: float = Query(0.7, ge=0.5, le=1), average_periods: int = Query(20, ge=5, le=100),
 ):
     """Closed-candle daily VWAP deviation rejections for the chart's current UTC session."""
     symbol, market = validate_symbol(symbol), validate_market(market)
@@ -2293,7 +2298,7 @@ async def vwap_deviation_signals(
     now_ms = int(time.time() * 1000)
     day_start_ms = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
     interval_ms = VWAP_INTERVAL_MS[interval]
-    cursor = day_start_ms - volume_lookback * interval_ms
+    cursor = day_start_ms - average_periods * interval_ms
     rows: list[list[Any]] = []
     try:
         # Binance Spot limits kline pages. Page the current UTC session so 1m
@@ -2322,9 +2327,10 @@ async def vwap_deviation_signals(
                 "vwapPrice": quote_volume / volume if volume > 0 and quote_volume > 0 else None,
             })
         return build_vwap_deviation_signals(
-            symbol, interval, candles, vwap_candles, volume_multiple=volume_multiple,
-            volume_lookback=volume_lookback, rejection_wick_body=rejection_wick_body,
-            cooldown=cooldown, signal_start_ms=day_start_ms,
+            symbol, interval, candles, vwap_candles, volume_high=volume_high,
+            volume_low=volume_low, spread_wide=spread_wide, spread_narrow=spread_narrow,
+            close_extreme=close_extreme, average_periods=average_periods,
+            signal_start_ms=day_start_ms,
             source=f"{service.market_source(market)} OHLCV · volume cotado/base",
         )
     except (httpx.HTTPError, HTTPException, KeyError, ValueError, IndexError, TypeError) as error:

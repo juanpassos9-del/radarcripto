@@ -90,7 +90,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       position: signal.direction === "BUY" ? "belowBar" as const : "aboveBar" as const,
       shape: signal.direction === "BUY" ? "arrowUp" as const : "arrowDown" as const,
       color: signal.direction === "BUY" ? "#a970ff" : "#ff3fa4",
-      text: "DV",
+      text: `DV ${signal.sigma}`,
       size: 1,
     }));
     markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers, ...vwapDeviationMarkers].sort((a, b) => Number(a.time) - Number(b.time)));

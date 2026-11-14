@@ -42,9 +42,12 @@ export default function Terminal() {
   const [vwapDeviationData, setVwapDeviationData] = useState<VwapDeviationSignalData | null>(null);
   const [vwapDeviationError, setVwapDeviationError] = useState(false);
   const [showVwapDeviation, setShowVwapDeviation] = useState(true);
-  const [vwapDeviationVolumeMultiple, setVwapDeviationVolumeMultiple] = useState(1.2);
-  const [vwapDeviationWickBody, setVwapDeviationWickBody] = useState(1.5);
-  const [vwapDeviationCooldown, setVwapDeviationCooldown] = useState(10);
+  const [dvVolumeHigh, setDvVolumeHigh] = useState(1.8);
+  const [dvVolumeLow, setDvVolumeLow] = useState(0.7);
+  const [dvSpreadWide, setDvSpreadWide] = useState(1.5);
+  const [dvSpreadNarrow, setDvSpreadNarrow] = useState(0.7);
+  const [dvCloseExtreme, setDvCloseExtreme] = useState(0.7);
+  const [dvAveragePeriods, setDvAveragePeriods] = useState(20);
   const [breakoutError, setBreakoutError] = useState(false);
   const [breakoutBuyEnabled, setBreakoutBuyEnabled] = useState(true);
   const [breakoutSellEnabled, setBreakoutSellEnabled] = useState(true);
@@ -179,8 +182,9 @@ export default function Terminal() {
   const loadVwapDeviationSignals = useCallback(async () => {
     const requestId = ++vwapDeviationRequestRef.current;
     const params = new URLSearchParams({
-      symbol, interval, market, volume_multiple: String(vwapDeviationVolumeMultiple),
-      rejection_wick_body: String(vwapDeviationWickBody), cooldown: String(vwapDeviationCooldown),
+      symbol, interval, market, volume_high: String(dvVolumeHigh), volume_low: String(dvVolumeLow),
+      spread_wide: String(dvSpreadWide), spread_narrow: String(dvSpreadNarrow),
+      close_extreme: String(dvCloseExtreme), average_periods: String(dvAveragePeriods),
     });
     try {
       const data = await getJson<VwapDeviationSignalData>(`/api/vwap-deviation-signals?${params}`);
@@ -188,7 +192,7 @@ export default function Terminal() {
     } catch {
       if (requestId === vwapDeviationRequestRef.current) { setVwapDeviationData(null); setVwapDeviationError(true); }
     }
-  }, [symbol, interval, market, vwapDeviationVolumeMultiple, vwapDeviationWickBody, vwapDeviationCooldown]);
+  }, [symbol, interval, market, dvVolumeHigh, dvVolumeLow, dvSpreadWide, dvSpreadNarrow, dvCloseExtreme, dvAveragePeriods]);
 
   useEffect(() => {
     setBreakoutData(null);
@@ -532,10 +536,10 @@ export default function Terminal() {
 
           <section className="panel" id="vwap-deviation-signals"><div className="panelhead"><span className="paneltitle">Retorno à VWAP · DV {nameOf(symbol)}</span><span className={`badge ${latestVwapDeviation?.direction === "BUY" ? "good" : latestVwapDeviation?.direction === "SELL" ? "neg" : ""}`}>{vwapDeviationError ? "INDISPONÍVEL" : latestVwapDeviation ? `ÚLTIMO ${latestVwapDeviation.direction}` : "SEM SINAL"}</span></div>
             <div className="reversal-body">
-              {vwapDeviationError ? <div className="loading">Sinais DV indisponíveis no momento.</div> : vwapDeviationData?.status === "unsupported_interval" ? <div className="loading compact">DV disponível apenas em períodos intradiários.</div> : vwapDeviationData?.status === "insufficient_history" ? <div className="loading compact">Aguardando histórico para validar volume e desvio da sessão.</div> : latestVwapDeviation ? <><div className={`reversal-score ${latestVwapDeviation.direction === "BUY" ? "pos" : "neg"}`}><strong>DV · {latestVwapDeviation.direction}</strong><span>REJEIÇÃO {latestVwapDeviation.sigma}σ</span></div><div className="reversal-description">Fechamento {fmtPrice(latestVwapDeviation.price)} · VWAP {fmtPrice(latestVwapDeviation.vwap)}</div><div className="reversal-description">Volume {latestVwapDeviation.volumeRatio.toFixed(2)}× mediana · pavio/corpo {latestVwapDeviation.wickBodyRatio.toFixed(2)}×</div><div className="reversal-description">Candle fechado · {fmtTime(latestVwapDeviation.time * 1000)}</div></> : <div className="loading compact">Aguardando rejeição confirmada nas bandas da VWAP com volume elevado.</div>}
+              {vwapDeviationError ? <div className="loading">Sinais DV indisponíveis no momento.</div> : vwapDeviationData?.status === "unsupported_interval" ? <div className="loading compact">DV disponível apenas em períodos intradiários.</div> : vwapDeviationData?.status === "insufficient_history" ? <div className="loading compact">Aguardando histórico para médias e confirmação dos padrões.</div> : latestVwapDeviation ? <><div className={`reversal-score ${latestVwapDeviation.direction === "BUY" ? "pos" : "neg"}`}><strong>DV {latestVwapDeviation.sigma} · {latestVwapDeviation.direction}</strong><span>{latestVwapDeviation.modelLabels.join(" + ")}</span></div><div className="reversal-description">Confirmação {fmtPrice(latestVwapDeviation.price)} · banda {fmtPrice(latestVwapDeviation.bandPrice)}</div><div className="reversal-description">RVOL {latestVwapDeviation.volumeRatio.toFixed(2)}× · amplitude {latestVwapDeviation.relativeSpread.toFixed(2)}× · CLV {latestVwapDeviation.closeLocation.toFixed(2)}</div><div className="reversal-description">Candle confirmado · {fmtTime(latestVwapDeviation.time * 1000)}</div></> : <div className="loading compact">Aguardando rejeição e confirmação de absorção, upthrust/shakeout ou reteste.</div>}
               <div className="signal-toggles"><button className={`signal-toggle ${showVwapDeviation ? "active" : ""}`} onClick={() => setShowVwapDeviation(value => !value)}>{showVwapDeviation ? "DV NO GRÁFICO" : "DV OCULTO"}</button></div>
-              <div className="signal-config"><label>Volume mínimo · × mediana<input type="number" min="1" max="10" step="0.1" value={vwapDeviationVolumeMultiple} onChange={event => setVwapDeviationVolumeMultiple(Math.min(10, Math.max(1, Number(event.target.value) || 1.2)))}/></label><label>Pavio/corpo mínimo<input type="number" min="0.5" max="10" step="0.1" value={vwapDeviationWickBody} onChange={event => setVwapDeviationWickBody(Math.min(10, Math.max(0.5, Number(event.target.value) || 1.5)))}/></label><label>Cooldown · candles<input type="number" min="0" max="500" step="1" value={vwapDeviationCooldown} onChange={event => setVwapDeviationCooldown(Math.min(500, Math.max(0, Number(event.target.value) || 0)))}/></label></div>
-              <div className="reversal-foot">VWAP diária e bandas ±1σ, ±2σ e ±3σ calculadas internamente em UTC. Só os sinais DV são plotados; volume compara com a mediana dos 20 candles anteriores. OHLCV estimado, sem ordens.</div>
+              <div className="dv-settings-grid"><label>RVOL alto<input type="number" min="1" max="10" step="0.1" value={dvVolumeHigh} onChange={event => setDvVolumeHigh(Math.min(10, Math.max(1, Number(event.target.value) || 1.8)))} /></label><label>RVOL baixo<input type="number" min="0" max="2" step="0.1" value={dvVolumeLow} onChange={event => setDvVolumeLow(Math.min(2, Math.max(0, Number(event.target.value) || 0.7)))} /></label><label>Amplitude larga<input type="number" min="0.1" max="10" step="0.1" value={dvSpreadWide} onChange={event => setDvSpreadWide(Math.min(10, Math.max(0.1, Number(event.target.value) || 1.5)))} /></label><label>Amplitude estreita<input type="number" min="0" max="2" step="0.1" value={dvSpreadNarrow} onChange={event => setDvSpreadNarrow(Math.min(2, Math.max(0, Number(event.target.value) || 0.7)))} /></label><label>CLV extremo<input type="number" min="0.5" max="1" step="0.05" value={dvCloseExtreme} onChange={event => setDvCloseExtreme(Math.min(1, Math.max(0.5, Number(event.target.value) || 0.7)))} /></label><label>Médias · candles<input type="number" min="5" max="100" step="1" value={dvAveragePeriods} onChange={event => setDvAveragePeriods(Math.min(100, Math.max(5, Number(event.target.value) || 20)))} /></label></div>
+              <div className="reversal-foot">DV 1, DV 2 e DV 3 correspondem a 1σ, 2σ e 3σ; os três modelos podem confirmar. RVOL e amplitude comparam à média dos {dvAveragePeriods} candles anteriores. CLV mede o fechamento dentro da faixa do candle. Bandas internas; candles fechados; OHLCV estimado; sem ordens.</div>
             </div>
           </section>
 

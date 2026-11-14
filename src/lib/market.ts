@@ -42,12 +42,13 @@ export type BreakoutSignalData = {
 };
 export type VwapDeviationSignal = {
   time: number; symbol: string; interval: string; direction: "BUY" | "SELL"; price: number;
-  vwap: number; bandPrice: number; sigma: 1 | 2 | 3; volumeRatio: number; volumeMedian: number;
-  wickBodyRatio: number; qualified: boolean;
+  vwap: number; bandPrice: number; sigma: 1 | 2 | 3; volumeRatio: number; volumeAverage: number;
+  relativeSpread: number; closeLocation: number; qualified: boolean;
+  model: "absorption" | "upthrust" | "retest" | "composite"; models: string[]; modelLabels: string[]; testTime?: number;
 };
 export type VwapDeviationSignalData = {
   symbol: string; interval: string; status: string; signals: VwapDeviationSignal[]; latest: VwapDeviationSignal | null;
-  settings: { sigmaLevels: number[]; volumeMultiple: number; volumeLookback: number; rejectionWickBody: number; cooldown: number; resetTimezone: string };
+  settings: { sigmaLevels: number[]; volumeHigh: number; volumeLow: number; spreadWide: number; spreadNarrow: number; closeExtreme: number; averagePeriods: number; resetTimezone: string; models: string[] };
   source: string; observedCandles?: number; receivedAt?: number;
 };
 export type VolatilityZones = {
