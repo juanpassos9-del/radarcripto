@@ -75,6 +75,15 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       text: `${signal.direction} ${signal.score}`,
       size: 1,
     }));
+    const reversalDots = signals.map(signal => ({
+      id: `reversal-dot-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
+      time: signal.time as UTCTimestamp,
+      position: "aboveBar" as const,
+      shape: "circle" as const,
+      color: signal.direction === "BUY" ? "#44d49a" : "#ff667c",
+      text: "",
+      size: 2,
+    }));
     const breakoutMarkers = breakoutSignals.map(signal => ({
       id: `breakout-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
       time: signal.time as UTCTimestamp,
@@ -83,6 +92,15 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       color: signal.direction === "BUY" ? "#32c9df" : "#ffae55",
       text: signal.direction === "BUY" ? "ROMP. ↑" : "ROMP. ↓",
       size: 1,
+    }));
+    const breakoutDots = breakoutSignals.map(signal => ({
+      id: `breakout-dot-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
+      time: signal.time as UTCTimestamp,
+      position: "aboveBar" as const,
+      shape: "circle" as const,
+      color: signal.direction === "BUY" ? "#32c9df" : "#ffae55",
+      text: "",
+      size: 2,
     }));
     const vwapDeviationMarkers = vwapDeviationSignals.map(signal => ({
       id: `dv-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
@@ -102,7 +120,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       text: "",
       size: 2,
     }));
-    markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers, ...vwapDeviationMarkers, ...vwapDeviationDots].sort((a, b) => Number(a.time) - Number(b.time)));
+    markersRef.current?.setMarkers([...reversalMarkers, ...reversalDots, ...breakoutMarkers, ...breakoutDots, ...vwapDeviationMarkers, ...vwapDeviationDots].sort((a, b) => Number(a.time) - Number(b.time)));
   }, [signals, breakoutSignals, vwapDeviationSignals]);
 
   useEffect(() => {
