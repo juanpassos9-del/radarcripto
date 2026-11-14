@@ -72,7 +72,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       position: signal.direction === "BUY" ? "belowBar" as const : "aboveBar" as const,
       shape: signal.direction === "BUY" ? "arrowUp" as const : "arrowDown" as const,
       color: signal.direction === "BUY" ? "#44d49a" : "#ff667c",
-      text: `${signal.direction} ${signal.score}`,
+      text: `REV ${signal.direction === "BUY" ? "↑" : "↓"} ${signal.score}`,
       size: 1,
     }));
     const reversalDots = signals.map(signal => ({
@@ -87,7 +87,9 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
     const breakoutMarkers = breakoutSignals.map(signal => ({
       id: `breakout-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
       time: signal.time as UTCTimestamp,
-      position: signal.direction === "BUY" ? "belowBar" as const : "aboveBar" as const,
+      // Use the opposite label lane from reversal so simultaneous strategies
+      // remain readable on the same candle. Arrow shape/color still show direction.
+      position: signal.direction === "BUY" ? "aboveBar" as const : "belowBar" as const,
       shape: signal.direction === "BUY" ? "arrowUp" as const : "arrowDown" as const,
       color: signal.direction === "BUY" ? "#32c9df" : "#ffae55",
       text: signal.direction === "BUY" ? "ROMP. ↑" : "ROMP. ↓",
