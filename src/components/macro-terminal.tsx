@@ -44,6 +44,13 @@ const CHART_SERIES_COLORS: Record<string, string> = {
   EWZ: "#20C98A",
   DRAM: "#E18BEA",
   SOXL: "#E6EDF5",
+  BTC: "#F3A712",
+  ETH: "#8B9CFF",
+  SOL: "#B68CFF",
+  LINK: "#4B83FF",
+  AAVE: "#B6509E",
+  ONDO: "#59C5B6",
+  NEAR: "#E85B64",
 };
 type MacroSnapshot = {
   asOf: number; source: string; status: string;
@@ -65,7 +72,7 @@ type MacroSnapshot = {
 
 const PRICE_MAP_CATEGORIES = [
   ["all", "TODAS"], ["index", "ÍNDICES"], ["fx", "MOEDAS"],
-  ["commodities", "COMMODITIES"], ["rates", "JUROS"],
+  ["commodities", "COMMODITIES"], ["rates", "JUROS"], ["crypto", "CRIPTO"],
 ] as const;
 
 function isInPriceMapCategory(series: MacroSeries, category: string) {

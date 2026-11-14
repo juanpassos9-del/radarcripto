@@ -109,6 +109,8 @@ class MarketService:
         self.hyperliquid_task: asyncio.Task[Any] | None = None
         self.tradfi_sample_task: asyncio.Task[Any] | None = None
         self.tradfi_seed_task: asyncio.Task[Any] | None = None
+        self.crypto_macro_task: asyncio.Task[Any] | None = None
+        self.crypto_macro_seed_task: asyncio.Task[Any] | None = None
         self.tradfi_seed_complete = False
         self.macro_regime_state: dict[str, Any] = {"confirmed": "AQUECENDO", "candidate": None, "count": 0, "lastBucket": None}
         self.macro_divergence_states: dict[str, dict[str, Any]] = {}
@@ -206,6 +208,10 @@ class MarketService:
         if self.tradfi_seed_task:
             self.tradfi_seed_task.cancel()
             await asyncio.gather(self.tradfi_seed_task, return_exceptions=True)
+        for task in (self.crypto_macro_task, self.crypto_macro_seed_task):
+            if task:
+                task.cancel()
+        await asyncio.gather(*(task for task in (self.crypto_macro_task, self.crypto_macro_seed_task) if task), return_exceptions=True)
         await self.client.aclose()
 
     def ensure_tradfi_ticker_stream(self) -> None:
@@ -217,6 +223,69 @@ class MarketService:
             self.tradfi_seed_task = asyncio.create_task(self.seed_tradfi_history())
         if self.hyperliquid_task is None or self.hyperliquid_task.done():
             self.hyperliquid_task = asyncio.create_task(self.collect_hyperliquid_macro())
+        if self.crypto_macro_task is None or self.crypto_macro_task.done():
+            self.tradfi_symbol_categories.update({symbol: "crypto" for symbol, metadata in MACRO_ASSETS.items() if metadata.get("source") == "Binance Spot"})
+            self.crypto_macro_task = asyncio.create_task(self.collect_crypto_macro_quotes())
+        if self.crypto_macro_seed_task is None or (self.crypto_macro_seed_task.done() and not getattr(self, "crypto_macro_seed_complete", False)):
+            self.crypto_macro_seed_task = asyncio.create_task(self.seed_crypto_macro_history())
+
+    async def seed_crypto_macro_history(self) -> None:
+        """Warm the crypto price maps with a day of Binance Spot one-minute closes."""
+        symbols = [symbol for symbol, metadata in MACRO_ASSETS.items() if metadata.get("source") == "Binance Spot"]
+        rows: list[tuple[str, int, float, str]] = []
+        now_bucket = int(time.time() // 60) * 60_000
+        for index, symbol in enumerate(symbols):
+            pair = symbol.removeprefix("BINANCE:")
+            try:
+                candles = await self.request(SPOT_DATA, "/api/v3/klines", {"symbol": pair, "interval": "1m", "limit": 1440})
+                samples = []
+                for candle in candles or []:
+                    sample_time = (int(candle[0]) // 60_000) * 60_000
+                    price = float(candle[4])
+                    if sample_time < now_bucket and price > 0:
+                        samples.append((symbol, sample_time, price, "crypto"))
+                rows.extend(samples)
+                if samples:
+                    by_time = {point["time"]: point for point in self.tradfi_samples.get(symbol, ())}
+                    by_time.update({sample_time: {"time": sample_time, "price": price, "category": "crypto"} for _, sample_time, price, _ in samples})
+                    self.tradfi_samples[symbol] = deque(sorted(by_time.values(), key=lambda point: point["time"])[-(7 * 24 * 60):], maxlen=7 * 24 * 60)
+            except (httpx.HTTPError, HTTPException, ValueError, IndexError, TypeError) as error:
+                log.info("Binance crypto macro history seed unavailable", extra={"symbol": pair, "error": str(error)})
+            if index + 1 < len(symbols):
+                await asyncio.sleep(0.15)
+        if rows and self.flow_store:
+            await asyncio.to_thread(self.flow_store.save_tradfi_price_samples, rows)
+        self.crypto_macro_seed_complete = True
+
+    async def collect_crypto_macro_quotes(self) -> None:
+        """Collect one shared Binance Spot mini-ticker stream for the Macro Quant crypto set."""
+        symbols = [symbol.removeprefix("BINANCE:").lower() for symbol, metadata in MACRO_ASSETS.items() if metadata.get("source") == "Binance Spot"]
+        symbol_by_pair = {symbol.removeprefix("BINANCE:"): symbol for symbol, metadata in MACRO_ASSETS.items() if metadata.get("source") == "Binance Spot"}
+        streams = "/".join(f"{symbol}@miniTicker" for symbol in symbols)
+        reconnect_delay = 1.0
+        while True:
+            try:
+                async with websockets.connect(f"{SPOT_WS}?streams={streams}", ping_interval=20, ping_timeout=20, open_timeout=12, close_timeout=5, max_size=2**20, max_queue=4096) as upstream:
+                    async for raw in upstream:
+                        message = json.loads(raw)
+                        data = message.get("data", message)
+                        pair = str(data.get("s", "")).upper()
+                        symbol = symbol_by_pair.get(pair)
+                        if not symbol:
+                            continue
+                        try:
+                            price = float(data["c"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if price > 0:
+                            await self.publish_tradfi_quote(symbol, price, int(data.get("E", time.time() * 1000)), source="Binance Spot")
+                    reconnect_delay = 1.0
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Binance crypto Macro Quant stream disconnected")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, 30.0)
 
     async def seed_tradfi_history(self) -> None:
         try:
@@ -1515,7 +1584,7 @@ async def tradfi_macro():
         now_ms = int(time.time() * 1000)
         symbols = [item["symbol"] for item in catalog]
         reference_date = datetime.now(timezone.utc).date().isoformat()
-        bingx_symbols = [symbol for symbol in symbols if not symbol.startswith("HL:")]
+        bingx_symbols = [symbol for symbol in symbols if not symbol.startswith("HL:") and MACRO_ASSETS[symbol].get("source") != "Binance Spot"]
         stale_closes = [symbol for symbol in bingx_symbols if TRADFI_DAILY_CLOSES.get(symbol, {}).get("referenceDate") != reference_date]
         TRADFI_DAILY_CLOSES_PENDING.update({symbol: {"symbol": symbol} for symbol in stale_closes})
         if stale_closes and (TRADFI_DAILY_CLOSES_TASK is None or TRADFI_DAILY_CLOSES_TASK.done()):
