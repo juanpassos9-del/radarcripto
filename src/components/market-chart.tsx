@@ -93,7 +93,16 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       text: `DV ${signal.sigma}`,
       size: 1,
     }));
-    markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers, ...vwapDeviationMarkers].sort((a, b) => Number(a.time) - Number(b.time)));
+    const vwapDeviationDots = vwapDeviationSignals.map(signal => ({
+      id: `dv-dot-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
+      time: signal.time as UTCTimestamp,
+      position: "aboveBar" as const,
+      shape: "circle" as const,
+      color: signal.direction === "BUY" ? "#a970ff" : "#ff3fa4",
+      text: "",
+      size: 2,
+    }));
+    markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers, ...vwapDeviationMarkers, ...vwapDeviationDots].sort((a, b) => Number(a.time) - Number(b.time)));
   }, [signals, breakoutSignals, vwapDeviationSignals]);
 
   useEffect(() => {
