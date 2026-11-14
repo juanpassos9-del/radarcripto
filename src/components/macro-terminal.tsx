@@ -134,7 +134,7 @@ function MarketRotationRadar({ points, category, onCategoryChange }: { points: R
   const width = 900, height = 500, cx = width / 2, cy = height / 2, radiusX = 315, radiusY = 190;
   const categories = [
     ["all", "TODAS"], ["index", "ÍNDICES"], ["fx", "MOEDAS"], ["energy", "ENERGIA"],
-    ["metal", "METAIS"], ["rates", "JUROS"], ["equity", "ETFs"], ["bond", "TÍTULOS"],
+    ["metal", "METAIS"], ["rates", "JUROS"], ["equity", "ETFs"], ["bond", "TÍTULOS"], ["crypto", "CRIPTO"],
   ];
   const filtered = points.filter(point => category === "all" || point.asset.category === category);
   const x = (value: number) => cx + value * radiusX;
