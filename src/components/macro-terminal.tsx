@@ -24,7 +24,7 @@ const WATCHLIST_CATEGORIES: { key: string; label: string }[] = [
   { key: "fx", label: "MOEDAS & FX" }, { key: "index", label: "ÍNDICES" },
   { key: "equity", label: "ETFs SINTÉTICOS" }, { key: "bond", label: "TÍTULOS" },
   { key: "rates", label: "TREASURIES · YIELDS" }, { key: "energy", label: "ENERGIA" },
-  { key: "metal", label: "METAIS" },
+  { key: "metal", label: "METAIS" }, { key: "crypto", label: "CRIPTO" },
 ];
 const CHART_SERIES_COLORS: Record<string, string> = {
   DXY: "#00D9F5",
@@ -501,7 +501,7 @@ export default function MacroTerminal() {
             })}
             {!snapshot && <div className="loading">Carregando cotações e histórico…</div>}
           </div>
-          <div className="macro-watchlist-foot">BingX: candle diário anterior fechado. Hyperliquid: amostra anterior à virada UTC, usada apenas se tiver até 6h. Yields em pontos-base; “sem base” indica referência ou cotação atual insuficiente.</div>
+          <div className="macro-watchlist-foot">BingX: candle diário anterior fechado. Binance Spot: amostra observada próxima à virada UTC. Hyperliquid: amostra anterior à virada UTC, usada apenas se tiver até 6h. Yields em pontos-base; “sem base” indica referência ou cotação atual insuficiente.</div>
         </section>
       </div>
 

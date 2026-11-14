@@ -230,19 +230,22 @@ class MarketService:
             self.crypto_macro_seed_task = asyncio.create_task(self.seed_crypto_macro_history())
 
     async def seed_crypto_macro_history(self) -> None:
-        """Warm the crypto price maps with a day of Binance Spot one-minute closes."""
+        """Warm the crypto price maps with enough Binance Spot history to anchor 24h charts."""
         symbols = [symbol for symbol, metadata in MACRO_ASSETS.items() if metadata.get("source") == "Binance Spot"]
         rows: list[tuple[str, int, float, str]] = []
         now_bucket = int(time.time() // 60) * 60_000
         for index, symbol in enumerate(symbols):
             pair = symbol.removeprefix("BINANCE:")
             try:
-                candles = await self.request(SPOT_DATA, "/api/v3/klines", {"symbol": pair, "interval": "1m", "limit": 1440})
+                # Binance caps Spot klines at 1,000 rows. Asking for 1,440 returns
+                # only the latest ~16h40m, which cannot provide a point before the
+                # 24h chart baseline. 301 five-minute candles cover just over 25h.
+                candles = await self.request(SPOT_DATA, "/api/v3/klines", {"symbol": pair, "interval": "5m", "limit": 301})
                 samples = []
                 for candle in candles or []:
                     sample_time = (int(candle[0]) // 60_000) * 60_000
                     price = float(candle[4])
-                    if sample_time < now_bucket and price > 0:
+                    if sample_time + 5 * 60_000 <= now_bucket and price > 0:
                         samples.append((symbol, sample_time, price, "crypto"))
                 rows.extend(samples)
                 if samples:
