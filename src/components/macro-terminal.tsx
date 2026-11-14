@@ -15,6 +15,7 @@ type MacroAsset = {
   sampleCount: number; ageMs: number | null; status: string;
 };
 type RotationPoint = { asset: MacroAsset; x: number; y: number; strength: number; acceleration: number };
+type RotationReading = { key: string; title: string; assets: { key: string; strength: number; acceleration: number }[]; tone: "positive" | "negative" | "neutral" };
 type MacroSeries = { key: string; label: string; color: string; category?: string; values: { time: number; value: number }[] };
 type BreadthGroup = { label: string; advancing: number; neutral: number; declining: number; available: number; total: number; score: number | null; coverage: number };
 type AlertPreferences = { enabled: boolean; regime: boolean; exceptionalMove: boolean; divergence: boolean; multiClass: boolean; zThreshold: number; cooldownMinutes: number };
@@ -83,6 +84,47 @@ function isInPriceMapCategory(series: MacroSeries, category: string) {
   return series.category === category;
 }
 
+function buildRotationReadings(points: RotationPoint[]) {
+  const groups: RotationReading[] = [
+    { key: "leaders", title: "FORTE E ACELERANDO", assets: [], tone: "positive" },
+    { key: "fading", title: "FORTE, PERDENDO IMPULSO", assets: [], tone: "neutral" },
+    { key: "recovering", title: "FRACO, MAS MELHORANDO", assets: [], tone: "positive" },
+    { key: "weakening", title: "FRACO E ACELERANDO A QUEDA", assets: [], tone: "negative" },
+    { key: "neutral", title: "DENTRO DA FAIXA NEUTRA", assets: [], tone: "neutral" },
+  ];
+  for (const point of points) {
+    if (Math.abs(point.strength) < 0.35 || Math.abs(point.acceleration) < 0.25) {
+      groups[4].assets.push({ key: point.asset.key, strength: point.strength, acceleration: point.acceleration });
+      continue;
+    }
+    const index = point.strength > 0
+      ? point.acceleration > 0 ? 0 : 1
+      : point.acceleration > 0 ? 2 : 3;
+    groups[index].assets.push({ key: point.asset.key, strength: point.strength, acceleration: point.acceleration });
+  }
+  const categoryNames: Record<string, string> = {
+    index: "ÍNDICES", fx: "MOEDAS", energy: "ENERGIA", metal: "METAIS",
+    rates: "TREASURIES", equity: "ETFs", bond: "TÍTULOS", crypto: "CRIPTO",
+  };
+  const categoryStrength = new Map<string, { total: number; count: number }>();
+  for (const point of points) {
+    const category = point.asset.category;
+    const current = categoryStrength.get(category) ?? { total: 0, count: 0 };
+    current.total += point.strength;
+    current.count += 1;
+    categoryStrength.set(category, current);
+  }
+  const categories = [...categoryStrength.entries()]
+    .filter(([, value]) => value.count >= 2)
+    .map(([key, value]) => ({ key, score: value.total / value.count }));
+  const positive = categories.filter(item => item.score >= 0.35).sort((a, b) => b.score - a.score)[0];
+  const negative = categories.filter(item => item.score <= -0.35).sort((a, b) => a.score - b.score)[0];
+  const divergence = positive && negative
+    ? `${categoryNames[positive.key] ?? positive.key} +${positive.score.toFixed(2)}σ × ${categoryNames[negative.key] ?? negative.key} ${negative.score.toFixed(2)}σ`
+    : null;
+  return { groups, divergence, validAssets: points.length };
+}
+
 function MacroLineChart({ series, label, emptyMessage, hiddenKeys, onToggleKey, category, onCategoryChange }: {
   series: MacroSeries[]; label: string; emptyMessage: string;
   hiddenKeys: Record<string, boolean>; onToggleKey: (key: string) => void;
@@ -137,6 +179,7 @@ function MarketRotationRadar({ points, category, onCategoryChange }: { points: R
     ["metal", "METAIS"], ["rates", "JUROS"], ["equity", "ETFs"], ["bond", "TÍTULOS"], ["crypto", "CRIPTO"],
   ];
   const filtered = points.filter(point => category === "all" || point.asset.category === category);
+  const reading = buildRotationReadings(points);
   const x = (value: number) => cx + value * radiusX;
   const y = (value: number) => cy - value * radiusY;
   return <section className="panel macro-rotation-panel">
@@ -158,8 +201,17 @@ function MarketRotationRadar({ points, category, onCategoryChange }: { points: R
       </svg>
       {!filtered.length && <div className="macro-rotation-empty">Aguardando amostras sincronizadas suficientes para esta classe.</div>}
     </div>
+    <section className="macro-auto-rotation" aria-label="Leitura automática da rotação de mercado">
+      <div className="macro-auto-rotation-head"><strong>LEITURA AUTOMÁTICA · MOMENTO ATUAL</strong><span>{reading.validAssets} ativos válidos · limiar ±0,35σ</span></div>
+      {reading.validAssets < 3 ? <p className="macro-auto-rotation-empty">Aguardando pelo menos 3 ativos com Z-scores sincronizados de 5, 15 e 60 minutos.</p> : <>
+        <div className="macro-auto-rotation-groups">{reading.groups.map(group => <article className={`macro-auto-rotation-item ${group.tone}`} key={group.key}>
+          <small>{group.title}</small><div className="macro-auto-rotation-assets">{group.assets.length ? group.assets.slice(0, 4).map(asset => <span key={asset.key}>{asset.key} <b>{asset.strength > 0 ? "+" : ""}{asset.strength.toFixed(2)} / {asset.acceleration > 0 ? "+" : ""}{asset.acceleration.toFixed(2)}σ</b></span>) : <span>Sem ativos neste estado</span>}{group.assets.length > 4 && <span>+{group.assets.length - 4} ativos</span>}</div>
+        </article>)}</div>
+        <div className={`macro-auto-rotation-divergence ${reading.divergence ? "warning" : "muted"}`}><b>{reading.divergence ? "DIVERGÊNCIA ENTRE CLASSES" : "SEM DIVERGÊNCIA CLARA ENTRE CLASSES"}</b><span>{reading.divergence ?? "São necessárias ao menos 2 séries válidas por classe para comparar forças médias."}</span></div>
+      </>}
+    </section>
     <div className="macro-rotation-foot"><span>{filtered.length} / {points.length} ativos com força e aceleração válidas</span><span>FORTE = momentum padronizado positivo · FRACO = negativo</span></div>
-    <p className="macro-rotation-note">Força = média do Z-score de 15 e 60 min; aceleração = Z-score de 5 min menos o de 15 min. Cada ativo é comparado à própria volatilidade. Para Treasuries, a direção representa alta/queda do yield. É uma leitura de preço, não de fluxo financeiro comprovado nem previsão.</p>
+    <p className="macro-rotation-note">A leitura exige força ≥ 0,35σ e aceleração ≥ 0,25σ (ou limites negativos equivalentes); valores entre os limiares ficam neutros. Divergência compara a força média entre classes com pelo menos 2 ativos válidos. Cada ativo é comparado à própria volatilidade; para Treasuries, a direção é a do yield. É uma leitura de preço, não de fluxo comprovado nem previsão.</p>
   </section>;
 }
 
