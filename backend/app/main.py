@@ -783,8 +783,17 @@ class MarketService:
                             continue
                         last_error = httpx.HTTPStatusError("Binance rate limit exceeded", request=response.request, response=response)
                         break
-                    if response.status_code == 418:
-                        response.raise_for_status()
+                    # A host can be blocked independently (for example, a
+                    # regional 451 or an IP-specific 418 ban). Try the next
+                    # official public Spot endpoint instead of aborting the
+                    # whole request on the first host.
+                    if response.status_code in {403, 418, 451} or response.status_code >= 500:
+                        last_error = httpx.HTTPStatusError(
+                            f"Binance Spot endpoint returned HTTP {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        )
+                        break
                     response.raise_for_status()
                     return response.json()
                 except (httpx.TimeoutException, httpx.NetworkError) as error:
@@ -795,14 +804,15 @@ class MarketService:
                     break
                 except httpx.HTTPStatusError as error:
                     last_error = error
-                    if error.response.status_code == 418 or (error.response.status_code < 500 and error.response.status_code != 403):
+                    if error.response.status_code not in {403, 418, 429, 451} and error.response.status_code < 500:
                         raise
                     break
             log.warning(
                 "Binance Spot REST endpoint failed; trying fallback",
                 extra={"endpoint": endpoint, "path": path, "error": str(last_error)},
             )
-        raise HTTPException(502, "Binance Spot indisponível nos endpoints REST configurados") from last_error
+        cause = str(last_error) if last_error else "sem resposta dos endpoints"
+        raise HTTPException(502, f"Binance Spot REST indisponível após {len(bases)} endpoints: {cause[:180]}") from last_error
 
     async def ticker(self, symbol: str, market: str) -> MarketSnapshot:
         base, path = self.base_and_path(market, "ticker")

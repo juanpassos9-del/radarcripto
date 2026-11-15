@@ -80,6 +80,7 @@ export default function Terminal() {
   const [showPreviousLevels, setShowPreviousLevels] = useState(true);
   const [fear, setFear] = useState<{ value: number | null; label: string; status: string; source: string } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [candleError, setCandleError] = useState("");
   const [clock, setClock] = useState<number | null>(null);
   const [apiState, setApiState] = useState<"checking" | "connected" | "error">("checking");
   const [apiMessage, setApiMessage] = useState("");
@@ -101,7 +102,12 @@ export default function Terminal() {
     try {
       const data = await getJson<{ markets: MarketSnapshot[] }>(`/api/markets?market=${market}`);
       setMarkets(Object.fromEntries(data.markets.map(item => [item.symbol, item])));
-      setApiState("connected"); setApiMessage("");
+      if (data.markets.some(item => item.status === "live" && item.price != null)) {
+        setApiState("connected"); setApiMessage("");
+      } else {
+        setApiState("error");
+        setApiMessage("API respondeu, mas não retornou cotações Spot disponíveis.");
+      }
     } catch (error) { setApiState("error"); setApiMessage(error instanceof Error ? error.message : "API local indisponível"); }
   }, [market]);
 
@@ -113,12 +119,15 @@ export default function Terminal() {
         if (data.candles.length < 2) throw new Error("A API retornou menos de dois candles para o histórico.");
         historicalCandlesReadyRef.current = true;
         setCandles(data.candles);
+        setCandleError("");
         setApiMessage("");
         if (isFirst) setLoading(false);
       })
       .catch(error => {
         if (selectedKeyRef.current !== requestKey) return;
-        setApiMessage(`Candles: ${error instanceof Error ? error.message : "indisponíveis"}`);
+        const message = error instanceof Error ? error.message : "indisponíveis";
+        setCandleError(message);
+        setApiMessage(`Candles: ${message}`);
         if (isFirst) setLoading(false);
       });
     const bookTask = getJson<BookData>(`/api/book?symbol=${symbol}&market=${market}&limit=16`)
@@ -291,6 +300,7 @@ export default function Terminal() {
     let polling = false;
     setLoading(true);
     historicalCandlesReadyRef.current = false;
+    setCandleError("");
     setCandles([]); setBook(null); setTrades([]);
     setReversalData(null);
     loadAsset(true);
@@ -511,7 +521,7 @@ export default function Terminal() {
         <section className="panel mainchart"><div className="assetbar"><div><h2>{nameOf(symbol)} <span style={{ color: "#7b8795", fontWeight: 400 }}>/ USDT</span></h2><span className="subtle">BINANCE · SPOT</span></div><span className="largeprice mono">{fmtPrice(current?.price, current?.price && current.price < 10 ? 4 : 2)}</span><span className={`asset-change ${directionClass(current?.change24h)}`}>{current?.change24h == null ? "—" : `${current.change24h >= 0 ? "+" : ""}${current.change24h.toFixed(2)}%`}</span><button className="iconbtn" title="Tela cheia" onClick={() => document.querySelector(".mainchart")?.requestFullscreen()}><Maximize2 size={14}/></button></div>
           <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><button className={`volume-toggle ${showVwapDeviation ? "active" : ""}`} title="Sinais DV de rejeição em desvios da VWAP diária" aria-pressed={showVwapDeviation} onClick={() => setShowVwapDeviation(value => !value)}>DV</button><button className={`volume-toggle ${showTrendSignals ? "active" : ""}`} title={interval === "5m" ? "Sinais TREND de tendência no Spot 5m" : "TREND disponível no Spot 5m"} aria-pressed={showTrendSignals} disabled={interval !== "5m"} onClick={() => setShowTrendSignals(value => !value)}>TREND</button><button className={`volume-toggle ${riskRewardMode ? "active" : ""}`} title="Marque entrada e stop; os alvos de 1R e 2R são projetados automaticamente" aria-pressed={riskRewardMode} onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(value => !value); }}>R:R</button>{riskRewardHasLevels && <button className="volume-toggle" title="Limpar desenho de risco e ganho" onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(false); }}>LIMPAR R:R</button>}{riskRewardGuide && <span className={`risk-reward-guide ${riskRewardMode ? "drawing" : riskRewardValid ? "valid" : riskRewardHasLevels ? "invalid" : ""}`} aria-live="polite">{riskRewardGuide}</span>}<span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
           <div className="chart-overlay-strip"><div className="chart-overlay-legend">{showAnchoredVwaps && <><span><i style={{ background: "#f0bd61" }}/>VWAP D</span><span><i style={{ background: "#4d9bff" }}/>VWAP S</span><span><i style={{ background: "#bd82ff" }}/>VWAP M</span></>}{showPreviousLevels && <><span><i style={{ background: "linear-gradient(90deg,#ff667c 50%,#44d49a 50%)" }}/>D−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#ff9a58 50%,#28d6c5 50%)" }}/>S−1 H/L</span><span><i style={{ background: "linear-gradient(90deg,#e86cff 50%,#7aa2ff 50%)" }}/>M−1 H/L</span></>}</div></div>
-          <div className={`chartarea ${riskRewardMode ? "risk-reward-active" : riskRewardHasLevels ? "risk-reward-placed" : ""}`}><span className="chartlabel">{symbol} · {interval} · OHLCV SPOT · BINANCE · HORÁRIO SÃO PAULO (UTC−3)</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} signals={chartSignals} breakoutSignals={chartBreakoutSignals} trendSignals={chartTrendSignals} vwapDeviationSignals={chartVwapDeviationSignals} riskRewardMode={riskRewardMode} riskRewardLevels={riskRewardLevels} onRiskRewardPoint={placeRiskRewardPoint} onRiskRewardLevelChange={changeRiskRewardLevel}/> : <div className="chartfallback">Candles indisponíveis · verifique a conexão com a API local</div>}</div>
+          <div className={`chartarea ${riskRewardMode ? "risk-reward-active" : riskRewardHasLevels ? "risk-reward-placed" : ""}`}><span className="chartlabel">{symbol} · {interval} · OHLCV SPOT · BINANCE · HORÁRIO SÃO PAULO (UTC−3)</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} signals={chartSignals} breakoutSignals={chartBreakoutSignals} trendSignals={chartTrendSignals} vwapDeviationSignals={chartVwapDeviationSignals} riskRewardMode={riskRewardMode} riskRewardLevels={riskRewardLevels} onRiskRewardPoint={placeRiskRewardPoint} onRiskRewardLevelChange={changeRiskRewardLevel}/> : <div className="chartfallback">{candleError ? `Falha ao carregar candles: ${candleError}` : "Candles indisponíveis · aguardando resposta da API Binance Spot"}</div>}</div>
           <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">PREÇO SPOT</div><div className="statvalue mono">{fmtPrice(current?.price)}</div></div></div>
         </section>
 
