@@ -1539,7 +1539,11 @@ def allow_api_request(email: str, now: float | None = None) -> bool:
     window = api_request_windows.setdefault(email, deque())
     while window and current - window[0] >= 60:
         window.popleft()
-    if len(window) >= positive_int_setting("BETA_API_REQUESTS_PER_MINUTE", 60, 600):
+    # A single active terminal polls several panels independently. Keep a
+    # practical floor even if an older Render environment still has the
+    # previous 60 requests/minute value until its Blueprint is synchronized.
+    request_limit = max(120, positive_int_setting("BETA_API_REQUESTS_PER_MINUTE", 120, 600))
+    if len(window) >= request_limit:
         return False
     window.append(current)
     return True

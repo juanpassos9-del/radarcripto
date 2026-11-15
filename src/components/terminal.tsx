@@ -106,7 +106,14 @@ export default function Terminal() {
         setApiState("error");
         setApiMessage("API respondeu, mas não retornou cotações perpétuas disponíveis.");
       }
-    } catch (error) { setApiState("error"); setApiMessage(error instanceof Error ? error.message : "API local indisponível"); }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "API local indisponível";
+      if (message.startsWith("429:")) {
+        setApiMessage("Limite temporário de consultas do beta atingido; a atualização será retomada em breve.");
+        return;
+      }
+      setApiState("error"); setApiMessage(message);
+    }
   }, [market]);
 
   const loadAsset = useCallback(async (isFirst = false) => {
@@ -124,8 +131,11 @@ export default function Terminal() {
       .catch(error => {
         if (selectedKeyRef.current !== requestKey) return;
         const message = error instanceof Error ? error.message : "indisponíveis";
-        setCandleError(message);
-        setApiMessage(`Candles: ${message}`);
+        const rateLimited = message.startsWith("429:");
+        setCandleError(rateLimited ? "Limite temporário do beta atingido; tentando novamente em breve." : message);
+        setApiMessage(rateLimited
+          ? "Limite temporário de consultas do beta atingido; a atualização será retomada em breve."
+          : `Candles: ${message}`);
         if (isFirst) setLoading(false);
       });
     const bookTask = getJson<BookData>(`/api/book?symbol=${symbol}&market=${market}&limit=16`)
@@ -155,7 +165,7 @@ export default function Terminal() {
       void refresh().finally(() => { refreshing = false; });
     };
     guardedRefresh();
-    const timer = window.setInterval(guardedRefresh, market === "perpetual" ? 8_000 : 30_000);
+    const timer = window.setInterval(guardedRefresh, market === "perpetual" ? 10_000 : 30_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [symbol, market]);
 
@@ -269,7 +279,7 @@ export default function Terminal() {
   useEffect(() => {
     loadMarkets();
     getJson<{ value: number | null; label: string; status: string; source: string }>("/api/sentiment").then(setFear).catch(() => setFear({ value: null, label: "Indisponível", status: "unavailable", source: "Alternative.me" }));
-    const id = window.setInterval(() => { if (document.visibilityState === "visible") void loadMarkets(); }, 15_000);
+    const id = window.setInterval(() => { if (document.visibilityState === "visible") void loadMarkets(); }, 30_000);
     return () => window.clearInterval(id);
   }, [loadMarkets]);
 
@@ -303,13 +313,13 @@ export default function Terminal() {
       if (polling) return;
       polling = true;
       void loadAsset().finally(() => { polling = false; });
-    }, 15_000);
+    }, 20_000);
     if (market === "perpetual") {
       const timer = window.setInterval(() => {
         if (!active || polling || document.visibilityState !== "visible") return;
         polling = true;
-        void Promise.allSettled([loadAsset(), loadMarkets()]).finally(() => { polling = false; });
-      }, 15_000);
+        void loadAsset().finally(() => { polling = false; });
+      }, 20_000);
       return () => { active = false; window.clearInterval(timer); if (historyRecovery) window.clearInterval(historyRecovery); };
     }
     const marketApiUrl = process.env.NEXT_PUBLIC_MARKET_API_URL;
