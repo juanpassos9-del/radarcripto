@@ -26,6 +26,7 @@ export default function Terminal() {
   const [riskRewardLevels, setRiskRewardLevels] = useState<RiskRewardLevels>({ entry: null, stop: null });
   const [market] = useState<"spot">("spot");
   const selectedKeyRef = useRef("");
+  const historicalCandlesReadyRef = useRef(false);
   selectedKeyRef.current = `${symbol}|${interval}|${market}`;
   const [markets, setMarkets] = useState<Record<string, MarketSnapshot>>({});
   const [scannerFlow, setScannerFlow] = useState<ScannerFlowSnapshot | null>(null);
@@ -109,6 +110,8 @@ export default function Terminal() {
     const candlesTask = getJson<{ candles: Candle[] }>(`/api/candles?symbol=${symbol}&interval=${interval}&market=${market}&limit=240`)
       .then(data => {
         if (selectedKeyRef.current !== requestKey) return;
+        if (data.candles.length < 2) throw new Error("A API retornou menos de dois candles para o histórico.");
+        historicalCandlesReadyRef.current = true;
         setCandles(data.candles);
         setApiMessage("");
         if (isFirst) setLoading(false);
@@ -287,9 +290,21 @@ export default function Terminal() {
     let active = true;
     let polling = false;
     setLoading(true);
+    historicalCandlesReadyRef.current = false;
     setCandles([]); setBook(null); setTrades([]);
     setReversalData(null);
     loadAsset(true);
+    let historyRecovery: number | null = window.setInterval(() => {
+      if (!active || document.visibilityState !== "visible") return;
+      if (historicalCandlesReadyRef.current) {
+        if (historyRecovery) window.clearInterval(historyRecovery);
+        historyRecovery = null;
+        return;
+      }
+      if (polling) return;
+      polling = true;
+      void loadAsset().finally(() => { polling = false; });
+    }, 15_000);
     const marketApiUrl = process.env.NEXT_PUBLIC_MARKET_API_URL;
     const streamUrl = marketApiUrl
       ? `${marketApiUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/+$/, "")}/ws/market`
@@ -324,6 +339,7 @@ export default function Terminal() {
             const snapshot = message.data as MarketSnapshot;
             setMarkets(current => ({ ...current, [snapshot.symbol]: snapshot }));
           } else if (message.type === "candle") {
+            if (!historicalCandlesReadyRef.current) return;
             const candle = message.data as Candle;
             setCandles(current => { const next = [...current]; const i = next.findIndex(c => c.time === candle.time); if (i >= 0) next[i] = candle; else next.push(candle); return next.slice(-260); });
             if (message.closed) { void loadReversalSignals(); void loadBreakoutSignals(); void loadTrendSignals(); void loadVwapDeviationSignals(); }
@@ -352,7 +368,7 @@ export default function Terminal() {
       };
     };
     connect();
-    return () => { active = false; socket?.close(); if (poll) window.clearInterval(poll); };
+    return () => { active = false; socket?.close(); if (poll) window.clearInterval(poll); if (historyRecovery) window.clearInterval(historyRecovery); };
   }, [symbol, interval, market, loadAsset, loadReversalSignals, loadBreakoutSignals, loadTrendSignals, loadVwapDeviationSignals]);
 
   const current = markets[symbol];
