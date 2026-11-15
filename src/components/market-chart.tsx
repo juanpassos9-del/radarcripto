@@ -29,7 +29,7 @@ type RiskRewardLevel = keyof RiskRewardLevels;
 type RiskRewardLine = RiskRewardLevel | "target1" | "target2";
 type TrendDiamond = { id: string; x: number; y: number; color: string; direction: "BUY" | "SELL" };
 
-export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, signals, breakoutSignals, trendSignals = [], vwapDeviationSignals = [], riskRewardMode = false, riskRewardLevels, onRiskRewardPoint, onRiskRewardLevelChange }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[]; trendSignals?: TrendSignal[]; vwapDeviationSignals?: VwapDeviationSignal[]; riskRewardMode?: boolean; riskRewardLevels?: RiskRewardLevels; onRiskRewardPoint?: (price: number) => void; onRiskRewardLevelChange?: (level: RiskRewardLevel, price: number) => void }) {
+export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, monochrome = false, signals, breakoutSignals, trendSignals = [], vwapDeviationSignals = [], riskRewardMode = false, riskRewardLevels, onRiskRewardPoint, onRiskRewardLevelChange }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; monochrome?: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[]; trendSignals?: TrendSignal[]; vwapDeviationSignals?: VwapDeviationSignal[]; riskRewardMode?: boolean; riskRewardLevels?: RiskRewardLevels; onRiskRewardPoint?: (price: number) => void; onRiskRewardLevelChange?: (level: RiskRewardLevel, price: number) => void }) {
   const host = useRef<HTMLDivElement>(null);
   const hasMultipleCandles = candles.length >= 2;
   const firstCandleTime = candles[0]?.time;
@@ -273,29 +273,30 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
     if (!zones || zones.status !== "ready" || zones.reference == null) return;
     const first = firstCandleTime as UTCTimestamp;
     const last = lastCandleTime as UTCTimestamp;
-    const levels: { title: string; value: number | null | undefined; color: string; width?: 1 | 2 | 3 | 4; style?: LineStyle }[] = [];
-    levels.push({ title: "0σ", value: zones.reference, color: "#f0bd61", width: 2 });
+    const levels: { title: string; value: number | null | undefined; color: string; model: "reference" | "garch" | "hv"; width?: 1 | 2 | 3 | 4; style?: LineStyle }[] = [];
+    levels.push({ title: "0σ", value: zones.reference, color: "#f0bd61", model: "reference", width: 2 });
     if (showGarch && zones.garch) {
       const upperPalette: Record<string, string> = { "0.5": "#f47a8c", "1": "#ff667c", "1.5": "#fa8494", "2": "#ff415e", "2.5": "#e53955", "3": "#bd334a", "3.5": "#a62843", "4": "#90233c", "4.5": "#7c1f36", "5": "#681a30" };
       const lowerPalette: Record<string, string> = { "0.5": "#9ad7bb", "1": "#80ceaa", "1.5": "#68c59b", "2": "#53b98b", "2.5": "#43a77d", "3": "#368f6b", "3.5": "#307f61", "4": "#296f56", "4.5": "#245f4c", "5": "#1e4f41" };
       for (const [multiple, band] of Object.entries(zones.garch.bands)) {
         const width = ["2", "3", "4", "5"].includes(multiple) ? 2 : 1;
         const style = multiple.endsWith(".5") ? LineStyle.Dashed : LineStyle.Solid;
-        levels.push({ title: `+${multiple}σ`, value: band.upper, color: upperPalette[multiple] ?? "#ff667c", width, style });
-        levels.push({ title: `−${multiple}σ`, value: band.lower, color: lowerPalette[multiple] ?? "#49bd91", width, style });
+        levels.push({ title: `+${multiple}σ`, value: band.upper, color: upperPalette[multiple] ?? "#ff667c", model: "garch", width, style });
+        levels.push({ title: `−${multiple}σ`, value: band.lower, color: lowerPalette[multiple] ?? "#49bd91", model: "garch", width, style });
       }
     }
     if (showHv && zones.hv252) {
       const upperPalette: Record<string, string> = { "1": "#65a9ff", "2": "#4d9bff", "3": "#397fe0", "4": "#2c66c4", "5": "#2453a3" };
       const lowerPalette: Record<string, string> = { "1": "#68d4e8", "2": "#51bfd5", "3": "#399fba", "4": "#307f9b", "5": "#28677f" };
       for (const [multiple, band] of Object.entries(zones.hv252.bands)) {
-        levels.push({ title: `+${multiple}σ`, value: band.upper, color: upperPalette[multiple] ?? "#4d9bff", width: 2, style: LineStyle.Dashed });
-        levels.push({ title: `−${multiple}σ`, value: band.lower, color: lowerPalette[multiple] ?? "#51bfd5", width: 2, style: LineStyle.Dashed });
+        levels.push({ title: `+${multiple}σ`, value: band.upper, color: upperPalette[multiple] ?? "#4d9bff", model: "hv", width: 2, style: LineStyle.Dashed });
+        levels.push({ title: `−${multiple}σ`, value: band.lower, color: lowerPalette[multiple] ?? "#51bfd5", model: "hv", width: 2, style: LineStyle.Dashed });
       }
     }
     for (const level of levels) {
       if (level.value == null || !Number.isFinite(level.value)) continue;
-      const series = chart.addSeries(LineSeries, { color: level.color, lineWidth: level.width ?? 1, lineStyle: level.style ?? LineStyle.Solid, title: level.title, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, pointMarkersVisible: false, crosshairMarkerRadius: 0, autoscaleInfoProvider: () => null });
+      const monoColor = level.model === "reference" ? "rgba(255,255,255,0.88)" : level.model === "garch" ? (level.title.startsWith("+") ? "rgba(245,245,245,0.62)" : "rgba(205,205,205,0.5)") : (level.title.startsWith("+") ? "rgba(170,170,170,0.56)" : "rgba(135,135,135,0.48)");
+      const series = chart.addSeries(LineSeries, { color: monochrome ? monoColor : level.color, lineWidth: level.width ?? 1, lineStyle: level.style ?? LineStyle.Solid, title: level.title, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false, pointMarkersVisible: false, crosshairMarkerRadius: 0, autoscaleInfoProvider: () => null });
       series.setData([{ time: first, value: level.value }, { time: last, value: level.value }]);
       zoneSeriesRef.current.push(series);
     }
@@ -304,7 +305,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       if (currentChart) for (const series of zoneSeriesRef.current) currentChart.removeSeries(series);
       zoneSeriesRef.current = [];
     };
-  }, [firstCandleTime, lastCandleTime, hasMultipleCandles, zones, showGarch, showHv]);
+  }, [firstCandleTime, lastCandleTime, hasMultipleCandles, zones, showGarch, showHv, monochrome]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -313,8 +314,14 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
     referenceSeriesRef.current = [];
     const addLine = (title: string, color: string, points: { time: number; value: number }[], dashed = false) => {
       if (points.length < 2) return;
+      const monoColors: Record<string, string> = {
+        "VWAP D": "rgba(255,255,255,0.92)", "VWAP S": "rgba(205,205,205,0.78)", "VWAP M": "rgba(155,155,155,0.68)",
+        "D−1 Máx": "rgba(255,255,255,0.76)", "D−1 Mín": "rgba(220,220,220,0.68)",
+        "S−1 Máx": "rgba(185,185,185,0.66)", "S−1 Mín": "rgba(160,160,160,0.6)",
+        "M−1 Máx": "rgba(130,130,130,0.58)", "M−1 Mín": "rgba(110,110,110,0.52)",
+      };
       const series = chart.addSeries(LineSeries, {
-        color, lineWidth: 2, lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
+        color: monochrome ? monoColors[title] ?? "rgba(220,220,220,0.7)" : color, lineWidth: 2, lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
         title, priceLineVisible: false, lastValueVisible: false,
         crosshairMarkerVisible: false, pointMarkersVisible: false, crosshairMarkerRadius: 0,
         autoscaleInfoProvider: () => null,
@@ -349,7 +356,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       if (currentChart) for (const series of referenceSeriesRef.current) currentChart.removeSeries(series);
       referenceSeriesRef.current = [];
     };
-  }, [firstCandleTime, lastCandleTime, hasMultipleCandles, overlays, showVwaps, showPreviousLevels, symbol, interval]);
+  }, [firstCandleTime, lastCandleTime, hasMultipleCandles, overlays, showVwaps, showPreviousLevels, symbol, interval, monochrome]);
 
   return <div className="market-chart-container">
     <div ref={host} aria-label={`Gráfico de candles de ${symbol}`} />
