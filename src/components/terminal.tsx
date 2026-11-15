@@ -2,7 +2,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, ChevronLeft, CircleHelp, Crosshair, Database, LogOut, Maximize2, Radio, Search, Settings2, Wifi } from "lucide-react";
 import MarketChart, { type RiskRewardLevels } from "@/components/market-chart";
-import FlowHistory from "@/components/flow-history";
 import MarketScanner from "@/components/market-scanner";
 import MarketAlerts from "@/components/market-alerts";
 import MarketContext from "@/components/market-context";
@@ -24,7 +23,7 @@ export default function Terminal() {
   const [interval, setInterval] = useState("5m");
   const [riskRewardMode, setRiskRewardMode] = useState(false);
   const [riskRewardLevels, setRiskRewardLevels] = useState<RiskRewardLevels>({ entry: null, stop: null });
-  const [market] = useState<"spot">("spot");
+  const [market] = useState<"perpetual">("perpetual");
   const selectedKeyRef = useRef("");
   const historicalCandlesReadyRef = useRef(false);
   selectedKeyRef.current = `${symbol}|${interval}|${market}`;
@@ -36,8 +35,6 @@ export default function Terminal() {
   const [showAllBookLevels, setShowAllBookLevels] = useState(false);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [tradeSources, setTradeSources] = useState<Record<string, string>>({});
-  const [tradeHealth, setTradeHealth] = useState<Record<string, { status: string; lastTradeAt?: number | null; reconnects?: number; error?: string | null }>>({});
-  const [flowQuality, setFlowQuality] = useState<{ status: string; connected: boolean; lastEventTime: number | null; lastLatencyMs: number | null; events: number; reconnects: number; possibleIdGaps: number; backfillRowsQueued?: number; backfillSkippedIds?: number; backfillFailures?: number; storedTrades: number; oldestTradeTime: number | null; storedFlowBars?: number; oldestFlowBarTime?: number | null; aggregateRetentionDays?: number | null; queueDropped: number; storage: string; storageBytes: number; storageDurable: boolean; rawRetentionHours: number } | null>(null);
   const [reversalData, setReversalData] = useState<ReversalSignalData | null>(null);
   const [breakoutData, setBreakoutData] = useState<BreakoutSignalData | null>(null);
   const [trendData, setTrendData] = useState<TrendSignalData | null>(null);
@@ -107,7 +104,7 @@ export default function Terminal() {
         setApiState("connected"); setApiMessage("");
       } else {
         setApiState("error");
-        setApiMessage("API respondeu, mas não retornou cotações Spot disponíveis.");
+        setApiMessage("API respondeu, mas não retornou cotações perpétuas disponíveis.");
       }
     } catch (error) { setApiState("error"); setApiMessage(error instanceof Error ? error.message : "API local indisponível"); }
   }, [market]);
@@ -137,19 +134,17 @@ export default function Terminal() {
     await Promise.allSettled([candlesTask, bookTask]);
   }, [symbol, interval, market]);
 
-  // External venue feeds are collected by the API process. Refresh their shared
-  // samples and health independently while Binance remains on the browser WS.
+  // Refresh the selected BingX perpetual contract's public tape snapshot.
   useEffect(() => {
     let active = true;
     let refreshing = false;
-    const refresh = () => getJson<{ trades: Trade[]; sources?: Record<string, string>; tradeHealth?: typeof tradeHealth }>(`/api/trades?symbol=${symbol}&market=${market}&limit=60`)
+    const refresh = () => getJson<{ trades: Trade[]; sources?: Record<string, string> }>(`/api/trades?symbol=${symbol}&market=${market}&limit=60`)
       .then(data => {
         if (!active) return;
         setTradeSources(data.sources ?? {});
-        setTradeHealth(data.tradeHealth ?? {});
         setTrades(current => {
           const unique = new Map<string, Trade>();
-          for (const trade of [...current, ...data.trades]) unique.set(`${trade.source ?? "Binance"}:${trade.id}`, trade);
+          for (const trade of [...current, ...data.trades]) unique.set(`${trade.source ?? "BingX Perp"}:${trade.id}`, trade);
           return [...unique.values()].sort((a, b) => b.time - a.time).slice(0, 60);
         });
       })
@@ -160,7 +155,7 @@ export default function Terminal() {
       void refresh().finally(() => { refreshing = false; });
     };
     guardedRefresh();
-    const timer = window.setInterval(guardedRefresh, 30_000);
+    const timer = window.setInterval(guardedRefresh, market === "perpetual" ? 8_000 : 30_000);
     return () => { active = false; window.clearInterval(timer); };
   }, [symbol, market]);
 
@@ -197,7 +192,7 @@ export default function Terminal() {
 
   const loadTrendSignals = useCallback(async () => {
     const requestId = ++trendRequestRef.current;
-    if (interval !== "5m" || market !== "spot") {
+    if (interval !== "5m") {
       setTrendData({ symbol, interval, status: "unsupported_interval", signals: [], latest: null });
       return;
     }
@@ -274,27 +269,20 @@ export default function Terminal() {
   useEffect(() => {
     loadMarkets();
     getJson<{ value: number | null; label: string; status: string; source: string }>("/api/sentiment").then(setFear).catch(() => setFear({ value: null, label: "Indisponível", status: "unavailable", source: "Alternative.me" }));
-    const id = window.setInterval(() => { if (document.visibilityState === "visible") void loadMarkets(); }, 30_000);
+    const id = window.setInterval(() => { if (document.visibilityState === "visible") void loadMarkets(); }, 15_000);
     return () => window.clearInterval(id);
   }, [loadMarkets]);
 
   useEffect(() => {
     let active = true;
+    if (market === "perpetual") { setScannerFlow(null); return; }
     const refresh = () => getJson<ScannerFlowSnapshot>("/api/scanner-flow")
       .then(data => { if (active) setScannerFlow(data); })
       .catch(() => { if (active) setScannerFlow(null); });
     void refresh();
     const timer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 60_000);
     return () => { active = false; window.clearInterval(timer); };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    const refresh = () => getJson<NonNullable<typeof flowQuality>>(`/api/flow-quality?symbol=${symbol}`).then(data => { if (active) setFlowQuality(data); }).catch(() => { if (active) setFlowQuality(null); });
-    void refresh();
-    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, 60_000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [symbol]);
+  }, [market]);
 
   useEffect(() => {
     let active = true;
@@ -316,6 +304,14 @@ export default function Terminal() {
       polling = true;
       void loadAsset().finally(() => { polling = false; });
     }, 15_000);
+    if (market === "perpetual") {
+      const timer = window.setInterval(() => {
+        if (!active || polling || document.visibilityState !== "visible") return;
+        polling = true;
+        void Promise.allSettled([loadAsset(), loadMarkets()]).finally(() => { polling = false; });
+      }, 15_000);
+      return () => { active = false; window.clearInterval(timer); if (historyRecovery) window.clearInterval(historyRecovery); };
+    }
     const marketApiUrl = process.env.NEXT_PUBLIC_MARKET_API_URL;
     const streamUrl = marketApiUrl
       ? `${marketApiUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/+$/, "")}/ws/market`
@@ -343,8 +339,8 @@ export default function Terminal() {
             const message = JSON.parse(event.data) as { type: string; data: unknown; closed?: boolean };
           if (message.type === "trade") {
             const trade = message.data as Trade;
-            const tradeKey = `${trade.source ?? "Binance"}:${trade.id}`;
-            setTrades(current => [trade, ...current.filter(t => `${t.source ?? "Binance"}:${t.id}` !== tradeKey)].slice(0, 60));
+            const tradeKey = `${trade.source ?? "BingX Perp"}:${trade.id}`;
+            setTrades(current => [trade, ...current.filter(t => `${t.source ?? "BingX Perp"}:${t.id}` !== tradeKey)].slice(0, 60));
           } else if (message.type === "book") setBook(message.data as BookData);
           else if (message.type === "market") {
             const snapshot = message.data as MarketSnapshot;
@@ -380,7 +376,7 @@ export default function Terminal() {
     };
     connect();
     return () => { active = false; socket?.close(); if (poll) window.clearInterval(poll); if (historyRecovery) window.clearInterval(historyRecovery); };
-  }, [symbol, interval, market, loadAsset, loadReversalSignals, loadBreakoutSignals, loadTrendSignals, loadVwapDeviationSignals]);
+  }, [symbol, interval, market, loadAsset, loadMarkets, loadReversalSignals, loadBreakoutSignals, loadTrendSignals, loadVwapDeviationSignals]);
 
   const current = markets[symbol];
   const latestReversal = reversalData?.latest ?? null;
@@ -431,7 +427,7 @@ export default function Terminal() {
   const tradeOutliers = useMemo(() => {
     const notionalsBySource = new Map<string, number[]>();
     for (const trade of trades) {
-      const source = trade.source ?? "Binance";
+      const source = trade.source ?? "BingX Perp";
       const values = notionalsBySource.get(source) ?? [];
       values.push(trade.price * trade.quantity);
       notionalsBySource.set(source, values);
@@ -445,7 +441,7 @@ export default function Terminal() {
     }
     const outliers = new Map<string, { notional: number; median: number; ratio: number }>();
     for (const trade of trades) {
-      const source = trade.source ?? "Binance";
+      const source = trade.source ?? "BingX Perp";
       const median = medians.get(source);
       const notional = trade.price * trade.quantity;
       if (median == null || median <= 0) continue;
@@ -490,7 +486,7 @@ export default function Terminal() {
     </header>
 
     <div className="wrap">
-      <div className="heading"><div><div className="eyebrow">SPOT MARKET INTELLIGENCE / 01</div><h1>Spot Market Flow</h1></div><div className="headmeta"><span className="badge good"><Radio size={10} style={{ display: "inline", verticalAlign: "-2px" }}/> &nbsp;BINANCE SPOT</span><span className="badge">UTC−3 · SÃO PAULO</span><span className="badge">{clock == null ? "--:--:--" : fmtTime(clock)}</span></div></div>
+      <div className="heading"><div><div className="eyebrow">PERPETUAL MARKET INTELLIGENCE / 01</div><h1>Perpetual Market Flow</h1></div><div className="headmeta"><span className="badge good"><Radio size={10} style={{ display: "inline", verticalAlign: "-2px" }}/> &nbsp;BINGX USDT-M PERPETUAL</span><span className="badge">UTC−3 · SÃO PAULO</span><span className="badge">{clock == null ? "--:--:--" : fmtTime(clock)}</span></div></div>
 
       <section className="tickerbar">
         {["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"].map((asset, index) => {
@@ -506,42 +502,35 @@ export default function Terminal() {
       <div className={`layout ${watchlistCollapsed ? "watchlist-collapsed" : ""}`}>
         <aside className={`panel watchlist ${watchlistCollapsed ? "collapsed" : ""}`}>
           <div className="panelhead watchlist-head">
-            <span className="paneltitle">Watchlist</span><span className="badge">25 SPOT</span>
-            <button className="watchlist-toggle" type="button" aria-label={watchlistCollapsed ? "Expandir watchlist" : "Minimizar watchlist"} aria-expanded={!watchlistCollapsed} aria-controls="spot-watchlist-content" title={watchlistCollapsed ? "Expandir watchlist" : "Minimizar watchlist"} onClick={() => setWatchlistCollapsed(value => !value)}><ChevronLeft size={15}/></button>
+            <span className="paneltitle">Watchlist</span><span className="badge">25 PERP</span>
+            <button className="watchlist-toggle" type="button" aria-label={watchlistCollapsed ? "Expandir watchlist" : "Minimizar watchlist"} aria-expanded={!watchlistCollapsed} aria-controls="perpetual-watchlist-content" title={watchlistCollapsed ? "Expandir watchlist" : "Minimizar watchlist"} onClick={() => setWatchlistCollapsed(value => !value)}><ChevronLeft size={15}/></button>
           </div>
-          <div id="spot-watchlist-content" className="watchlist-content" hidden={watchlistCollapsed}>
+          <div id="perpetual-watchlist-content" className="watchlist-content" hidden={watchlistCollapsed}>
             {assets.map((asset) => { const m = markets[asset]; const ticker = nameOf(asset); const icon = asset === "BTCUSDT" ? "₿" : asset === "ETHUSDT" ? "Ξ" : ticker.slice(0, 1); return <button key={asset} className={`watchrow ${symbol === asset ? "selected" : ""}`} onClick={() => setSymbol(asset)}>
-              <div className="coinicon">{icon}</div><div><div className="coinname">{ticker} <span style={{ color: "#697687", fontWeight: 400 }}>/ USDT</span></div><div className="coinsub">Binance Spot</div></div>
+              <div className="coinicon">{icon}</div><div><div className="coinname">{ticker} <span style={{ color: "#697687", fontWeight: 400 }}>/ USDT</span></div><div className="coinsub">BingX Perpetual</div></div>
               <div><div className="coinprice mono">{fmtPrice(m?.price, m?.price && m.price < 10 ? 4 : 2)}</div><div className={`change ${directionClass(m?.change24h)}`}>{m?.change24h == null ? "—" : `${m.change24h >= 0 ? "+" : ""}${m.change24h.toFixed(2)}%`}</div></div>
             </button>; })}
-            <div className="watchfoot subtle">Mercado à vista USDT · Binance</div>
+            <div className="watchfoot subtle">Contratos perpétuos USDT · BingX</div>
           </div>
         </aside>
 
         <div className="chart-flow-column">
-        <section className="panel mainchart"><div className="assetbar"><div><h2>{nameOf(symbol)} <span style={{ color: "#7b8795", fontWeight: 400 }}>/ USDT</span></h2><span className="subtle">BINANCE · SPOT</span></div><span className="largeprice mono">{fmtPrice(current?.price, current?.price && current.price < 10 ? 4 : 2)}</span><span className={`asset-change ${directionClass(current?.change24h)}`}>{current?.change24h == null ? "—" : `${current.change24h >= 0 ? "+" : ""}${current.change24h.toFixed(2)}%`}</span><button className="iconbtn" title="Tela cheia" onClick={() => document.querySelector(".mainchart")?.requestFullscreen()}><Maximize2 size={14}/></button></div>
-          <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${monochromeChart ? "active" : ""}`} title="Alterna as cores das zonas GARCH/HV252, VWAPs e máximas/mínimas anteriores" aria-pressed={monochromeChart} onClick={() => setMonochromeChart(value => !value)}>MONO</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><button className={`volume-toggle ${showVwapDeviation ? "active" : ""}`} title="Sinais DV de rejeição em desvios da VWAP diária" aria-pressed={showVwapDeviation} onClick={() => setShowVwapDeviation(value => !value)}>DV</button><button className={`volume-toggle ${showTrendSignals ? "active" : ""}`} title={interval === "5m" ? "Sinais TREND de tendência no Spot 5m" : "TREND disponível no Spot 5m"} aria-pressed={showTrendSignals} disabled={interval !== "5m"} onClick={() => setShowTrendSignals(value => !value)}>TREND</button><button className={`volume-toggle ${riskRewardMode ? "active" : ""}`} title="Marque entrada e stop; os alvos de 1R e 2R são projetados automaticamente" aria-pressed={riskRewardMode} onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(value => !value); }}>R:R</button>{riskRewardHasLevels && <button className="volume-toggle" title="Limpar desenho de risco e ganho" onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(false); }}>LIMPAR R:R</button>}{riskRewardGuide && <span className={`risk-reward-guide ${riskRewardMode ? "drawing" : riskRewardValid ? "valid" : riskRewardHasLevels ? "invalid" : ""}`} aria-live="polite">{riskRewardGuide}</span>}<span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
+        <section className="panel mainchart"><div className="assetbar"><div><h2>{nameOf(symbol)} <span style={{ color: "#7b8795", fontWeight: 400 }}>/ USDT</span></h2><span className="subtle">BINGX · PERP</span></div><span className="largeprice mono">{fmtPrice(current?.price, current?.price && current.price < 10 ? 4 : 2)}</span><span className={`asset-change ${directionClass(current?.change24h)}`}>{current?.change24h == null ? "—" : `${current.change24h >= 0 ? "+" : ""}${current.change24h.toFixed(2)}%`}</span><button className="iconbtn" title="Tela cheia" onClick={() => document.querySelector(".mainchart")?.requestFullscreen()}><Maximize2 size={14}/></button></div>
+          <div className="charttools"><span className="subtle">TF</span>{intervals.map(tf => <button key={tf} className={interval === tf ? "active" : ""} onClick={() => setInterval(tf)}>{tf.toUpperCase()}</button>)}<button className={showGarchZones ? "active" : ""} onClick={() => setShowGarchZones(v => !v)}>GARCH</button><button className={showHvZones ? "active" : ""} onClick={() => setShowHvZones(v => !v)}>HV252</button><button className={`volume-toggle ${showAnchoredVwaps ? "active" : ""}`} title="Exibe VWAPs ancoradas no início do dia, semana e mês UTC" onClick={() => setShowAnchoredVwaps(v => !v)}>VWAP D/S/M</button><button className={`volume-toggle ${showPreviousLevels ? "active" : ""}`} title="Exibe máximas e mínimas do dia, semana e mês anteriores (UTC)" onClick={() => setShowPreviousLevels(v => !v)}>H/L ANT.</button><button className={`volume-toggle ${monochromeChart ? "active" : ""}`} title="Alterna as cores das zonas GARCH/HV252, VWAPs e máximas/mínimas anteriores" aria-pressed={monochromeChart} onClick={() => setMonochromeChart(value => !value)}>MONO</button><button className={`volume-toggle ${showVolumeAnomalies ? "active" : ""}`} title="Destaca candles com volume de pelo menos 1,5× a média dos 20 candles anteriores" onClick={() => setShowVolumeAnomalies(v => !v)}>VOL ≥1,5×</button><button className={`volume-toggle ${showVwapDeviation ? "active" : ""}`} title="Sinais DV de rejeição em desvios da VWAP diária" aria-pressed={showVwapDeviation} onClick={() => setShowVwapDeviation(value => !value)}>DV</button><button className={`volume-toggle ${showTrendSignals ? "active" : ""}`} title={interval === "5m" ? "Sinais TREND de tendência no perpétuo 5m" : "TREND disponível no perpétuo 5m"} aria-pressed={showTrendSignals} disabled={interval !== "5m"} onClick={() => setShowTrendSignals(value => !value)}>TREND</button><button className={`volume-toggle ${riskRewardMode ? "active" : ""}`} title="Marque entrada e stop; os alvos de 1R e 2R são projetados automaticamente" aria-pressed={riskRewardMode} onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(value => !value); }}>R:R</button>{riskRewardHasLevels && <button className="volume-toggle" title="Limpar desenho de risco e ganho" onClick={() => { setRiskRewardLevels({ entry: null, stop: null }); setRiskRewardMode(false); }}>LIMPAR R:R</button>}{riskRewardGuide && <span className={`risk-reward-guide ${riskRewardMode ? "drawing" : riskRewardValid ? "valid" : riskRewardHasLevels ? "invalid" : ""}`} aria-live="polite">{riskRewardGuide}</span>}<span style={{ marginLeft: "auto" }} className="subtle"><Crosshair size={12}/></span></div>
           <div className="chart-overlay-strip"><div className="chart-overlay-legend">{showAnchoredVwaps && <><span><i style={{ background: monochromeChart ? "rgba(255,255,255,0.92)" : "#f0bd61" }}/>VWAP D</span><span><i style={{ background: monochromeChart ? "rgba(205,205,205,0.78)" : "#4d9bff" }}/>VWAP S</span><span><i style={{ background: monochromeChart ? "rgba(155,155,155,0.68)" : "#bd82ff" }}/>VWAP M</span></>}{showPreviousLevels && <><span><i style={{ background: monochromeChart ? "linear-gradient(90deg,rgba(255,255,255,0.76) 50%,rgba(220,220,220,0.68) 50%)" : "linear-gradient(90deg,#ff667c 50%,#44d49a 50%)" }}/>D−1 H/L</span><span><i style={{ background: monochromeChart ? "linear-gradient(90deg,rgba(185,185,185,0.66) 50%,rgba(160,160,160,0.6) 50%)" : "linear-gradient(90deg,#ff9a58 50%,#28d6c5 50%)" }}/>S−1 H/L</span><span><i style={{ background: monochromeChart ? "linear-gradient(90deg,rgba(130,130,130,0.58) 50%,rgba(110,110,110,0.52) 50%)" : "linear-gradient(90deg,#e86cff 50%,#7aa2ff 50%)" }}/>M−1 H/L</span></>}</div></div>
-          <div className={`chartarea ${riskRewardMode ? "risk-reward-active" : riskRewardHasLevels ? "risk-reward-placed" : ""}`}><span className="chartlabel">{symbol} · {interval} · OHLCV SPOT · BINANCE · HORÁRIO SÃO PAULO (UTC−3)</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da Binance" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da Binance…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} monochrome={monochromeChart} signals={chartSignals} breakoutSignals={chartBreakoutSignals} trendSignals={chartTrendSignals} vwapDeviationSignals={chartVwapDeviationSignals} riskRewardMode={riskRewardMode} riskRewardLevels={riskRewardLevels} onRiskRewardPoint={placeRiskRewardPoint} onRiskRewardLevelChange={changeRiskRewardLevel}/> : <div className="chartfallback">{candleError ? `Falha ao carregar candles: ${candleError}` : "Candles indisponíveis · aguardando resposta da API Binance Spot"}</div>}</div>
-          <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · SPOT</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">PREÇO SPOT</div><div className="statvalue mono">{fmtPrice(current?.price)}</div></div></div>
+          <div className={`chartarea ${riskRewardMode ? "risk-reward-active" : riskRewardHasLevels ? "risk-reward-placed" : ""}`}><span className="chartlabel">{symbol} · {interval} · OHLCV PERP · BINGX · HORÁRIO SÃO PAULO (UTC−3)</span><span className="zoneinfo">{volatility?.status === "ready" ? `GARCH D ${(volatility.garch!.dailyVol * 100).toFixed(2)}% · HV252 D ${volatility.hv252?.dailyVol == null ? "N/A" : `${(volatility.hv252.dailyVol * 100).toFixed(2)}%`} · ${sigmaDistance == null ? "—" : `${sigmaDistance >= 0 ? "+" : ""}${sigmaDistance.toFixed(2)}σ ${sigmaZone}`} · ref ${fmtPrice(volatility.reference)}` : volatility?.status === "unavailable" ? "Volatilidade diária indisponível · aguardando resposta da BingX" : volatility?.status === "insufficient_history" ? `Histórico diário insuficiente (${volatility.observations ?? 0}/${volatility.required ?? 101} retornos)` : "Calculando zonas GARCH(1,1) e HV252…"}</span>{loading ? <div className="loading">Carregando candles da BingX…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={volatility} showGarch={showGarchZones} showHv={showHvZones} showVolumeAnomalies={showVolumeAnomalies} overlays={chartOverlays} showVwaps={showAnchoredVwaps} showPreviousLevels={showPreviousLevels} monochrome={monochromeChart} signals={chartSignals} breakoutSignals={chartBreakoutSignals} trendSignals={chartTrendSignals} vwapDeviationSignals={chartVwapDeviationSignals} riskRewardMode={riskRewardMode} riskRewardLevels={riskRewardLevels} onRiskRewardPoint={placeRiskRewardPoint} onRiskRewardLevelChange={changeRiskRewardLevel}/> : <div className="chartfallback">{candleError ? `Falha ao carregar candles: ${candleError}` : "Candles indisponíveis · aguardando resposta da API BingX Perpétuos"}</div>}</div>
+          <div className="stats"><div className="stat"><div className="statlabel">MÁX. 24H · PERP</div><div className="statvalue mono">{fmtPrice(current?.high24h)}</div></div><div className="stat"><div className="statlabel">MÍN. 24H · PERP</div><div className="statvalue mono">{fmtPrice(current?.low24h)}</div></div><div className="stat"><div className="statlabel">VOLUME 24H · {nameOf(symbol)}</div><div className="statvalue mono">{fmtCompact(current?.volume24h)}</div></div><div className="stat"><div className="statlabel">PREÇO PERP</div><div className="statvalue mono">{fmtPrice(current?.price)}</div></div></div>
         </section>
 
       <div className="bottomgrid" id="flow">
-        <section className="panel"><div className="panelhead"><span className="paneltitle">Times & trades agregado</span><span className={`badge ${Object.values(tradeSources).filter(status => status === "live").length === 5 ? "good" : ""}`} title={["Binance", "Kraken", "Coinbase", "BingX", "OKX"].map(venue => { const health = tradeHealth[venue]; return `${venue}: ${health?.status ?? tradeSources[venue] ?? "connecting"}; último trade ${health?.lastTradeAt ? fmtTime(health.lastTradeAt) : "sem trade recebido"}${health?.reconnects ? `; reconexões ${health.reconnects}` : ""}${health?.error ? `; ${health.error}` : ""}`; }).join("\n")}>{["Binance", "Kraken", "Coinbase", "BingX", "OKX"].map(venue => `${venue}: ${(tradeSources[venue] ?? "connecting").toUpperCase()}`).join(" · ")}</span></div>
-          <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. / VALOR</span><span>LADO AGRESSOR</span><span>ORIGEM</span></div>
-            {trades.slice(0,18).map((trade,i)=>{const source=trade.source??"Binance";const id=`${source}:${trade.id}`;const anomaly=tradeOutliers.get(id);const notional=trade.price*trade.quantity;return <div className={`taperow ${anomaly?"trade-outlier":""}`} key={`${id}-${i}`} title={anomaly?`Valor ≈ $${fmtCompact(anomaly.notional)} · ${anomaly.ratio.toFixed(1)}× mediana de ${source} (janela de até 24 trades)`:undefined}><span className="mono" style={{ color: "#8290a0" }}>{fmtTime(trade.time)}</span><span className={`mono ${trade.side === "buy" ? "pos" : "neg"}`}>{fmtPrice(trade.price, 2)}</span><span className="trade-quantity"><strong className="mono">{trade.quantity.toFixed(5)}</strong><small>≈ ${fmtCompact(notional)}</small></span><span style={{ textAlign: "right", color: trade.side === "buy" ? "#44d49a" : "#ff667c" }}>{trade.side === "buy" ? "▲ COMPRA" : "▼ VENDA"}</span><span className="trade-origin"><span>{source}</span>{anomaly&&<b className="trade-anomaly">ALTO · {anomaly.ratio.toFixed(0)}×</b>}</span></div>})}
+        <section className="panel"><div className="panelhead"><span className="paneltitle">Times & Trades · BingX Perpétuo</span><span className={`badge ${tradeSources["BingX Perp"] === "live" ? "good" : ""}`}>{(tradeSources["BingX Perp"] ?? "connecting").toUpperCase()}</span></div>          <div className="tape"><div className="taperow header"><span>HORA · UTC−3</span><span>PREÇO</span><span>QTD. / VALOR</span><span>LADO AGRESSOR</span><span>ORIGEM</span></div>
+            {trades.slice(0,18).map((trade,i)=>{const source=trade.source??"BingX Perp";const id=`${source}:${trade.id}`;const anomaly=tradeOutliers.get(id);const notional=trade.price*trade.quantity;return <div className={`taperow ${anomaly?"trade-outlier":""}`} key={`${id}-${i}`} title={anomaly?`Valor ≈ $${fmtCompact(anomaly.notional)} · ${anomaly.ratio.toFixed(1)}× mediana de ${source} (janela de até 24 trades)`:undefined}><span className="mono" style={{ color: "#8290a0" }}>{fmtTime(trade.time)}</span><span className={`mono ${trade.side === "buy" ? "pos" : "neg"}`}>{fmtPrice(trade.price, 2)}</span><span className="trade-quantity"><strong className="mono">{trade.quantity.toFixed(5)}</strong><small>≈ ${fmtCompact(notional)}</small></span><span style={{ textAlign: "right", color: trade.side === "buy" ? "#44d49a" : "#ff667c" }}>{trade.side === "buy" ? "▲ COMPRA" : "▼ VENDA"}</span><span className="trade-origin"><span>{source}</span>{anomaly&&<b className="trade-anomaly">ALTO · {anomaly.ratio.toFixed(0)}×</b>}</span></div>})}
             {trades.length === 0 && <div className="loading">Aguardando negociações observadas…</div>}
-          </div><div className="disclaimer">ALTO = notional ≥5× mediana da corretora e ≥US$ 10 mil, usando até 24 trades recentes (mínimo de 5 por corretora). USD ≈ USDT. É um destaque estatístico de execução, não identifica participante ou intenção.</div>
+          </div><div className="disclaimer">ALTO = notional ≥5× mediana dos trades visíveis e ≥US$ 10 mil. A fita mostra apenas execuções recentes observadas no contrato BingX Perpétuo selecionado.</div>
         </section>
 
         <section className="panel" id="data"><div className="panelhead"><span className="paneltitle">Fluxo observado</span><Database size={13} color="#8794a2"/></div>
-          <div className="coverage"><div className="coverrow"><span>CVD SPOT · AMOSTRA VISÍVEL</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · spot</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · spot</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades na fita</span><span className="mono">{trades.length} / 60</span></div><div className="coverrow"><span>Coletor Binance</span><span className={`mono ${flowQuality?.connected ? "pos" : "neg"}`}>{flowQuality?.connected ? "AO VIVO" : flowQuality?.status?.toUpperCase() ?? "AGUARDANDO"}</span></div><div className="coverrow"><span>Último evento · latência</span><span className="mono">{flowQuality?.lastEventTime ? `${fmtTime(flowQuality.lastEventTime)} · ${flowQuality.lastLatencyMs ?? "—"} ms` : "—"}</span></div><div className="coverrow"><span>Eventos · reconexões</span><span className="mono">{flowQuality?.events ?? 0} · {flowQuality?.reconnects ?? 0}</span></div><div className="coverrow"><span>Saltos · trades recuperados · falhas</span><span className="mono">{flowQuality?.possibleIdGaps ?? 0} · {flowQuality?.backfillRowsQueued ?? 0} · {flowQuality?.backfillFailures ?? 0}</span></div><div className="coverrow"><span>Trades brutos · retenção</span><span className="mono">{flowQuality?.storedTrades ?? 0} · {flowQuality?.rawRetentionHours ?? "—"} h</span></div><div className="coverrow"><span>Barras de fluxo · retenção</span><span className="mono">{flowQuality?.storedFlowBars ?? 0} · {flowQuality?.aggregateRetentionDays ?? "—"} d</span></div><div className="coverrow"><span>Armazenamento</span><span className="mono">{flowQuality ? `${flowQuality.storage.toUpperCase()} · ${(flowQuality.storageBytes / 1048576).toFixed(1)} MB` : "—"}</span></div><div className="coverrow"><span>Fila descartada</span><span className={`mono ${flowQuality?.queueDropped ? "neg" : "pos"}`}>{flowQuality?.queueDropped ?? 0}</span></div>{flowQuality?.storage === "sqlite" && !flowQuality.storageDurable && <div className="dataerror">SQLite no disco local do serviço: no Render sem volume persistente, o histórico pode sumir em reinícios ou deploys.</div>}{flowQuality?.storage === "postgres" && flowQuality.storageBytes >= 400 * 1024 * 1024 && <div className="dataerror">Banco próximo da cota gratuita de 500 MB. Reduza a retenção em FLOW_RETENTION_HOURS e FLOW_AGG_RETENTION_DAYS.</div>}
-            <hr style={{ border: 0, borderTop: "1px solid #202833", margin: "9px 0" }}/>
-            <div className="coverrow"><span>Sentimento · Fear & Greed</span><strong className="mono" style={{ color: fear?.value != null ? "#d5c080" : "#8996a5" }}>{fear?.value != null ? `${fear.value} · ${fear.label}` : "Indisponível"}</strong></div>
-            <div className="coverrow"><span>Mercado</span><span className="mono">À vista · sem alavancagem</span></div><div className="coverrow"><span>Preço de referência spot</span><span className="mono">{fmtPrice(current?.price)}</span></div>
-            <div className="footnote">{book?.status === "live" ? `Book recebido ${fmtTime(book.receivedAt)} · ${book.eventTime ? `${Math.max(0, book.receivedAt-book.eventTime)} ms de latência` : "sem timestamp de exchange"}` : "Book aguardando conexão"}</div>
-          </div>
-          <FlowHistory symbol={symbol}/>
+          <div className="coverage"><div className="coverrow"><span>CVD PERP · AMOSTRA VISÍVEL</span><strong className={`mono ${cvd >= 0 ? "pos" : "neg"}`}>{cvd >= 0 ? "+" : ""}{cvd.toFixed(5)} {nameOf(symbol)}</strong></div><div className="coverrow"><span>Agressão compradora · BingX</span><span className="mono pos">{buyVolume.toFixed(4)}</span></div><div className="coverrow"><span>Agressão vendedora · BingX</span><span className="mono neg">{sellVolume.toFixed(4)}</span></div><div className="coveragebar"><div style={{ width: `${coverage}%` }}/></div><div className="coverrow"><span>Trades visíveis</span><span className="mono">{trades.length} / 60</span></div><div className="coverrow"><span>Fonte</span><span className={`mono ${tradeSources["BingX Perp"] === "live" ? "pos" : "neg"}`}>{(tradeSources["BingX Perp"] ?? "connecting").toUpperCase()}</span></div><div className="coverrow"><span>Último trade</span><span className="mono">{trades[0]?.time ? fmtTime(trades[0].time) : "—"}</span></div><div className="footnote">Amostra recente do contrato perpétuo BingX selecionado. CVD usa o lado agressor informado pela exchange; não representa o fluxo de todo o mercado.</div><hr style={{ border: 0, borderTop: "1px solid #202833", margin: "9px 0" }}/><div className="coverrow"><span>Sentimento · Fear & Greed</span><strong className="mono" style={{ color: fear?.value != null ? "#d5c080" : "#8996a5" }}>{fear?.value != null ? `${fear.value} · ${fear.label}` : "Indisponível"}</strong></div><div className="coverrow"><span>Mercado</span><span className="mono">Perpétuo USDT · BingX</span></div><div className="coverrow"><span>Preço de referência perpétuo</span><span className="mono">{fmtPrice(current?.price)}</span></div><div className="footnote">{book?.status === "live" ? `Book recebido ${fmtTime(book.receivedAt)} · ${book.eventTime ? `${Math.max(0, book.receivedAt-book.eventTime)} ms de latência` : "sem timestamp da exchange"}` : "Book aguardando atualização"}</div></div>
         </section>
       </div>
 
@@ -550,7 +539,7 @@ export default function Terminal() {
 
 
         <aside className="rightstack">
-          <section className="panel"><div className="panelhead"><span className="paneltitle">Spot order book · 5 corretoras</span><span className={`badge ${book?.status === "live" ? "good" : ""}`}>{liveBookSources}/5 FONTES</span></div>
+          <section className="panel"><div className="panelhead"><span className="paneltitle">Order book perpétuo · BingX</span><span className={`badge ${book?.status === "live" ? "good" : ""}`}>{liveBookSources}/1 FONTE</span></div>
             <div className="booksummary"><div><span>GAP INDICATIVO · MELHOR BID/ASK</span><strong className="mono">{book ? fmtPrice(book.spread, 4) : "—"}</strong></div><div style={{ textAlign: "right" }}><span>IMBALANCE</span><strong className={`mono ${book ? directionClass(book.imbalance) : ""}`}>{book ? `${book.imbalance >= 0 ? "+" : ""}${book.imbalance.toFixed(2)}` : "—"}</strong></div></div>
             <div className="book-liquidity"><span>PROFUNDIDADE ATÉ ±0,1%<strong className="mono"><i className="pos">BID ${fmtCompact(book?.liquidityBands?.["bid0.1%"] ?? null)}</i><i className="neg">ASK ${fmtCompact(book?.liquidityBands?.["ask0.1%"] ?? null)}</i></strong></span><span>PROFUNDIDADE ATÉ ±0,5%<strong className="mono"><i className="pos">BID ${fmtCompact(book?.liquidityBands?.["bid0.5%"] ?? null)}</i><i className="neg">ASK ${fmtCompact(book?.liquidityBands?.["ask0.5%"] ?? null)}</i></strong></span></div>
             <div className="bookfilters"><label>Filtro mínimo<select value={showAllBookLevels ? "all" : String(bookThreshold)} onChange={event => { const value = event.target.value; setShowAllBookLevels(value === "all"); if (value !== "all") setBookThreshold(Number(value)); }}><option value="all">Todos os níveis</option><option value="10000">10 mil USDT</option><option value="50000">50 mil USDT</option><option value="100000">100 mil USDT</option><option value="250000">250 mil USDT</option><option value="500000">500 mil USDT</option></select></label><span>Valor visível = preço × quantidade</span></div>
@@ -561,7 +550,7 @@ export default function Terminal() {
                 <div className="depthbook-side right">{visibleAsks.map((level, index) => <div className="depthbook-row" key={`a${index}`} title={`Fontes: ${(level.sources ?? []).join(", ")}`}><span className="book-price mono neg">{fmtPrice(level.price, 2)}</span><span className="book-bar ask" style={{ "--book-depth": `${Math.min(100, (level.price * level.quantity / bookMaxNotional) * 100)}%` } as React.CSSProperties}/><span className="book-total mono">{fmtCompact(cumulativeAsks[index])}</span><span className="book-qty mono">{fmtCompact(level.quantity)}</span></div>)}{visibleAsks.length === 0 && <div className="bookempty">Sem ofertas de venda nesta amostra.</div>}</div>
               </div>
               <div className="depthbook-mid"><span className="mono pos">{bestBid != null ? fmtPrice(bestBid, 2) : "—"}</span><span>{book && bestBid != null && bestAsk != null ? `GAP ${fmtPrice(book.spread, 4)}` : "CONECTANDO"}</span><span className="mono neg">{bestAsk != null ? fmtPrice(bestAsk, 2) : "—"}</span></div>
-              <div className="depthbook-foot">BINANCE + KRAKEN + COINBASE · USD ≈ USDT · FAIXAS DE 0,1 PB</div>
+              <div className="depthbook-foot">BINGX USDT-M PERP · PROFUNDIDADE OBSERVADA</div>
             </div>
             <div className="dataerror">Book indicativo: o gap pode ser negativo entre corretoras e não representa arbitragem executável. Cada nível mostra as fontes ao passar o cursor; USD ≈ USDT.</div>
           </section>
@@ -586,7 +575,7 @@ export default function Terminal() {
               {breakoutError ? <div className="loading">Estratégia de rompimento indisponível no momento.</div> : breakoutData?.status === "insufficient_history" ? <div className="loading compact">Histórico insuficiente: {breakoutData.observedCandles ?? 0}/{breakoutData.requiredCandles ?? 0} candles necessários.</div> : latestBreakout ? <><div className={`reversal-score ${latestBreakout.direction === "BUY" ? "pos" : "neg"}`}><strong>{latestBreakout.direction === "BUY" ? "ROMPIMENTO ↑" : "ROMPIMENTO ↓"}</strong><span>VOLUME {latestBreakout.volumeRatio.toFixed(2)}× MEDIANA</span></div><div className="reversal-description">Fechamento {fmtPrice(latestBreakout.price)} · faixa {fmtPrice(latestBreakout.rangeLow)}—{fmtPrice(latestBreakout.rangeHigh)}</div><div className="reversal-description">Distância {latestBreakout.distanceAtr.toFixed(2)} ATR · ATR(14) {fmtPrice(latestBreakout.atr)}</div><div className="reversal-description">Compressão confirmada · candle {fmtTime(latestBreakout.time * 1000)}</div></> : <div className="loading compact">Aguardando compressão recente, rompimento com força e volume confirmado.</div>}
               <div className="signal-toggles"><button className={`signal-toggle buy ${breakoutBuyEnabled ? "active" : ""}`} onClick={() => setBreakoutBuyEnabled(value => !value)}>BUY</button><button className={`signal-toggle sell ${breakoutSellEnabled ? "active" : ""}`} onClick={() => setBreakoutSellEnabled(value => !value)}>SELL</button></div>
               <div className="signal-config"><label>Compressão · percentil<input type="number" min="1" max="50" step="1" value={breakoutPercentile} onChange={event => setBreakoutPercentile(Math.min(50, Math.max(1, Number(event.target.value) || 10)))}/></label><label>Volume mínimo · × mediana<input type="number" min="1" max="10" step="0.1" value={breakoutVolumeMultiple} onChange={event => setBreakoutVolumeMultiple(Math.min(10, Math.max(1, Number(event.target.value) || 2)))}/></label><label>Margem além da faixa · ATR<input type="number" min="0" max="2" step="0.05" value={breakoutAtrMultiple} onChange={event => setBreakoutAtrMultiple(Math.min(2, Math.max(0, Number(event.target.value) || 0)))}/></label></div>
-              <div className="reversal-foot">BB(20) comprimida no percentil {breakoutPercentile} dos últimos 100 candles · fechamento além da faixa de 20 candles por ≥{breakoutAtrMultiple.toFixed(2)} ATR(14) · volume ≥{breakoutVolumeMultiple.toFixed(1)}× mediana dos 20 anteriores · cooldown 10 candles. Regra independente da reversão; análise spot, sem ordens.</div>
+              <div className="reversal-foot">BB(20) comprimida no percentil {breakoutPercentile} dos últimos 100 candles · fechamento além da faixa de 20 candles por ≥{breakoutAtrMultiple.toFixed(2)} ATR(14) · volume ≥{breakoutVolumeMultiple.toFixed(1)}× mediana dos 20 anteriores · cooldown 10 candles. Regra independente da reversão; mercado perpétuo, sem ordens.</div>
             </div>
           </section>
 
@@ -595,7 +584,7 @@ export default function Terminal() {
               {vwapDeviationError ? <div className="loading">Sinais DV indisponíveis no momento.</div> : vwapDeviationData?.status === "unsupported_interval" ? <div className="loading compact">DV disponível apenas em períodos intradiários.</div> : vwapDeviationData?.status === "insufficient_history" ? <div className="loading compact">Aguardando histórico para médias e confirmação dos padrões.</div> : latestVwapDeviation ? <><div className={`reversal-score ${latestVwapDeviation.direction === "BUY" ? "pos" : "neg"}`}><strong>DV {latestVwapDeviation.sigma} · {latestVwapDeviation.direction}</strong><span>{latestVwapDeviation.modelLabels.join(" + ")}</span></div><div className="reversal-description">Confirmação {fmtPrice(latestVwapDeviation.price)} · banda {fmtPrice(latestVwapDeviation.bandPrice)}</div><div className="reversal-description">RVOL {latestVwapDeviation.volumeRatio.toFixed(2)}× · amplitude {latestVwapDeviation.relativeSpread.toFixed(2)}× · CLV {latestVwapDeviation.closeLocation.toFixed(2)}</div><div className="reversal-description">Candle confirmado · {fmtTime(latestVwapDeviation.time * 1000)}</div></> : <div className="loading compact">Aguardando rejeição e confirmação de absorção, upthrust/shakeout ou reteste.</div>}
               <div className="signal-toggles"><button className={`signal-toggle ${showVwapDeviation ? "active" : ""}`} onClick={() => setShowVwapDeviation(value => !value)}>{showVwapDeviation ? "DV NO GRÁFICO" : "DV OCULTO"}</button></div>
               <div className="dv-settings-grid"><label>RVOL alto<input type="number" min="1" max="10" step="0.1" value={dvVolumeHigh} onChange={event => setDvVolumeHigh(Math.min(10, Math.max(1, Number(event.target.value) || 1.8)))} /></label><label>RVOL baixo<input type="number" min="0" max="2" step="0.1" value={dvVolumeLow} onChange={event => setDvVolumeLow(Math.min(2, Math.max(0, Number(event.target.value) || 0.7)))} /></label><label>Amplitude larga<input type="number" min="0.1" max="10" step="0.1" value={dvSpreadWide} onChange={event => setDvSpreadWide(Math.min(10, Math.max(0.1, Number(event.target.value) || 1.5)))} /></label><label>Amplitude estreita<input type="number" min="0" max="2" step="0.1" value={dvSpreadNarrow} onChange={event => setDvSpreadNarrow(Math.min(2, Math.max(0, Number(event.target.value) || 0.7)))} /></label><label>CLV extremo<input type="number" min="0.5" max="1" step="0.05" value={dvCloseExtreme} onChange={event => setDvCloseExtreme(Math.min(1, Math.max(0.5, Number(event.target.value) || 0.7)))} /></label><label>Médias · candles<input type="number" min="5" max="100" step="1" value={dvAveragePeriods} onChange={event => setDvAveragePeriods(Math.min(100, Math.max(5, Number(event.target.value) || 20)))} /></label></div>
-              <div className="reversal-foot">DV 1, DV 2 e DV 3 correspondem a 1σ, 2σ e 3σ; os três modelos podem confirmar. RVOL e amplitude comparam à média dos {dvAveragePeriods} candles anteriores. CLV mede o fechamento dentro da faixa do candle. Bandas internas; candles fechados; OHLCV estimado; sem ordens.</div>
+              <div className="reversal-foot">DV 1, DV 2 e DV 3 correspondem a 1σ, 2σ e 3σ; os três modelos podem confirmar. RVOL e amplitude comparam à média dos {dvAveragePeriods} candles anteriores. CLV mede o fechamento dentro da faixa do candle. Bandas internas; candles fechados; OHLCV do contrato BingX; sem ordens.</div>
             </div>
           </section>
 

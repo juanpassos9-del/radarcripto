@@ -52,6 +52,7 @@ SPOT_DATA_FALLBACKS = tuple(dict.fromkeys(
     ]]
 ))
 SPOT_WS = os.getenv("BINANCE_SPOT_WS_URL", "wss://data-stream.binance.vision/stream")
+BINGX_PERP_API = "https://open-api.bingx.com"
 MAX_GAP_BACKFILL_TRADES = max(0, int(os.getenv("FLOW_GAP_RECOVERY_MAX_TRADES", "5000")))
 MAX_AGGREGATED_BOOK_LEVELS = 150
 MAX_EXTERNAL_SYMBOLS = 5
@@ -751,6 +752,16 @@ class MarketService:
 
     @staticmethod
     def _request_cache_ttl(base: str, path: str, params: dict[str, Any]) -> float:
+        if base == BINGX_PERP_API:
+            if path.endswith("/ticker"):
+                return 8
+            if path.endswith("/depth"):
+                return 3
+            if path.endswith("/klines"):
+                return {"1m": 3, "5m": 5, "15m": 8, "30m": 10, "1h": 15, "4h": 20, "1d": 30}.get(str(params.get("interval", "")), 0)
+            if path.endswith("/trades"):
+                return 2
+            return 0
         if base != SPOT_DATA:
             return 0
         if path == "/api/v3/ticker/24hr":
@@ -768,6 +779,58 @@ class MarketService:
         return 0
 
     async def _request_uncached(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
+        if base == BINGX_PERP_API:
+            request_params = dict(params or {})
+            symbol = request_params.get("symbol")
+            if symbol:
+                request_params["symbol"] = str(symbol).replace("/", "-") if "-" in str(symbol) else f"{str(symbol).removesuffix('USDT')}-USDT"
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    async with self.request_slots:
+                        response = await self.client.get(base + path, params=request_params, timeout=12)
+                    if response.status_code == 429 and attempt == 0:
+                        await asyncio.sleep(min(max(float(response.headers.get("Retry-After", 1)), 0.25), 3))
+                        continue
+                    response.raise_for_status()
+                    payload = response.json()
+                    if str(payload.get("code", "0")) != "0":
+                        raise HTTPException(502, f"BingX perpetual market data error: {payload.get('msg', payload.get('code'))}")
+                    data = payload.get("data")
+                    if path.endswith("/klines"):
+                        interval_ms = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000, "1w": 604_800_000, "1M": 2_592_000_000}.get(str(request_params.get("interval", "")), 60_000)
+                        normalized = []
+                        for row in data or []:
+                            opened = int(row["time"])
+                            if opened < 10_000_000_000:
+                                opened *= 1000
+                            closed = int(row.get("closeTime", opened + interval_ms - 1))
+                            normalized.append([opened, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row.get("volume", 0)), closed, float(row.get("quoteVolume", 0))])
+                        return normalized
+                    if path.endswith("/depth"):
+                        return {"lastUpdateId": int((data or {}).get("T", time.time() * 1000)), "bids": (data or {}).get("bids", []), "asks": (data or {}).get("asks", [])}
+                    if path.endswith("/trades"):
+                        rows = data if isinstance(data, list) else (data or {}).get("trades", [])
+                        normalized = []
+                        for row in rows or []:
+                            trade_time = int(row.get("time", row.get("T", row.get("ts", time.time() * 1000))))
+                            if trade_time < 10_000_000_000:
+                                trade_time *= 1000
+                            maker = row.get("isBuyerMaker", row.get("buyerMaker", False))
+                            maker = maker is True or str(maker).lower() in {"1", "true", "yes"}
+                            normalized.append({"a": row.get("fillId", row.get("id", row.get("tradeId", f"{trade_time}:{row.get('price')}:{row.get('qty')}"))), "T": trade_time, "p": row.get("price"), "q": row.get("qty", row.get("quantity")), "m": maker})
+                        normalized.sort(key=lambda row: int(row["T"]), reverse=True)
+                        return normalized[:int(params.get("limit", 60) if params else 60)]
+                    if path.endswith("/ticker"):
+                        return data[0] if isinstance(data, list) and data else data
+                    return data
+                except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as error:
+                    last_error = error
+                    if attempt == 0 and (not isinstance(error, httpx.HTTPStatusError) or error.response.status_code >= 500):
+                        await asyncio.sleep(0.35)
+                        continue
+                    break
+            raise HTTPException(502, f"BingX Perp REST indisponível: {str(last_error)[:180]}") from last_error
         bases = SPOT_DATA_FALLBACKS if base == SPOT_DATA else (base,)
         last_error: Exception | None = None
         for endpoint in bases:
@@ -818,8 +881,16 @@ class MarketService:
         base, path = self.base_and_path(market, "ticker")
         received = int(time.time() * 1000)
         row = await self.request(base, path, {"symbol": symbol})
-        event = int(row["closeTime"])
-        return MarketSnapshot(symbol=symbol, price=float(row["lastPrice"]), change24h=float(row["priceChangePercent"]), volume24h=float(row["volume"]), quoteVolume24h=float(row["quoteVolume"]), high24h=float(row["highPrice"]), low24h=float(row["lowPrice"]), source=self.market_source(market), eventTime=event, receivedAt=received, latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale")
+        event = int(row.get("closeTime", row.get("time", row.get("timestamp", received))))
+        if event < 10_000_000_000:
+            event *= 1000
+        price = float(row["lastPrice"])
+        change = float(row.get("priceChangePercent", row.get("priceChangePercent24h", 0)))
+        volume = float(row.get("volume", row.get("volume24h", 0)))
+        quote_volume = float(row.get("quoteVolume", row.get("quoteVolume24h", price * volume)))
+        high = float(row.get("highPrice", row.get("high", price)))
+        low = float(row.get("lowPrice", row.get("low", price)))
+        return MarketSnapshot(symbol=symbol, price=price, change24h=change, volume24h=volume, quoteVolume24h=quote_volume, high24h=high, low24h=low, source=self.market_source(market), eventTime=event, receivedAt=received, latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale")
 
     async def market_context(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -874,11 +945,19 @@ class MarketService:
 
     @staticmethod
     def market_source(market: str) -> str:
-        return "Binance Spot"
+        return "BingX USDT-M Perpetual" if market == "perpetual" else "Binance Spot"
 
     @staticmethod
     def base_and_path(market: str, resource: str) -> tuple[str, str]:
         """Return the REST base and endpoint for a supported public market feed."""
+        if market == "perpetual":
+            paths = {
+                "ticker": "/openApi/swap/v2/quote/ticker",
+                "depth": "/openApi/swap/v2/quote/depth",
+                "klines": "/openApi/swap/v3/quote/klines",
+                "trades": "/openApi/swap/v2/quote/trades",
+            }
+            return BINGX_PERP_API, paths[resource]
         paths = {
             "ticker": "/api/v3/ticker/24hr",
             "depth": "/api/v3/depth",
@@ -888,6 +967,33 @@ class MarketService:
         return SPOT_DATA, paths[resource]
 
     async def book(self, symbol: str, market: str, limit: int) -> BookSnapshot:
+        if market == "perpetual":
+            base, path = self.base_and_path(market, "depth")
+            snapshot = await self.request(base, path, {"symbol": symbol, "limit": 100})
+            all_bids = sorted(((float(price), float(qty)) for price, qty in snapshot["bids"] if float(qty) > 0), reverse=True)
+            all_asks = sorted(( (float(price), float(qty)) for price, qty in snapshot["asks"] if float(qty) > 0))
+            bids, asks = all_bids[:limit], all_asks[:limit]
+            bid_levels, ask_levels = [], []
+            total = 0.0
+            for price, qty in bids:
+                total += price * qty
+                bid_levels.append(Level(price=price, quantity=qty, total=total, sources=["BingX Perp"]))
+            total = 0.0
+            for price, qty in asks:
+                total += price * qty
+                ask_levels.append(Level(price=price, quantity=qty, total=total, sources=["BingX Perp"]))
+            bid_qty = sum(qty for _, qty in all_bids)
+            ask_qty = sum(qty for _, qty in all_asks)
+            midpoint = (bids[0][0] + asks[0][0]) / 2 if bids and asks else 0.0
+            liquidity = {}
+            for label, fraction in (("0.1%", .001), ("0.5%", .005)):
+                liquidity[f"bid{label}"] = sum(price * qty for price, qty in all_bids if midpoint * (1 - fraction) <= price <= midpoint)
+                liquidity[f"ask{label}"] = sum(price * qty for price, qty in all_asks if midpoint <= price <= midpoint * (1 + fraction))
+            received_at = int(time.time() * 1000)
+            event_time = int(snapshot.get("lastUpdateId", received_at))
+            if event_time < 10_000_000_000:
+                event_time *= 1000
+            return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=asks[0][0] - bids[0][0] if asks and bids else 0.0, imbalance=(bid_qty - ask_qty) / (bid_qty + ask_qty) if bid_qty + ask_qty else 0.0, eventTime=event_time, receivedAt=received_at, status="live" if bids and asks else "unavailable", source="BingX Perpetual", sources={"BingX Perp": "live"}, liquidityBands=liquidity)
         self.ensure_external_collectors(symbol)
         key = (market, symbol)
         init_lock = self.book_init_locks.setdefault(key, asyncio.Lock())
@@ -1462,12 +1568,9 @@ def validate_symbol(symbol: str) -> str:
     return symbol
 
 def validate_market(market: str) -> str:
-    configured = os.getenv("NEXUS_MARKET_MODE", "spot").strip().lower()
-    if configured != "spot":
-        raise HTTPException(500, "Only the Spot data feed is configured on this service")
-    if market != "spot":
-        raise HTTPException(400, "This terminal provides Binance Spot data only")
-    return "spot"
+    if market not in {"spot", "perpetual"}:
+        raise HTTPException(400, "Mercado inválido; use spot ou perpetual.")
+    return market
 
 @app.get("/health")
 async def health():
@@ -1476,6 +1579,39 @@ async def health():
 @app.get("/api/markets")
 async def markets(market: str = Query("spot")):
     market = validate_market(market)
+    if market == "perpetual":
+        base, path = service.base_and_path(market, "ticker")
+        try:
+            rows = await service.request(base, path, {})
+            tickers = rows if isinstance(rows, list) else [rows] if rows else []
+            by_symbol = {str(row.get("symbol", "")).upper(): row for row in tickers}
+            received = int(time.time() * 1000)
+            snapshots, unavailable = [], []
+            for symbol in SYMBOLS:
+                row = by_symbol.get(f"{symbol.removesuffix('USDT')}-USDT")
+                if not row:
+                    unavailable.append({"symbol": symbol, "reason": "Contrato indisponível no ticker da BingX"})
+                    continue
+                try:
+                    price = float(row["lastPrice"])
+                    event = int(row.get("closeTime", row.get("time", received)))
+                    if event < 10_000_000_000:
+                        event *= 1000
+                    volume = float(row.get("volume", row.get("volume24h", 0)))
+                    snapshots.append(MarketSnapshot(
+                        symbol=symbol, price=price,
+                        change24h=float(row.get("priceChangePercent", row.get("priceChangePercent24h", 0))),
+                        volume24h=volume, quoteVolume24h=float(row.get("quoteVolume", row.get("quoteVolume24h", price * volume))),
+                        high24h=float(row.get("highPrice", row.get("high", price))), low24h=float(row.get("lowPrice", row.get("low", price))),
+                        source="BingX USDT-M Perpetual", eventTime=event, receivedAt=received,
+                        latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale",
+                    ).model_dump())
+                except (KeyError, TypeError, ValueError) as error:
+                    unavailable.append({"symbol": symbol, "reason": str(error)})
+            return {"markets": snapshots, "unavailable": unavailable}
+        except (httpx.HTTPError, HTTPException, ValueError, TypeError) as error:
+            log.warning("BingX perpetual tickers unavailable: %s", error)
+            raise HTTPException(502, "Não foi possível carregar os tickers dos perpétuos BingX.") from error
     results = await asyncio.gather(*(service.ticker(symbol, market) for symbol in SYMBOLS), return_exceptions=True)
     unavailable = []
     for index, item in enumerate(results):
@@ -2043,6 +2179,13 @@ async def order_book(symbol: str = Query("BTCUSDT"), market: str = Query("spot")
 @app.get("/api/trades")
 async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), limit: int = Query(24, ge=1, le=100)):
     symbol, market = validate_symbol(symbol), validate_market(market)
+    if market == "perpetual":
+        base, path = service.base_and_path(market, "trades")
+        response = await service.request(base, path, {"symbol": symbol, "limit": limit})
+        rows = [Trade(id=row["a"], time=int(row["T"]), price=float(row["p"]), quantity=float(row["q"]), side="sell" if row["m"] else "buy", source="BingX Perp") for row in response or []]
+        rows.sort(key=lambda trade: (trade.time, str(trade.id)), reverse=True)
+        latest = rows[0].time if rows else None
+        return {"trades": [trade.model_dump() for trade in rows[:limit]], "source": "BingX USDT-M Perpetual · public recent trades", "sources": {"BingX Perp": "live" if rows else "unavailable"}, "tradeHealth": {"BingX Perp": {"status": "live" if rows else "unavailable", "lastTradeAt": latest}}, "receivedAt": int(time.time() * 1000), "coverage": "Negociações públicas observadas no contrato perpétuo BingX selecionado; agressão inferida pelo campo maker da exchange. Não representa o fluxo global."}
     service.ensure_external_collectors(symbol)
     sample = service.samples.get((market, symbol), deque())
     stored = await asyncio.to_thread(service.flow_store.recent, symbol, limit) if service.flow_store else []
@@ -2331,16 +2474,14 @@ async def breakout_signals(
 async def trend_signals(
     symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"),
 ):
-    """Independent trend-following signals for closed Binance Spot 5m candles."""
+    """Independent trend-following signals for closed BingX perpetual candles."""
     symbol, market = validate_symbol(symbol), validate_market(market)
     if interval not in INTERVALS:
         raise HTTPException(400, "Unsupported candle interval")
-    if market != "spot":
-        return {"symbol": symbol, "interval": interval, "status": "unsupported_market", "signals": [], "latest": None}
     if interval != "5m":
         return build_trend_signals(symbol, interval, [])
     try:
-        base, path = service.base_and_path("spot", "klines")
+        base, path = service.base_and_path(market, "klines")
         rows = await service.request(base, path, {"symbol": symbol, "interval": "5m", "limit": 500})
         now_ms = int(time.time() * 1000)
         candles = [
