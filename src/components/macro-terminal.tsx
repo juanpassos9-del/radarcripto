@@ -19,6 +19,8 @@ type RotationReading = { key: string; title: string; assets: { key: string; stre
 type MacroSeries = { key: string; label: string; color: string; category?: string; values: { time: number; value: number }[] };
 type CorrelationPair = { left: string; right: string; label: string; color: string };
 type CorrelationPreset = { key: string; label: string; series: string[]; pairs: CorrelationPair[] };
+type CorrelationMapPairData = { left: string; right: string; values: { time: number; value: number }[]; latest: number | null; samples: number; status: "ready" | "limited" | "flat" | "warming" | "missing" };
+type CorrelationMapData = { series: MacroSeries[]; pairs: CorrelationMapPairData[]; missing: string[]; commonEnd: number | null; windowMinutes: number; intervalMinutes: number };
 type BreadthGroup = { label: string; advancing: number; neutral: number; declining: number; available: number; total: number; score: number | null; coverage: number };
 type AlertPreferences = { enabled: boolean; regime: boolean; exceptionalMove: boolean; divergence: boolean; multiClass: boolean; zThreshold: number; cooldownMinutes: number };
 type MacroAlert = { id: string; createdAt: number; title: string; detail: string; tone: "positive" | "risk" | "warning" };
@@ -75,7 +77,7 @@ type MacroSnapshot = {
   divergences: { id: string; leftKey: string; rightKey: string; label: string; leftZ5m: number; rightZ5m: number; strength: number; note: string; persistenceMinutes?: number; confirmed?: boolean }[];
   insights: { tone: string; title: string; detail: string }[];
   outlook: { group: string; bias: string; title: string; detail: string }[];
-  chart: { windowMinutes: number; series: MacroSeries[]; dailyWindowHours?: number; dailySeries?: MacroSeries[] };
+  chart: { windowMinutes: number; series: MacroSeries[]; dailyWindowHours?: number; dailySeries?: MacroSeries[]; correlationMaps?: { intraday: Record<string, CorrelationMapData>; daily: Record<string, CorrelationMapData> } };
   yieldCurve?: { spreadBps: number | null; change5mBps: number | null; longSpreadBps?: number | null; longChange5mBps?: number | null; status?: string; label?: string };
   method: string; limitations: string[];
 };
@@ -101,71 +103,24 @@ const CORRELATION_PRESETS: CorrelationPreset[] = [
   ] },
 ];
 
-function returnsByBucket(series: MacroSeries, intervalMs: number) {
-  const buckets = new Map<number, number>();
-  for (const point of series.values) {
-    const bucket = Math.floor(point.time / intervalMs) * intervalMs;
-    const previous = buckets.get(bucket);
-    if (previous == null || point.time >= bucket) buckets.set(bucket, point.value);
-  }
-  const points = [...buckets.entries()].sort(([left], [right]) => left - right);
-  const returns = new Map<number, number>();
-  for (let index = 1; index < points.length; index += 1) {
-    const [previousTime, previousValue] = points[index - 1];
-    const [time, value] = points[index];
-    if (time - previousTime <= intervalMs * 1.5) returns.set(time, value - previousValue);
-  }
-  return returns;
-}
-
-function pearson(left: number[], right: number[]) {
-  if (left.length < 2 || left.length !== right.length) return null;
-  const leftMean = left.reduce((sum, value) => sum + value, 0) / left.length;
-  const rightMean = right.reduce((sum, value) => sum + value, 0) / right.length;
-  const covariance = left.reduce((sum, value, index) => sum + (value - leftMean) * (right[index] - rightMean), 0);
-  const leftVariance = left.reduce((sum, value) => sum + (value - leftMean) ** 2, 0);
-  const rightVariance = right.reduce((sum, value) => sum + (value - rightMean) ** 2, 0);
-  const denominator = Math.sqrt(leftVariance * rightVariance);
-  return denominator > 1e-12 ? Math.max(-1, Math.min(1, covariance / denominator)) : null;
-}
-
-function rollingCorrelation(left: MacroSeries | undefined, right: MacroSeries | undefined, intervalMs: number, windowSize = 30) {
-  if (!left || !right) return { values: [] as { time: number; value: number }[], latest: null as number | null, samples: 0 };
-  const leftReturns = returnsByBucket(left, intervalMs);
-  const rightReturns = returnsByBucket(right, intervalMs);
-  const aligned = [...leftReturns.keys()].filter(time => rightReturns.has(time)).sort((a, b) => a - b);
-  const values: { time: number; value: number }[] = [];
-  for (let index = 0; index < aligned.length; index += 1) {
-    const start = Math.max(0, index - windowSize + 1);
-    const times = aligned.slice(start, index + 1);
-    if (times.length < 12) continue;
-    const value = pearson(times.map(time => leftReturns.get(time)!), times.map(time => rightReturns.get(time)!));
-    if (value != null) values.push({ time: aligned[index], value });
-  }
-  return { values, latest: values.at(-1)?.value ?? null, samples: aligned.length };
-}
-
-function MacroCorrelationMap({ intraday, daily }: { intraday: MacroSeries[]; daily: MacroSeries[] }) {
-  const [period, setPeriod] = useState<"intraday" | "daily">("intraday");
-  const [presetKey, setPresetKey] = useState(CORRELATION_PRESETS[0].key);
+function MacroCorrelationMap({ period, data, assets, defaultPreset }: {
+  period: "intraday" | "daily";
+  data?: Record<string, CorrelationMapData>;
+  assets: MacroAsset[];
+  defaultPreset: string;
+}) {
+  const [presetKey, setPresetKey] = useState(defaultPreset);
   const preset = CORRELATION_PRESETS.find(item => item.key === presetKey) ?? CORRELATION_PRESETS[0];
-  const series = period === "intraday" ? intraday : daily;
-  const intervalMs = period === "intraday" ? 60_000 : 5 * 60_000;
-  const byKey = new Map(series.map(item => [item.key, item]));
-  const selected = preset.series.flatMap(key => {
-    const item = byKey.get(key);
-    return item ? [{ ...item, color: CHART_SERIES_COLORS[key] ?? item.color }] : [];
-  });
-  const correlations = preset.pairs.map(pair => ({
-    ...pair,
-    ...rollingCorrelation(byKey.get(pair.left), byKey.get(pair.right), intervalMs),
-  }));
-  const values = selected.flatMap(item => item.values);
+  const mapData = data?.[presetKey];
+  const selected = mapData?.series ?? [];
+  const plotted = selected.filter(item => item.values.length > 1);
+  const correlations = preset.pairs.map(pair => ({ ...pair, result: mapData?.pairs.find(item => item.left === pair.left && item.right === pair.right) }));
+  const values = plotted.flatMap(item => item.values);
   const times = values.map(point => point.time);
-  const minimumTime = Math.min(...times);
-  const maximumTime = Math.max(...times);
-  const minimumValue = Math.min(0, ...values.map(point => point.value));
-  const maximumValue = Math.max(0, ...values.map(point => point.value));
+  const minimumTime = times.length ? Math.min(...times) : 0;
+  const maximumTime = times.length ? Math.max(...times) : 1;
+  const minimumValue = values.length ? Math.min(0, ...values.map(point => point.value)) : -1;
+  const maximumValue = values.length ? Math.max(0, ...values.map(point => point.value)) : 1;
   const padding = Math.max((maximumValue - minimumValue) * 0.12, 0.005);
   const yMinimum = minimumValue - padding;
   const yMaximum = maximumValue + padding;
@@ -175,21 +130,31 @@ function MacroCorrelationMap({ intraday, daily }: { intraday: MacroSeries[]; dai
   const timeLabel = (time: number) => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", ...(period === "daily" ? { day: "2-digit", month: "2-digit" } : {}), hour: "2-digit", minute: "2-digit" }).format(time);
   const correlationState = (value: number | null) => value == null ? "SEM BASE" : value <= -0.5 ? "INVERSA" : value >= 0.5 ? "POSITIVA" : "FRACA / MISTA";
   const correlationText = (value: number | null) => value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+  const assetByKey = new Map(assets.map(asset => [asset.key, asset]));
+  const missingDetails = [...new Set(mapData?.missing ?? [])].map(key => {
+    const asset = assetByKey.get(key);
+    return asset ? `${asset.label}: ${asset.status === "unavailable" ? "fonte indisponível" : "sem amostras nessa janela"}` : `${key}: sem amostras nessa janela`;
+  });
+  const periodLabel = period === "intraday" ? "ÚLTIMOS 60 MIN" : "ÚLTIMAS 24 HORAS";
+  const sampleTimestamp = mapData?.commonEnd
+    ? new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(mapData.commonEnd)
+    : null;
 
   return <section className="panel macro-correlation-panel">
-    <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE CORRELAÇÕES · RELAÇÕES OBSERVADAS</span><span className="macro-tag">RETORNOS SINCRONIZADOS · PEARSON MÓVEL</span></div>
-    <p className="macro-chart-subtitle">As linhas mostram a variação observada; o coeficiente móvel indica se cada par está inverso, alinhado ou sem relação clara no período.</p>
+    <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE CORRELAÇÕES · {period === "intraday" ? "60 MIN" : "DIÁRIO"}</span><span className="macro-tag">{sampleTimestamp ? `DADOS ATÉ ${sampleTimestamp}` : periodLabel}</span></div>
+    <p className="macro-chart-subtitle">Cada painel tem período e seleção independentes. As linhas usam a mesma janela temporal; a correlação é calculada sobre variações sincronizadas, não sobre níveis de preço.</p>
     <div className="macro-correlation-controls">
       <div className="macro-correlation-presets" role="group" aria-label="Combinações de correlação pré-configuradas">
         {CORRELATION_PRESETS.map(item => <button type="button" key={item.key} aria-pressed={presetKey === item.key} onClick={() => setPresetKey(item.key)}>{item.label}</button>)}
       </div>
-      <div className="macro-correlation-period" role="group" aria-label="Período das correlações">
-        <button type="button" aria-pressed={period === "intraday"} onClick={() => setPeriod("intraday")}>60 MIN</button>
-        <button type="button" aria-pressed={period === "daily"} onClick={() => setPeriod("daily")}>DIÁRIO</button>
-      </div>
     </div>
-    {selected.length < preset.series.length || selected.some(item => item.values.length < 2) ? <div className="macro-correlation-empty">Aguardando histórico sincronizado suficiente para esta combinação{period === "daily" ? " no mapa diário" : " nos últimos 60 minutos"}.</div> : <>
-      <div className="macro-correlation-stats">{correlations.map(item => <article key={`${item.left}-${item.right}`}><span><i style={{ background: item.color }}/>{item.label}</span><strong className={item.latest == null ? "muted" : item.latest <= -0.5 ? "neg" : item.latest >= 0.5 ? "pos" : "warning"}>{correlationText(item.latest)}</strong><small>{correlationState(item.latest)} · n={item.samples}/30</small></article>)}</div>
+    {!mapData ? <div className="macro-correlation-empty">A API ainda não enviou os mapas de correlação. Verifique se o serviço da API foi atualizado.</div> : <>
+      <div className="macro-correlation-stats">{correlations.map(item => {
+        const result = item.result;
+        const state = result?.status === "ready" ? correlationState(result.latest) : result?.status === "limited" ? "AMOSTRA CURTA" : result?.status === "flat" ? "SEM VARIAÇÃO" : result?.status === "warming" ? `AMOSTRAS ${result.samples}/12` : "SEM DADOS DO PAR";
+        return <article key={`${item.left}-${item.right}`}><span><i style={{ background: item.color }}/>{item.label}</span><strong className={result?.latest == null ? "muted" : result.latest <= -0.5 ? "neg" : result.latest >= 0.5 ? "pos" : "warning"}>{correlationText(result?.latest ?? null)}</strong><small>{state} · n={result?.samples ?? 0}/30</small></article>;
+      })}</div>
+      {plotted.length ? <>
       <div className="macro-correlation-chart-wrap">
         <svg className="macro-correlation-price-chart" viewBox="0 0 1000 240" preserveAspectRatio="none" role="img" aria-label={`Variação normalizada de ${preset.label}`}>
           {Array.from({ length: 5 }, (_, index) => {
@@ -197,21 +162,23 @@ function MacroCorrelationMap({ intraday, daily }: { intraday: MacroSeries[]; dai
             return <g key={index}><line x1="48" x2="978" y1={y(value)} y2={y(value)} className="macro-grid-line"/><text x="42" y={y(value) + 3} textAnchor="end" className="macro-axis-label">{value.toFixed(2)}%</text></g>;
           })}
           <line x1="48" x2="978" y1={y(0)} y2={y(0)} className="macro-zero-line"/>
-          {selected.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
+          {plotted.map(item => <polyline key={item.key} fill="none" stroke={CHART_SERIES_COLORS[item.key] ?? item.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
           <text x="48" y="236" className="macro-axis-label">{timeLabel(minimumTime)}</text><text x="978" y="236" textAnchor="end" className="macro-axis-label">{timeLabel(maximumTime)}</text>
         </svg>
-        <div className="macro-correlation-legend">{selected.map(item => <span key={item.key}><i style={{ background: item.color }}/>{item.label}</span>)}</div>
+        <div className="macro-correlation-legend">{plotted.map(item => <span key={item.key}><i style={{ background: CHART_SERIES_COLORS[item.key] ?? item.color }}/>{item.label}</span>)}</div>
       </div>
-      <div className="macro-correlation-subhead"><span>COEFICIENTE MÓVEL · ESCALA −1 A +1</span><small>janela de até 30 variações sincronizadas · mínimo 12</small></div>
+      <div className="macro-correlation-subhead"><span>COEFICIENTE MÓVEL · ESCALA −1 A +1</span><small>janela até 30 variações sincronizadas · mínimo 12</small></div>
       <div className="macro-correlation-chart-wrap">
         <svg className="macro-correlation-chart" viewBox="0 0 1000 82" preserveAspectRatio="none" role="img" aria-label={`Correlação móvel dos pares em ${preset.label}`}>
           {[-1, -0.5, 0, 0.5, 1].map(value => <g key={value}><line x1="48" x2="978" y1={correlationY(value)} y2={correlationY(value)} className={value === 0 ? "macro-zero-line" : "macro-grid-line"}/><text x="42" y={correlationY(value) + 3} textAnchor="end" className="macro-axis-label">{value > 0 ? "+" : ""}{value.toFixed(1)}</text></g>)}
-          {correlations.map(item => item.values.length > 1 && <polyline key={`${item.left}-${item.right}`} fill="none" stroke={item.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${correlationY(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
+          {correlations.map(item => item.result && item.result.values.length > 1 && <polyline key={`${item.left}-${item.right}`} fill="none" stroke={item.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" points={item.result.values.map(point => `${x(point.time)},${correlationY(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
           <text x="48" y="80" className="macro-axis-label">{timeLabel(minimumTime)}</text><text x="978" y="80" textAnchor="end" className="macro-axis-label">{timeLabel(maximumTime)}</text>
         </svg>
       </div>
+      </> : <div className="macro-correlation-empty">Ainda não há duas amostras para desenhar as linhas nesta janela.</div>}
+      {(missingDetails.length > 0 || correlations.some(item => item.result?.status === "warming" || item.result?.status === "missing" || item.result?.status === "flat")) && <div className="macro-correlation-availability">{missingDetails.length ? `Séries sem histórico: ${missingDetails.join(" · ")}. ` : ""}Correlação precisa de pelo menos 12 variações sincronizadas com movimento nos dois ativos. Histórico retido: até 7 dias.</div>}
     </>}
-    <div className="macro-chart-foot"><span>{period === "intraday" ? "JANELA · 60 MINUTOS" : "JANELA · 24 HORAS"}</span><span>Correlação baixa ou instável é exibida sem forçar uma relação inversa.</span></div>
+    <div className="macro-chart-foot"><span>{periodLabel} · AMOSTRAS ALINHADAS</span><span>Dados fora da sessão podem representar a última janela armazenada.</span></div>
   </section>;
 }
 
@@ -629,7 +596,10 @@ export default function MacroTerminal() {
           <div className="macro-chart-foot"><span>BASE MÍNIMA · 23H DE HISTÓRICO</span><span>{snapshot?.chart.dailySeries?.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
       </div>
-      <MacroCorrelationMap intraday={chartSeries} daily={dailyChartSeries}/>
+      <div className="macro-correlation-maps">
+        <MacroCorrelationMap period="intraday" data={snapshot?.chart.correlationMaps?.intraday} assets={snapshot?.assets ?? []} defaultPreset="nasdaq-tokenized"/>
+        <MacroCorrelationMap period="daily" data={snapshot?.chart.correlationMaps?.daily} assets={snapshot?.assets ?? []} defaultPreset="sp500-treasuries"/>
+      </div>
       <div className="macro-grid macro-lower">
         <section className="panel macro-assets-panel">
           <div className="panelhead"><span className="paneltitle">MOMENTUM NORMALIZADO · 1 / 5 / 15 / 60 MIN</span><span className="macro-tag">RETORNO · VELOCIDADE · Z-SCORE</span></div>

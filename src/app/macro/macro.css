@@ -101,7 +101,8 @@
 .macro-legend i { width:24px; height:4px; border:1px solid #ffffff24; border-radius:3px; flex:0 0 24px; }
 .macro-chart-empty { height:260px; display:grid; place-items:center; padding:20px; color:#8190a0; text-align:center; font-size:10px; }
 .macro-chart-foot { display:flex; justify-content:space-between; border-top:1px solid #202833; padding:8px 12px; color:#6f7e8e; font:8px 'DM Mono',monospace; }
-.macro-correlation-panel { min-width:0; overflow:hidden; margin:0 0 12px; }
+.macro-correlation-maps { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-bottom:12px; }
+.macro-correlation-panel { min-width:0; overflow:hidden; margin:0; }
 .macro-correlation-controls { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; padding:8px 12px 5px; }
 .macro-correlation-presets,.macro-correlation-period { display:flex; flex-wrap:wrap; gap:5px; }
 .macro-correlation-presets button,.macro-correlation-period button { border:1px solid #293744; border-radius:3px; padding:6px 8px; background:#101820; color:#8797a7; font:8px 'DM Mono',monospace; cursor:pointer; }
@@ -122,6 +123,7 @@
 .macro-correlation-subhead small { color:#68798b; font-size:7px; }
 .macro-correlation-chart { display:block; width:100%; height:88px; overflow:visible; }
 .macro-correlation-empty { display:grid; min-height:160px; place-items:center; padding:20px; color:#8190a0; text-align:center; font-size:10px; }
+.macro-correlation-availability { border-top:1px solid #202833; padding:8px 12px; color:#748496; font-size:8px; line-height:1.45; }
 .macro-insights { padding:5px 11px; }
 .macro-insight { display:grid; grid-template-columns:26px 1fr; gap:8px; padding:12px 2px; border-bottom:1px solid #ffffff0b; }
 .macro-insight:last-child { border-bottom:0; }
@@ -265,7 +267,7 @@
 .neg { color:#ff7189; }
 .muted { color:#758395; }
 .warning { color:#efb45d; }
-@media(max-width:1050px) { .macro-overview { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-yield-strip { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-confirmation-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-rotation-insights-layout { grid-template-columns:minmax(0,1fr); } .macro-grid,.macro-lower,.macro-price-maps { grid-template-columns:minmax(0,1fr); } .macro-outlook-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-line-chart { height:245px; } }
+@media(max-width:1050px) { .macro-overview { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-yield-strip { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-confirmation-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } .macro-rotation-insights-layout { grid-template-columns:minmax(0,1fr); } .macro-grid,.macro-lower,.macro-price-maps,.macro-correlation-maps { grid-template-columns:minmax(0,1fr); } .macro-outlook-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .macro-line-chart { height:245px; } }
 @media(max-width:720px) {
   .macro-wrap { padding:15px 12px 22px; }
   .macro-heading { align-items:flex-start; flex-direction:column; gap:9px; margin-top:2px; }

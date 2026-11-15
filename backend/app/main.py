@@ -25,7 +25,12 @@ from .breakout_engine import build_breakout_signals
 from .trend_engine import build_trend_signals
 from .vwap_deviation_engine import INTERVAL_MS as VWAP_INTERVAL_MS, build_vwap_deviation_signals
 from .volatility import calculate_zones
-from .macro_engine import MACRO_ASSETS, build_macro_snapshot
+from .macro_engine import CORRELATION_HISTORY_KEYS, MACRO_ASSETS, build_macro_snapshot
+
+MACRO_CORRELATION_HISTORY_SYMBOLS = tuple(
+    symbol for symbol, metadata in MACRO_ASSETS.items()
+    if metadata.get("key") in CORRELATION_HISTORY_KEYS
+)
 
 HYPERLIQUID_ASSETS: dict[str, dict[str, str]] = {
     "HL:para:2Y": {"coin": "para:2Y", "dex": "para", "category": "rates"},
@@ -154,6 +159,9 @@ class MarketService:
         self.hyperliquid_stock_assets: dict[str, dict[str, Any]] = {}
         self.hyperliquid_stock_catalog_expires = 0.0
         self.tradfi_samples: dict[str, deque[dict[str, Any]]] = {}
+        self.tradfi_correlation_history_cache: dict[str, list[dict[str, Any]]] = {}
+        self.tradfi_correlation_history_cache_expires = 0.0
+        self.tradfi_correlation_history_lock = asyncio.Lock()
         self.tradfi_symbol_categories: dict[str, str] = {symbol: descriptor["category"] for symbol, descriptor in HYPERLIQUID_ASSETS.items()}
         self.tradfi_watchlist_subscribers: dict[str, set[WebSocket]] = {"indices": set(), "forex": set(), "commodities": set(), "stocks": set()}
         self.tradfi_macro_subscribers: set[WebSocket] = set()
@@ -772,6 +780,25 @@ class MarketService:
                 for cache_key in oldest[:len(self.response_cache) - 768]:
                     self.response_cache.pop(cache_key, None)
         return value
+
+    async def correlation_history(self, start_ms: int) -> dict[str, list[dict[str, Any]]]:
+        """Read the compact correlation basket at most once per minute."""
+        if not self.flow_store:
+            return {}
+        now = time.monotonic()
+        if self.tradfi_correlation_history_cache_expires > now:
+            return self.tradfi_correlation_history_cache
+        async with self.tradfi_correlation_history_lock:
+            now = time.monotonic()
+            if self.tradfi_correlation_history_cache_expires > now:
+                return self.tradfi_correlation_history_cache
+            history = await asyncio.to_thread(
+                self.flow_store.tradfi_price_history,
+                list(MACRO_CORRELATION_HISTORY_SYMBOLS), start_ms,
+            )
+            self.tradfi_correlation_history_cache = history
+            self.tradfi_correlation_history_cache_expires = time.monotonic() + 60
+            return history
 
     def _cache_completed(self, key: str, ttl: float, task: asyncio.Task[Any]) -> None:
         if self.response_inflight.get(key) is task:
@@ -2066,9 +2093,24 @@ async def tradfi_macro():
                 history = await asyncio.to_thread(service.flow_store.tradfi_price_history, symbols, now_ms - 25 * 60 * 60_000)
             except Exception:
                 log.exception("TradFi macro history query failed")
+            try:
+                # Correlation maps need a full common session even when one venue
+                # stopped updating during a market closure. Fetch only their compact
+                # basket at the retained-history horizon; the API snapshot sends
+                # windowed/downsampled maps rather than these raw rows.
+                deep_history = await service.correlation_history(now_ms - 7 * 24 * 60 * 60_000)
+                for symbol, points in deep_history.items():
+                    by_time = {int(item["time"]): item for item in history.get(symbol, [])}
+                    by_time.update({int(item["time"]): item for item in points})
+                    history[symbol] = [by_time[stamp] for stamp in sorted(by_time)]
+            except Exception:
+                log.exception("TradFi correlation history query failed")
+        correlation_symbols = set(MACRO_CORRELATION_HISTORY_SYMBOLS)
         cutoff_ms = now_ms - 25 * 60 * 60_000
+        deep_cutoff_ms = now_ms - 7 * 24 * 60 * 60_000
         for symbol, points in service.tradfi_samples.items():
             if symbol in MACRO_ASSETS:
+                history_cutoff = deep_cutoff_ms if symbol in correlation_symbols else cutoff_ms
                 by_time: dict[int, dict[str, Any]] = {}
                 for item in [*history.get(symbol, []), *points]:
                     if not isinstance(item, dict):
@@ -2077,7 +2119,7 @@ async def tradfi_macro():
                         sample_time = int(item.get("time", 0))
                     except (TypeError, ValueError, OverflowError):
                         continue
-                    if sample_time >= cutoff_ms:
+                    if sample_time >= history_cutoff:
                         by_time[sample_time] = {**item, "time": sample_time}
                 history[symbol] = sorted(by_time.values(), key=lambda item: item["time"])
         storage = service.flow_store.storage if service.flow_store else "unavailable"

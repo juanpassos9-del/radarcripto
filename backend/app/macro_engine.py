@@ -47,6 +47,22 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "BINANCE:NEARUSDT": {"key": "NEAR", "label": "NEAR/USDT", "category": "crypto", "color": "#e85b64", "source": "Binance Spot"},
 }
 
+CORRELATION_PRESETS: dict[str, tuple[str, ...]] = {
+    "dxy-eurusd": ("DXY", "EURUSD"),
+    "dxy-sp500": ("DXY", "SP500"),
+    "dxy-gold": ("DXY", "GOLD"),
+    "sp500-treasuries": ("SP500", "UST2Y", "UST10Y", "UST30Y"),
+    "nasdaq-tokenized": ("NASDAQ100", "SOXL", "DRAM"),
+}
+CORRELATION_HISTORY_KEYS = frozenset(key for keys in CORRELATION_PRESETS.values() for key in keys)
+CORRELATION_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
+    "dxy-eurusd": (("DXY", "EURUSD"),),
+    "dxy-sp500": (("DXY", "SP500"),),
+    "dxy-gold": (("DXY", "GOLD"),),
+    "sp500-treasuries": (("SP500", "UST2Y"), ("SP500", "UST10Y"), ("SP500", "UST30Y")),
+    "nasdaq-tokenized": (("NASDAQ100", "SOXL"), ("NASDAQ100", "DRAM"), ("SOXL", "DRAM")),
+}
+
 MOMENTUM_WINDOWS = (1, 5, 15, 60)
 
 
@@ -76,6 +92,126 @@ def _clean_price_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if price is not None and timestamp > 0:
             cleaned.append({**point, "time": timestamp, "price": price})
     return sorted(cleaned, key=lambda point: point["time"])
+
+
+def _pearson(left: list[float], right: list[float]) -> float | None:
+    if len(left) < 2 or len(left) != len(right):
+        return None
+    left_mean = sum(left) / len(left)
+    right_mean = sum(right) / len(right)
+    covariance = sum((a - left_mean) * (b - right_mean) for a, b in zip(left, right))
+    denominator = math.sqrt(
+        sum((value - left_mean) ** 2 for value in left)
+        * sum((value - right_mean) ** 2 for value in right)
+    )
+    return max(-1.0, min(1.0, covariance / denominator)) if denominator > 1e-12 else None
+
+
+def build_correlation_maps(
+    catalog: list[dict[str, Any]],
+    histories: dict[str, list[dict[str, Any]]],
+    live: dict[str, dict[str, Any]],
+    now_ms: int,
+) -> dict[str, dict[str, Any]]:
+    """Build period-specific, time-aligned series and rolling return correlations."""
+    instruments = {item["symbol"] for item in catalog}
+    symbols_by_key = {metadata["key"]: symbol for symbol, metadata in MACRO_ASSETS.items()}
+    output: dict[str, dict[str, Any]] = {"intraday": {}, "daily": {}}
+
+    for period, interval_ms, window_ms in (
+        ("intraday", 60_000, 60 * 60_000),
+        ("daily", 5 * 60_000, 24 * 60 * 60_000),
+    ):
+        for preset_key, keys in CORRELATION_PRESETS.items():
+            buckets_by_key: dict[str, dict[int, float]] = {}
+            missing: list[str] = []
+            for key in keys:
+                symbol = symbols_by_key.get(key)
+                if not symbol or symbol not in instruments:
+                    missing.append(key)
+                    continue
+                points = list(histories.get(symbol, []))
+                quote = live.get(symbol)
+                if quote and now_ms - int(quote.get("receivedAt", 0)) <= 90_000:
+                    points = [point for point in points if point["time"] < now_ms - 1_000]
+                    points.append({"time": now_ms, "price": quote["price"]})
+                buckets: dict[int, float] = {}
+                for point in points:
+                    price = _finite_positive(point.get("price"))
+                    if price is None:
+                        continue
+                    bucket = (int(point["time"]) // interval_ms) * interval_ms
+                    if bucket not in buckets or int(point["time"]) >= bucket:
+                        buckets[bucket] = price
+                if not buckets:
+                    missing.append(key)
+                    continue
+                buckets_by_key[key] = dict(sorted(buckets.items()))
+
+            common_end = min((max(points) for points in buckets_by_key.values()), default=None)
+            start_target = common_end - window_ms if common_end is not None else None
+            series_output = []
+            for key in keys:
+                metadata = next((item for item in MACRO_ASSETS.values() if item["key"] == key), {})
+                buckets = buckets_by_key.get(key, {})
+                if not buckets or common_end is None or start_target is None:
+                    series_output.append({"key": key, "label": metadata.get("label", key), "color": metadata.get("color"), "values": [], "latestTime": None, "coverageMinutes": 0})
+                    continue
+                before = [time for time in buckets if time <= start_target]
+                baseline_time = max(before) if before else min(buckets)
+                baseline_price = buckets[baseline_time]
+                points = [(time, price) for time, price in buckets.items() if baseline_time <= time <= common_end]
+                values = [
+                    {"time": time, "value": round((price / baseline_price - 1) * 100, 4)}
+                    for time, price in points
+                ]
+                coverage_minutes = max(0, (points[-1][0] - points[0][0]) // 60_000) if points else 0
+                series_output.append({
+                    "key": key, "label": metadata.get("label", key), "color": metadata.get("color"),
+                    "values": values, "latestTime": points[-1][0] if points else None,
+                    "coverageMinutes": int(coverage_minutes),
+                })
+
+            pair_output = []
+            for left_key, right_key in CORRELATION_PAIRS[preset_key]:
+                left_buckets = buckets_by_key.get(left_key, {})
+                right_buckets = buckets_by_key.get(right_key, {})
+                left_returns: dict[int, float] = {}
+                right_returns: dict[int, float] = {}
+                for key, buckets, target in ((left_key, left_buckets, left_returns), (right_key, right_buckets, right_returns)):
+                    entries = [(time, price) for time, price in buckets.items() if common_end is None or time <= common_end]
+                    is_yield = next((metadata.get("unit") == "yield_pct" for symbol, metadata in MACRO_ASSETS.items() if metadata["key"] == key), False)
+                    for (previous_time, previous_price), (time, price) in zip(entries, entries[1:]):
+                        if time - previous_time > interval_ms * 1.5 or previous_price <= 0:
+                            continue
+                        target[time] = (price - previous_price) if is_yield else (price / previous_price - 1) * 100
+                aligned_times = sorted(
+                    time for time in left_returns.keys() & right_returns.keys()
+                    if start_target is None or time >= start_target
+                )
+                correlation_values = []
+                for index in range(11, len(aligned_times)):
+                    sample_times = aligned_times[max(0, index - 29):index + 1]
+                    value = _pearson(
+                        [left_returns[time] for time in sample_times],
+                        [right_returns[time] for time in sample_times],
+                    )
+                    if value is not None:
+                        correlation_values.append({"time": aligned_times[index], "value": round(value, 4)})
+                pair_output.append({
+                    "left": left_key, "right": right_key,
+                    "values": correlation_values,
+                    "latest": correlation_values[-1]["value"] if correlation_values else None,
+                    "samples": len(aligned_times),
+                    "status": "ready" if len(aligned_times) >= 30 and correlation_values else "limited" if correlation_values else "flat" if len(aligned_times) >= 12 and left_key in buckets_by_key and right_key in buckets_by_key else "warming" if left_key in buckets_by_key and right_key in buckets_by_key else "missing",
+                })
+
+            output[period][preset_key] = {
+                "series": series_output, "pairs": pair_output, "missing": missing,
+                "commonEnd": common_end, "windowStart": start_target,
+                "windowMinutes": window_ms // 60_000, "intervalMinutes": interval_ms // 60_000,
+            }
+    return output
 
 
 def build_macro_snapshot(
@@ -527,7 +663,11 @@ def build_macro_snapshot(
         },
         "correlationShifts": [],
         "divergences": divergences, "insights": insights,
-        "chart": {"windowMinutes": 60, "series": chart_series, "dailyWindowHours": 24, "dailySeries": daily_chart_series},
+        "chart": {
+            "windowMinutes": 60, "series": chart_series,
+            "dailyWindowHours": 24, "dailySeries": daily_chart_series,
+            "correlationMaps": build_correlation_maps(catalog, clean_histories, clean_live, now_ms),
+        },
         "method": "Variação, velocidade e aceleração visíveis em 1/5/15/60 min; Z-score de cada janela usa desvio-padrão dos retornos observados de 1 min na última hora. Score Risk-On/Off de 5 min usa pesos: índices 35%, dólar 25%, cíclicos/ouro 15%, FX de carry AUD/JPY 10% e Treasuries 15%; pesos renormalizados conforme cobertura. O score agregado também é calculado em 1/5/15/60 min; aceleração compara 5 min com 15 min, não representa previsão. A cesta de índices divide o voto entre EUA e a média Alemanha/Japão, quando disponíveis. USD/JPY compõe a força do dólar; AUD/JPY é proxy cambial pró-cíclico. Cenários de crescimento, alívio de juros, pressão inflacionária e defesa/desaceleração são compatibilidades de curto prazo, não identificação causal. O componente Treasury mantém o sinal da direção inversa das yields, ponderado pela intensidade do contexto cruzado; yields em queda contribuem positivamente e em alta negativamente. Spreads 10Y−2Y e 30Y−10Y permanecem como contexto separado. O regime usa histerese, limiares distintos de entrada/saída e 3 buckets consecutivos de 1 min para confirmação. Breadth classifica cada fator pelo Z-score e mostra cobertura observada. Divergência exige Z-score de 5 min acima de 0,75σ nos dois ativos e persistência por 2 amostras.",
         "limitations": ["Pressão em moedas é inferida por preços; não mede fluxo financeiro real nem posições de participantes. AUD/JPY é apenas um proxy de carry/risk appetite e pode divergir do regime observado em outros mercados.", "Scores, breadth e divergências descrevem associação de curto prazo, não causalidade nem recomendação.", "Cripto é exibido somente nos mapas de preços; esses ativos não participam do score Risk-On/Risk-Off.", "Alertas e preferências ficam no navegador do usuário; notificações externas/email e sincronização entre dispositivos não estão configuradas.", "Histerese e persistência são mantidas em memória no serviço e recomeçam após reinício/deploy.", "Contratos TradFi BingX e HIP-3 da Hyperliquid não equivalem a preços oficiais à vista ou futuros de bolsa; o oráculo e as sessões dependem do deployer.", "WBRL/USDC é um token de real empacotado negociado contra USDC; o par tem liquidez reduzida e não equivale a uma cotação oficial ou direta de BRL/USDT.", "2Y/10Y/30Y representam yields (não preços dos títulos); TLT, EWZ, DRAM e SOXL são contratos sintéticos perpétuos e podem divergir dos ativos subjacentes.", "Histórico de 1 min para Hyperliquid começa na ativação da coleta; o painel aquece até acumular amostras sincronizadas suficientes."],
     }
