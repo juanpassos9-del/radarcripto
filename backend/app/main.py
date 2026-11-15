@@ -40,7 +40,17 @@ HYPERLIQUID_ASSETS: dict[str, dict[str, str]] = {
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("nexus.market")
-SPOT_DATA = os.getenv("BINANCE_SPOT_REST_URL", "https://data-api.binance.vision")
+SPOT_DATA = (os.getenv("BINANCE_SPOT_REST_URL") or "https://data-api.binance.vision").strip().rstrip("/")
+SPOT_DATA_FALLBACKS = tuple(dict.fromkeys(
+    [SPOT_DATA, *[
+        value.strip().rstrip("/")
+        for value in os.getenv(
+            "BINANCE_SPOT_REST_FALLBACKS",
+            "https://api.binance.com,https://api-gcp.binance.com,https://api1.binance.com",
+        ).split(",")
+        if value.strip()
+    ]]
+))
 SPOT_WS = os.getenv("BINANCE_SPOT_WS_URL", "wss://data-stream.binance.vision/stream")
 MAX_GAP_BACKFILL_TRADES = max(0, int(os.getenv("FLOW_GAP_RECOVERY_MAX_TRADES", "5000")))
 MAX_AGGREGATED_BOOK_LEVELS = 150
@@ -758,24 +768,41 @@ class MarketService:
         return 0
 
     async def _request_uncached(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
-        for attempt in range(4):
-            try:
-                # Keep concurrent exchange requests within a small bound. The free
-                # Render instance has limited CPU/connections and should not fan
-                # out dozens of simultaneous Binance calls per dashboard refresh.
-                async with self.request_slots:
-                    response = await self.client.get(base + path, params=params, headers=self.exchange_headers)
-                if response.status_code == 429 or response.status_code == 418:
-                    wait = min(float(response.headers.get("Retry-After", 1)), 10)
-                    await asyncio.sleep(wait)
-                    continue
-                response.raise_for_status()
-                return response.json()
-            except (httpx.TimeoutException, httpx.NetworkError) as error:
-                if attempt == 3:
-                    raise error
-                await asyncio.sleep(min(0.4 * 2**attempt, 5))
-        raise HTTPException(502, "Binance rate limit exceeded")
+        bases = SPOT_DATA_FALLBACKS if base == SPOT_DATA else (base,)
+        last_error: Exception | None = None
+        for endpoint in bases:
+            for attempt in range(2):
+                try:
+                    # Bound concurrent exchange requests on the free Render instance.
+                    async with self.request_slots:
+                        response = await self.client.get(endpoint + path, params=params, headers=self.exchange_headers)
+                    if response.status_code == 429:
+                        if attempt == 0:
+                            wait = min(max(float(response.headers.get("Retry-After", 1)), 0.25), 5)
+                            await asyncio.sleep(wait)
+                            continue
+                        last_error = httpx.HTTPStatusError("Binance rate limit exceeded", request=response.request, response=response)
+                        break
+                    if response.status_code == 418:
+                        response.raise_for_status()
+                    response.raise_for_status()
+                    return response.json()
+                except (httpx.TimeoutException, httpx.NetworkError) as error:
+                    last_error = error
+                    if attempt == 0:
+                        await asyncio.sleep(0.4)
+                        continue
+                    break
+                except httpx.HTTPStatusError as error:
+                    last_error = error
+                    if error.response.status_code == 418 or (error.response.status_code < 500 and error.response.status_code != 403):
+                        raise
+                    break
+            log.warning(
+                "Binance Spot REST endpoint failed; trying fallback",
+                extra={"endpoint": endpoint, "path": path, "error": str(last_error)},
+            )
+        raise HTTPException(502, "Binance Spot indisponível nos endpoints REST configurados") from last_error
 
     async def ticker(self, symbol: str, market: str) -> MarketSnapshot:
         base, path = self.base_and_path(market, "ticker")
