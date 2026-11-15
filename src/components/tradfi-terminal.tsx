@@ -6,7 +6,7 @@ import { ArrowLeft, LogOut, Search, Wifi } from "lucide-react";
 import MarketChart from "@/components/market-chart";
 import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken, type BreakoutSignalData, type Candle, type ChartOverlays, type ReversalSignalData, type Trade, type TrendSignalData, type VolatilityZones, type VwapDeviationSignalData } from "@/lib/market";
 
-type Instrument = { symbol: string; name: string; category: "indices" | "forex" | "commodities" | "stocks"; minimumNotional?: number; pricePrecision?: number };
+type Instrument = { symbol: string; name: string; category: "indices" | "forex" | "commodities" | "stocks"; minimumNotional?: number; pricePrecision?: number; quoteVolume24h?: number };
 type TradfiMarket = {
   source: string; receivedAt: number;
   ticker: { price: number; change24h: number; high24h: number | null; low24h: number | null; quoteVolume24h: number; eventTime: number };
@@ -14,7 +14,7 @@ type TradfiMarket = {
   trades: Trade[];
 };
 type TradfiIndicators = { zones: VolatilityZones; overlays: ChartOverlays; reversal: ReversalSignalData; breakout: BreakoutSignalData; trend: TrendSignalData; vwapDeviation: VwapDeviationSignalData; limitations: string[]; receivedAt: number };
-type WatchQuote = { symbol: string; price: number | null; previousClose: number | null; changePercent: number | null; referenceTime: number | null };
+type WatchQuote = { symbol: string; price: number | null; previousClose: number | null; changePercent: number | null; referenceTime: number | null; quoteVolume24h?: number | null };
 
 const intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const emptySignals: never[] = [];
@@ -159,7 +159,11 @@ export default function TradfiTerminal() {
     };
   }, [category]);
 
-  const visible = useMemo(() => instruments.filter(item => item.category === category && `${item.name} ${item.symbol}`.toLowerCase().includes(search.toLowerCase())), [instruments, category, search]);
+  const visible = useMemo(() => {
+    const matching = instruments.filter(item => item.category === category && `${item.name} ${item.symbol}`.toLowerCase().includes(search.toLowerCase()));
+    if (category === "stocks") matching.sort((a, b) => (watchQuotes[b.symbol]?.quoteVolume24h ?? b.quoteVolume24h ?? 0) - (watchQuotes[a.symbol]?.quoteVolume24h ?? a.quoteVolume24h ?? 0));
+    return matching;
+  }, [instruments, category, search, watchQuotes]);
   const selected = instruments.find(item => item.symbol === symbol);
   const chartVwapDeviationSignals = useMemo(() => {
     const candleTimes = new Set(candles.map(candle => candle.time));

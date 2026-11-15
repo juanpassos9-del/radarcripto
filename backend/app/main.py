@@ -1982,6 +1982,7 @@ async def tradfi_watchlist(category: str = Query("indices")):
                     "symbol": item["symbol"], "price": price, "previousClose": previous,
                     "changePercent": round(change, 4) if change is not None else None,
                     "referenceTime": int(time.time()) - 86_400 if previous else None,
+                    "quoteVolume24h": current.get("quoteVolume24h", item.get("quoteVolume24h", 0)),
                     "source": "Hyperliquid HIP-3 · variação 24h",
                 })
             return {"category": category, "quotes": quotes, "receivedAt": int(time.time() * 1000),
