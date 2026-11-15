@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef } from "react";
 import { CandlestickSeries, ColorType, createChart, createSeriesMarkers, CrosshairMode, HistogramSeries, LineSeries, LineStyle, TickMarkType, type CreatePriceLineOptions, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type Time, type UTCTimestamp } from "lightweight-charts";
-import type { BreakoutSignal, Candle, ChartOverlays, ReversalSignal, VolatilityZones, VwapDeviationSignal } from "@/lib/market";
+import type { BreakoutSignal, Candle, ChartOverlays, ReversalSignal, TrendSignal, VolatilityZones, VwapDeviationSignal } from "@/lib/market";
 
 const CHART_TIME_ZONE = "America/Sao_Paulo";
 const chartDate = (time: Time): Date => typeof time === "number"
@@ -28,7 +28,7 @@ export type RiskRewardLevels = { entry: number | null; stop: number | null };
 type RiskRewardLevel = keyof RiskRewardLevels;
 type RiskRewardLine = RiskRewardLevel | "target1" | "target2";
 
-export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, signals, breakoutSignals, vwapDeviationSignals = [], riskRewardMode = false, riskRewardLevels, onRiskRewardPoint, onRiskRewardLevelChange }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[]; vwapDeviationSignals?: VwapDeviationSignal[]; riskRewardMode?: boolean; riskRewardLevels?: RiskRewardLevels; onRiskRewardPoint?: (price: number) => void; onRiskRewardLevelChange?: (level: RiskRewardLevel, price: number) => void }) {
+export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, signals, breakoutSignals, trendSignals = [], vwapDeviationSignals = [], riskRewardMode = false, riskRewardLevels, onRiskRewardPoint, onRiskRewardLevelChange }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[]; trendSignals?: TrendSignal[]; vwapDeviationSignals?: VwapDeviationSignal[]; riskRewardMode?: boolean; riskRewardLevels?: RiskRewardLevels; onRiskRewardPoint?: (price: number) => void; onRiskRewardLevelChange?: (level: RiskRewardLevel, price: number) => void }) {
   const host = useRef<HTMLDivElement>(null);
   const hasMultipleCandles = candles.length >= 2;
   const firstCandleTime = candles[0]?.time;
@@ -86,6 +86,15 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       text: signal.direction === "BUY" ? "ROMP. ↑" : "ROMP. ↓",
       size: 1,
     }));
+    const trendMarkers = trendSignals.map(signal => ({
+      id: `trend-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
+      time: signal.time as UTCTimestamp,
+      position: signal.direction === "BUY" ? "belowBar" as const : "aboveBar" as const,
+      shape: signal.direction === "BUY" ? "arrowUp" as const : "arrowDown" as const,
+      color: signal.direction === "BUY" ? "#44d49a" : "#ff667c",
+      text: signal.direction === "BUY" ? "TREND ↑" : "TREND ↓",
+      size: 1,
+    }));
     const vwapDeviationMarkers = vwapDeviationSignals.map(signal => ({
       id: `dv-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
       time: signal.time as UTCTimestamp,
@@ -95,8 +104,8 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       text: `DV ${signal.sigma}`,
       size: 1,
     }));
-    markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers, ...vwapDeviationMarkers].sort((a, b) => Number(a.time) - Number(b.time)));
-  }, [signals, breakoutSignals, vwapDeviationSignals]);
+    markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers, ...trendMarkers, ...vwapDeviationMarkers].sort((a, b) => Number(a.time) - Number(b.time)));
+  }, [signals, breakoutSignals, trendSignals, vwapDeviationSignals]);
 
   useEffect(() => {
     const chart = chartRef.current;

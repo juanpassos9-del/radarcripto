@@ -22,6 +22,7 @@ from .schemas import BookSnapshot, Candle, Level, MarketSnapshot, Trade
 from .flow_store import FlowStore
 from .reversal_engine import build_reversal_signals
 from .breakout_engine import build_breakout_signals
+from .trend_engine import build_trend_signals
 from .vwap_deviation_engine import INTERVAL_MS as VWAP_INTERVAL_MS, build_vwap_deviation_signals
 from .volatility import calculate_zones
 from .macro_engine import MACRO_ASSETS, build_macro_snapshot
@@ -2280,6 +2281,30 @@ async def breakout_signals(
         )
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
         raise HTTPException(502, f"Unable to calculate breakout signals: {error}") from error
+
+@app.get("/api/trend-signals")
+async def trend_signals(
+    symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"),
+):
+    """Independent trend-following signals for closed Binance Spot 5m candles."""
+    symbol, market = validate_symbol(symbol), validate_market(market)
+    if interval not in INTERVALS:
+        raise HTTPException(400, "Unsupported candle interval")
+    if market != "spot":
+        return {"symbol": symbol, "interval": interval, "status": "unsupported_market", "signals": [], "latest": None}
+    if interval != "5m":
+        return build_trend_signals(symbol, interval, [])
+    try:
+        base, path = service.base_and_path("spot", "klines")
+        rows = await service.request(base, path, {"symbol": symbol, "interval": "5m", "limit": 500})
+        now_ms = int(time.time() * 1000)
+        candles = [
+            {"time": int(row[0] // 1000), "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5])}
+            for row in rows or [] if int(row[6]) + 1 <= now_ms
+        ]
+        return build_trend_signals(symbol, interval, candles)
+    except (httpx.HTTPError, KeyError, ValueError, IndexError, TypeError) as error:
+        raise HTTPException(502, f"Unable to calculate TREND signals: {error}") from error
 
 @app.get("/api/vwap-deviation-signals")
 async def vwap_deviation_signals(

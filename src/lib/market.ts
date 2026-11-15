@@ -40,6 +40,8 @@ export type BreakoutSignalData = {
   signals: BreakoutSignal[]; latest: BreakoutSignal | null; lastCandidate?: BreakoutSignal | null;
   settings: { bbPeriod: number; compressionLookback: number; compressionPercentile: number; compressionRecentBars: number; rangeLookback: number; volumeLookback: number; volumeMultiple: number; breakoutAtrMultiple: number; atrPeriod: number; cooldown: number; buyEnabled: boolean; sellEnabled: boolean };
 };
+export type TrendSignal = { time: number; symbol: string; interval: string; direction: "BUY" | "SELL"; price: number; adx: number; plusDI: number; minusDI: number; roc5: number; volumeRatio: number; vwap: number; sigmaDistance: number; qualified: boolean };
+export type TrendSignalData = { symbol: string; interval: string; status: string; signals: TrendSignal[]; latest: TrendSignal | null; observedCandles?: number; requiredCandles?: number; settings?: { interval: string; emaFast: number; emaSlow: number; adxPeriod: number; adxMinimum: number; rocPeriod: number; volumeMultiple: number; volumeLookback: number; vwapSigmaLimit: number; vwapTimezone: string }; source?: string };
 export type VwapDeviationSignal = {
   time: number; symbol: string; interval: string; direction: "BUY" | "SELL"; price: number;
   vwap: number; bandPrice: number; sigma: 1 | 2 | 3; volumeRatio: number; volumeAverage: number;
