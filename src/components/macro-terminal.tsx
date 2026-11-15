@@ -88,7 +88,7 @@ const PRICE_MAP_CATEGORIES = [
 const CORRELATION_PRESETS: CorrelationPreset[] = [
   { key: "dxy-eurusd", label: "DXY · EUR/USD · USD/JPY · AUD/JPY", series: ["DXY", "EURUSD", "USDJPY", "AUDJPY"] },
   { key: "dxy-sp500", label: "DXY × S&P 500", series: ["DXY", "SP500"] },
-  { key: "dxy-gold", label: "DXY · OURO · WTI", series: ["DXY", "GOLD", "WTI"] },
+  { key: "dxy-gold", label: "DXY · OURO · WTI · US10Y", series: ["DXY", "GOLD", "WTI", "UST10Y"] },
   { key: "sp500-treasuries", label: "S&P 500 · DXY · TREASURIES", series: ["SP500", "DXY", "UST2Y", "UST10Y", "UST30Y"] },
   { key: "nasdaq-tokenized", label: "NASDAQ 100 × SOXL × DRAM", series: ["NASDAQ100", "SOXL", "DRAM"] },
 ];

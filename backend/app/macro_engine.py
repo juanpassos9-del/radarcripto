@@ -50,7 +50,7 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
 CORRELATION_PRESETS: dict[str, tuple[str, ...]] = {
     "dxy-eurusd": ("DXY", "EURUSD", "USDJPY", "AUDJPY"),
     "dxy-sp500": ("DXY", "SP500"),
-    "dxy-gold": ("DXY", "GOLD", "WTI"),
+    "dxy-gold": ("DXY", "GOLD", "WTI", "UST10Y"),
     "sp500-treasuries": ("SP500", "DXY", "UST2Y", "UST10Y", "UST30Y"),
     "nasdaq-tokenized": ("NASDAQ100", "SOXL", "DRAM"),
 }
