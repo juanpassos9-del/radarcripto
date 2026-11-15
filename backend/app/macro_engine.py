@@ -48,20 +48,13 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
 }
 
 CORRELATION_PRESETS: dict[str, tuple[str, ...]] = {
-    "dxy-eurusd": ("DXY", "EURUSD"),
+    "dxy-eurusd": ("DXY", "EURUSD", "USDJPY", "AUDJPY"),
     "dxy-sp500": ("DXY", "SP500"),
-    "dxy-gold": ("DXY", "GOLD"),
-    "sp500-treasuries": ("SP500", "UST2Y", "UST10Y", "UST30Y"),
+    "dxy-gold": ("DXY", "GOLD", "WTI"),
+    "sp500-treasuries": ("SP500", "DXY", "UST2Y", "UST10Y", "UST30Y"),
     "nasdaq-tokenized": ("NASDAQ100", "SOXL", "DRAM"),
 }
 CORRELATION_HISTORY_KEYS = frozenset(key for keys in CORRELATION_PRESETS.values() for key in keys)
-CORRELATION_PAIRS: dict[str, tuple[tuple[str, str], ...]] = {
-    "dxy-eurusd": (("DXY", "EURUSD"),),
-    "dxy-sp500": (("DXY", "SP500"),),
-    "dxy-gold": (("DXY", "GOLD"),),
-    "sp500-treasuries": (("SP500", "UST2Y"), ("SP500", "UST10Y"), ("SP500", "UST30Y")),
-    "nasdaq-tokenized": (("NASDAQ100", "SOXL"), ("NASDAQ100", "DRAM"), ("SOXL", "DRAM")),
-}
 
 MOMENTUM_WINDOWS = (1, 5, 15, 60)
 
@@ -94,26 +87,13 @@ def _clean_price_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(cleaned, key=lambda point: point["time"])
 
 
-def _pearson(left: list[float], right: list[float]) -> float | None:
-    if len(left) < 2 or len(left) != len(right):
-        return None
-    left_mean = sum(left) / len(left)
-    right_mean = sum(right) / len(right)
-    covariance = sum((a - left_mean) * (b - right_mean) for a, b in zip(left, right))
-    denominator = math.sqrt(
-        sum((value - left_mean) ** 2 for value in left)
-        * sum((value - right_mean) ** 2 for value in right)
-    )
-    return max(-1.0, min(1.0, covariance / denominator)) if denominator > 1e-12 else None
-
-
 def build_correlation_maps(
     catalog: list[dict[str, Any]],
     histories: dict[str, list[dict[str, Any]]],
     live: dict[str, dict[str, Any]],
     now_ms: int,
 ) -> dict[str, dict[str, Any]]:
-    """Build period-specific, time-aligned series and rolling return correlations."""
+    """Build independent, time-aligned rebased price maps for each period."""
     instruments = {item["symbol"] for item in catalog}
     symbols_by_key = {metadata["key"]: symbol for symbol, metadata in MACRO_ASSETS.items()}
     output: dict[str, dict[str, Any]] = {"intraday": {}, "daily": {}}
@@ -172,44 +152,10 @@ def build_correlation_maps(
                     "coverageMinutes": int(coverage_minutes),
                 })
 
-            pair_output = []
-            for left_key, right_key in CORRELATION_PAIRS[preset_key]:
-                left_buckets = buckets_by_key.get(left_key, {})
-                right_buckets = buckets_by_key.get(right_key, {})
-                left_returns: dict[int, float] = {}
-                right_returns: dict[int, float] = {}
-                for key, buckets, target in ((left_key, left_buckets, left_returns), (right_key, right_buckets, right_returns)):
-                    entries = [(time, price) for time, price in buckets.items() if common_end is None or time <= common_end]
-                    is_yield = next((metadata.get("unit") == "yield_pct" for symbol, metadata in MACRO_ASSETS.items() if metadata["key"] == key), False)
-                    for (previous_time, previous_price), (time, price) in zip(entries, entries[1:]):
-                        if time - previous_time > interval_ms * 1.5 or previous_price <= 0:
-                            continue
-                        target[time] = (price - previous_price) if is_yield else (price / previous_price - 1) * 100
-                aligned_times = sorted(
-                    time for time in left_returns.keys() & right_returns.keys()
-                    if start_target is None or time >= start_target
-                )
-                correlation_values = []
-                for index in range(11, len(aligned_times)):
-                    sample_times = aligned_times[max(0, index - 29):index + 1]
-                    value = _pearson(
-                        [left_returns[time] for time in sample_times],
-                        [right_returns[time] for time in sample_times],
-                    )
-                    if value is not None:
-                        correlation_values.append({"time": aligned_times[index], "value": round(value, 4)})
-                pair_output.append({
-                    "left": left_key, "right": right_key,
-                    "values": correlation_values,
-                    "latest": correlation_values[-1]["value"] if correlation_values else None,
-                    "samples": len(aligned_times),
-                    "status": "ready" if len(aligned_times) >= 30 and correlation_values else "limited" if correlation_values else "flat" if len(aligned_times) >= 12 and left_key in buckets_by_key and right_key in buckets_by_key else "warming" if left_key in buckets_by_key and right_key in buckets_by_key else "missing",
-                })
-
             output[period][preset_key] = {
-                "series": series_output, "pairs": pair_output, "missing": missing,
+                "series": series_output, "missing": missing,
                 "commonEnd": common_end, "windowStart": start_target,
-                "windowMinutes": window_ms // 60_000, "intervalMinutes": interval_ms // 60_000,
+                "windowMinutes": window_ms // 60_000,
             }
     return output
 

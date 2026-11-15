@@ -17,10 +17,8 @@ type MacroAsset = {
 type RotationPoint = { asset: MacroAsset; x: number; y: number; strength: number; acceleration: number };
 type RotationReading = { key: string; title: string; assets: { key: string; strength: number; acceleration: number }[]; tone: "positive" | "negative" | "neutral" };
 type MacroSeries = { key: string; label: string; color: string; category?: string; values: { time: number; value: number }[] };
-type CorrelationPair = { left: string; right: string; label: string; color: string };
-type CorrelationPreset = { key: string; label: string; series: string[]; pairs: CorrelationPair[] };
-type CorrelationMapPairData = { left: string; right: string; values: { time: number; value: number }[]; latest: number | null; samples: number; status: "ready" | "limited" | "flat" | "warming" | "missing" };
-type CorrelationMapData = { series: MacroSeries[]; pairs: CorrelationMapPairData[]; missing: string[]; commonEnd: number | null; windowMinutes: number; intervalMinutes: number };
+type CorrelationPreset = { key: string; label: string; series: string[] };
+type CorrelationMapData = { series: MacroSeries[]; missing: string[]; commonEnd: number | null; windowMinutes: number };
 type BreadthGroup = { label: string; advancing: number; neutral: number; declining: number; available: number; total: number; score: number | null; coverage: number };
 type AlertPreferences = { enabled: boolean; regime: boolean; exceptionalMove: boolean; divergence: boolean; multiClass: boolean; zThreshold: number; cooldownMinutes: number };
 type MacroAlert = { id: string; createdAt: number; title: string; detail: string; tone: "positive" | "risk" | "warning" };
@@ -88,19 +86,11 @@ const PRICE_MAP_CATEGORIES = [
 ] as const;
 
 const CORRELATION_PRESETS: CorrelationPreset[] = [
-  { key: "dxy-eurusd", label: "DXY × EUR/USD", series: ["DXY", "EURUSD"], pairs: [{ left: "DXY", right: "EURUSD", label: "DXY × EUR/USD", color: "#a68bff" }] },
-  { key: "dxy-sp500", label: "DXY × S&P 500", series: ["DXY", "SP500"], pairs: [{ left: "DXY", right: "SP500", label: "DXY × S&P 500", color: "#ffca61" }] },
-  { key: "dxy-gold", label: "DXY × OURO", series: ["DXY", "GOLD"], pairs: [{ left: "DXY", right: "GOLD", label: "DXY × OURO", color: "#f3d56a" }] },
-  { key: "sp500-treasuries", label: "S&P 500 × TREASURIES", series: ["SP500", "UST2Y", "UST10Y", "UST30Y"], pairs: [
-    { left: "SP500", right: "UST2Y", label: "S&P 500 × US2Y", color: "#70aaff" },
-    { left: "SP500", right: "UST10Y", label: "S&P 500 × US10Y", color: "#d59bff" },
-    { left: "SP500", right: "UST30Y", label: "S&P 500 × US30Y", color: "#ff9c62" },
-  ] },
-  { key: "nasdaq-tokenized", label: "NASDAQ 100 × SOXL × DRAM", series: ["NASDAQ100", "SOXL", "DRAM"], pairs: [
-    { left: "NASDAQ100", right: "SOXL", label: "NASDAQ 100 × SOXL", color: "#ff80bf" },
-    { left: "NASDAQ100", right: "DRAM", label: "NASDAQ 100 × DRAM", color: "#75d7ff" },
-    { left: "SOXL", right: "DRAM", label: "SOXL × DRAM", color: "#57d69a" },
-  ] },
+  { key: "dxy-eurusd", label: "DXY · EUR/USD · USD/JPY · AUD/JPY", series: ["DXY", "EURUSD", "USDJPY", "AUDJPY"] },
+  { key: "dxy-sp500", label: "DXY × S&P 500", series: ["DXY", "SP500"] },
+  { key: "dxy-gold", label: "DXY · OURO · WTI", series: ["DXY", "GOLD", "WTI"] },
+  { key: "sp500-treasuries", label: "S&P 500 · DXY · TREASURIES", series: ["SP500", "DXY", "UST2Y", "UST10Y", "UST30Y"] },
+  { key: "nasdaq-tokenized", label: "NASDAQ 100 × SOXL × DRAM", series: ["NASDAQ100", "SOXL", "DRAM"] },
 ];
 
 function MacroCorrelationMap({ period, data, assets, defaultPreset }: {
@@ -114,7 +104,6 @@ function MacroCorrelationMap({ period, data, assets, defaultPreset }: {
   const mapData = data?.[presetKey];
   const selected = mapData?.series ?? [];
   const plotted = selected.filter(item => item.values.length > 1);
-  const correlations = preset.pairs.map(pair => ({ ...pair, result: mapData?.pairs.find(item => item.left === pair.left && item.right === pair.right) }));
   const values = plotted.flatMap(item => item.values);
   const times = values.map(point => point.time);
   const minimumTime = times.length ? Math.min(...times) : 0;
@@ -126,10 +115,7 @@ function MacroCorrelationMap({ period, data, assets, defaultPreset }: {
   const yMaximum = maximumValue + padding;
   const x = (time: number) => 48 + (time - minimumTime) / Math.max(1, maximumTime - minimumTime) * 930;
   const y = (value: number) => 14 + (yMaximum - value) / Math.max(1e-8, yMaximum - yMinimum) * 206;
-  const correlationY = (value: number) => 12 + (1 - value) * 48;
   const timeLabel = (time: number) => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", ...(period === "daily" ? { day: "2-digit", month: "2-digit" } : {}), hour: "2-digit", minute: "2-digit" }).format(time);
-  const correlationState = (value: number | null) => value == null ? "SEM BASE" : value <= -0.5 ? "INVERSA" : value >= 0.5 ? "POSITIVA" : "FRACA / MISTA";
-  const correlationText = (value: number | null) => value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
   const assetByKey = new Map(assets.map(asset => [asset.key, asset]));
   const missingDetails = [...new Set(mapData?.missing ?? [])].map(key => {
     const asset = assetByKey.get(key);
@@ -149,11 +135,6 @@ function MacroCorrelationMap({ period, data, assets, defaultPreset }: {
       </div>
     </div>
     {!mapData ? <div className="macro-correlation-empty">A API ainda não enviou os mapas de correlação. Verifique se o serviço da API foi atualizado.</div> : <>
-      <div className="macro-correlation-stats">{correlations.map(item => {
-        const result = item.result;
-        const state = result?.status === "ready" ? correlationState(result.latest) : result?.status === "limited" ? "AMOSTRA CURTA" : result?.status === "flat" ? "SEM VARIAÇÃO" : result?.status === "warming" ? `AMOSTRAS ${result.samples}/12` : "SEM DADOS DO PAR";
-        return <article key={`${item.left}-${item.right}`}><span><i style={{ background: item.color }}/>{item.label}</span><strong className={result?.latest == null ? "muted" : result.latest <= -0.5 ? "neg" : result.latest >= 0.5 ? "pos" : "warning"}>{correlationText(result?.latest ?? null)}</strong><small>{state} · n={result?.samples ?? 0}/30</small></article>;
-      })}</div>
       {plotted.length ? <>
       <div className="macro-correlation-chart-wrap">
         <svg className="macro-correlation-price-chart" viewBox="0 0 1000 240" preserveAspectRatio="none" role="img" aria-label={`Variação normalizada de ${preset.label}`}>
@@ -167,16 +148,8 @@ function MacroCorrelationMap({ period, data, assets, defaultPreset }: {
         </svg>
         <div className="macro-correlation-legend">{plotted.map(item => <span key={item.key}><i style={{ background: CHART_SERIES_COLORS[item.key] ?? item.color }}/>{item.label}</span>)}</div>
       </div>
-      <div className="macro-correlation-subhead"><span>COEFICIENTE MÓVEL · ESCALA −1 A +1</span><small>janela até 30 variações sincronizadas · mínimo 12</small></div>
-      <div className="macro-correlation-chart-wrap">
-        <svg className="macro-correlation-chart" viewBox="0 0 1000 82" preserveAspectRatio="none" role="img" aria-label={`Correlação móvel dos pares em ${preset.label}`}>
-          {[-1, -0.5, 0, 0.5, 1].map(value => <g key={value}><line x1="48" x2="978" y1={correlationY(value)} y2={correlationY(value)} className={value === 0 ? "macro-zero-line" : "macro-grid-line"}/><text x="42" y={correlationY(value) + 3} textAnchor="end" className="macro-axis-label">{value > 0 ? "+" : ""}{value.toFixed(1)}</text></g>)}
-          {correlations.map(item => item.result && item.result.values.length > 1 && <polyline key={`${item.left}-${item.right}`} fill="none" stroke={item.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" points={item.result.values.map(point => `${x(point.time)},${correlationY(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
-          <text x="48" y="80" className="macro-axis-label">{timeLabel(minimumTime)}</text><text x="978" y="80" textAnchor="end" className="macro-axis-label">{timeLabel(maximumTime)}</text>
-        </svg>
-      </div>
       </> : <div className="macro-correlation-empty">Ainda não há duas amostras para desenhar as linhas nesta janela.</div>}
-      {(missingDetails.length > 0 || correlations.some(item => item.result?.status === "warming" || item.result?.status === "missing" || item.result?.status === "flat")) && <div className="macro-correlation-availability">{missingDetails.length ? `Séries sem histórico: ${missingDetails.join(" · ")}. ` : ""}Correlação precisa de pelo menos 12 variações sincronizadas com movimento nos dois ativos. Histórico retido: até 7 dias.</div>}
+      {missingDetails.length > 0 && <div className="macro-correlation-availability">Séries sem histórico: {missingDetails.join(" · ")}. Histórico retido: até 7 dias.</div>}
     </>}
     <div className="macro-chart-foot"><span>{periodLabel} · AMOSTRAS ALINHADAS</span><span>Dados fora da sessão podem representar a última janela armazenada.</span></div>
   </section>;
