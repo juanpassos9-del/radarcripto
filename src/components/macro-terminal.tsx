@@ -17,6 +17,8 @@ type MacroAsset = {
 type RotationPoint = { asset: MacroAsset; x: number; y: number; strength: number; acceleration: number };
 type RotationReading = { key: string; title: string; assets: { key: string; strength: number; acceleration: number }[]; tone: "positive" | "negative" | "neutral" };
 type MacroSeries = { key: string; label: string; color: string; category?: string; values: { time: number; value: number }[] };
+type CorrelationPair = { left: string; right: string; label: string; color: string };
+type CorrelationPreset = { key: string; label: string; series: string[]; pairs: CorrelationPair[] };
 type BreadthGroup = { label: string; advancing: number; neutral: number; declining: number; available: number; total: number; score: number | null; coverage: number };
 type AlertPreferences = { enabled: boolean; regime: boolean; exceptionalMove: boolean; divergence: boolean; multiClass: boolean; zThreshold: number; cooldownMinutes: number };
 type MacroAlert = { id: string; createdAt: number; title: string; detail: string; tone: "positive" | "risk" | "warning" };
@@ -82,6 +84,136 @@ const PRICE_MAP_CATEGORIES = [
   ["all", "TODAS"], ["index", "ÍNDICES"], ["fx", "MOEDAS"],
   ["commodities", "COMMODITIES"], ["rates", "JUROS"], ["crypto", "CRIPTO"], ["stocks", "STOCKS"],
 ] as const;
+
+const CORRELATION_PRESETS: CorrelationPreset[] = [
+  { key: "dxy-eurusd", label: "DXY × EUR/USD", series: ["DXY", "EURUSD"], pairs: [{ left: "DXY", right: "EURUSD", label: "DXY × EUR/USD", color: "#a68bff" }] },
+  { key: "dxy-sp500", label: "DXY × S&P 500", series: ["DXY", "SP500"], pairs: [{ left: "DXY", right: "SP500", label: "DXY × S&P 500", color: "#ffca61" }] },
+  { key: "dxy-gold", label: "DXY × OURO", series: ["DXY", "GOLD"], pairs: [{ left: "DXY", right: "GOLD", label: "DXY × OURO", color: "#f3d56a" }] },
+  { key: "sp500-treasuries", label: "S&P 500 × TREASURIES", series: ["SP500", "UST2Y", "UST10Y", "UST30Y"], pairs: [
+    { left: "SP500", right: "UST2Y", label: "S&P 500 × US2Y", color: "#70aaff" },
+    { left: "SP500", right: "UST10Y", label: "S&P 500 × US10Y", color: "#d59bff" },
+    { left: "SP500", right: "UST30Y", label: "S&P 500 × US30Y", color: "#ff9c62" },
+  ] },
+  { key: "nasdaq-tokenized", label: "NASDAQ 100 × SOXL × DRAM", series: ["NASDAQ100", "SOXL", "DRAM"], pairs: [
+    { left: "NASDAQ100", right: "SOXL", label: "NASDAQ 100 × SOXL", color: "#ff80bf" },
+    { left: "NASDAQ100", right: "DRAM", label: "NASDAQ 100 × DRAM", color: "#75d7ff" },
+    { left: "SOXL", right: "DRAM", label: "SOXL × DRAM", color: "#57d69a" },
+  ] },
+];
+
+function returnsByBucket(series: MacroSeries, intervalMs: number) {
+  const buckets = new Map<number, number>();
+  for (const point of series.values) {
+    const bucket = Math.floor(point.time / intervalMs) * intervalMs;
+    const previous = buckets.get(bucket);
+    if (previous == null || point.time >= bucket) buckets.set(bucket, point.value);
+  }
+  const points = [...buckets.entries()].sort(([left], [right]) => left - right);
+  const returns = new Map<number, number>();
+  for (let index = 1; index < points.length; index += 1) {
+    const [previousTime, previousValue] = points[index - 1];
+    const [time, value] = points[index];
+    if (time - previousTime <= intervalMs * 1.5) returns.set(time, value - previousValue);
+  }
+  return returns;
+}
+
+function pearson(left: number[], right: number[]) {
+  if (left.length < 2 || left.length !== right.length) return null;
+  const leftMean = left.reduce((sum, value) => sum + value, 0) / left.length;
+  const rightMean = right.reduce((sum, value) => sum + value, 0) / right.length;
+  const covariance = left.reduce((sum, value, index) => sum + (value - leftMean) * (right[index] - rightMean), 0);
+  const leftVariance = left.reduce((sum, value) => sum + (value - leftMean) ** 2, 0);
+  const rightVariance = right.reduce((sum, value) => sum + (value - rightMean) ** 2, 0);
+  const denominator = Math.sqrt(leftVariance * rightVariance);
+  return denominator > 1e-12 ? Math.max(-1, Math.min(1, covariance / denominator)) : null;
+}
+
+function rollingCorrelation(left: MacroSeries | undefined, right: MacroSeries | undefined, intervalMs: number, windowSize = 30) {
+  if (!left || !right) return { values: [] as { time: number; value: number }[], latest: null as number | null, samples: 0 };
+  const leftReturns = returnsByBucket(left, intervalMs);
+  const rightReturns = returnsByBucket(right, intervalMs);
+  const aligned = [...leftReturns.keys()].filter(time => rightReturns.has(time)).sort((a, b) => a - b);
+  const values: { time: number; value: number }[] = [];
+  for (let index = 0; index < aligned.length; index += 1) {
+    const start = Math.max(0, index - windowSize + 1);
+    const times = aligned.slice(start, index + 1);
+    if (times.length < 12) continue;
+    const value = pearson(times.map(time => leftReturns.get(time)!), times.map(time => rightReturns.get(time)!));
+    if (value != null) values.push({ time: aligned[index], value });
+  }
+  return { values, latest: values.at(-1)?.value ?? null, samples: aligned.length };
+}
+
+function MacroCorrelationMap({ intraday, daily }: { intraday: MacroSeries[]; daily: MacroSeries[] }) {
+  const [period, setPeriod] = useState<"intraday" | "daily">("intraday");
+  const [presetKey, setPresetKey] = useState(CORRELATION_PRESETS[0].key);
+  const preset = CORRELATION_PRESETS.find(item => item.key === presetKey) ?? CORRELATION_PRESETS[0];
+  const series = period === "intraday" ? intraday : daily;
+  const intervalMs = period === "intraday" ? 60_000 : 5 * 60_000;
+  const byKey = new Map(series.map(item => [item.key, item]));
+  const selected = preset.series.flatMap(key => {
+    const item = byKey.get(key);
+    return item ? [{ ...item, color: CHART_SERIES_COLORS[key] ?? item.color }] : [];
+  });
+  const correlations = preset.pairs.map(pair => ({
+    ...pair,
+    ...rollingCorrelation(byKey.get(pair.left), byKey.get(pair.right), intervalMs),
+  }));
+  const values = selected.flatMap(item => item.values);
+  const times = values.map(point => point.time);
+  const minimumTime = Math.min(...times);
+  const maximumTime = Math.max(...times);
+  const minimumValue = Math.min(0, ...values.map(point => point.value));
+  const maximumValue = Math.max(0, ...values.map(point => point.value));
+  const padding = Math.max((maximumValue - minimumValue) * 0.12, 0.005);
+  const yMinimum = minimumValue - padding;
+  const yMaximum = maximumValue + padding;
+  const x = (time: number) => 48 + (time - minimumTime) / Math.max(1, maximumTime - minimumTime) * 930;
+  const y = (value: number) => 14 + (yMaximum - value) / Math.max(1e-8, yMaximum - yMinimum) * 206;
+  const correlationY = (value: number) => 12 + (1 - value) * 48;
+  const timeLabel = (time: number) => new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", ...(period === "daily" ? { day: "2-digit", month: "2-digit" } : {}), hour: "2-digit", minute: "2-digit" }).format(time);
+  const correlationState = (value: number | null) => value == null ? "SEM BASE" : value <= -0.5 ? "INVERSA" : value >= 0.5 ? "POSITIVA" : "FRACA / MISTA";
+  const correlationText = (value: number | null) => value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+
+  return <section className="panel macro-correlation-panel">
+    <div className="panelhead macro-panel-head"><span className="paneltitle">MAPA DE CORRELAÇÕES · RELAÇÕES OBSERVADAS</span><span className="macro-tag">RETORNOS SINCRONIZADOS · PEARSON MÓVEL</span></div>
+    <p className="macro-chart-subtitle">As linhas mostram a variação observada; o coeficiente móvel indica se cada par está inverso, alinhado ou sem relação clara no período.</p>
+    <div className="macro-correlation-controls">
+      <div className="macro-correlation-presets" role="group" aria-label="Combinações de correlação pré-configuradas">
+        {CORRELATION_PRESETS.map(item => <button type="button" key={item.key} aria-pressed={presetKey === item.key} onClick={() => setPresetKey(item.key)}>{item.label}</button>)}
+      </div>
+      <div className="macro-correlation-period" role="group" aria-label="Período das correlações">
+        <button type="button" aria-pressed={period === "intraday"} onClick={() => setPeriod("intraday")}>60 MIN</button>
+        <button type="button" aria-pressed={period === "daily"} onClick={() => setPeriod("daily")}>DIÁRIO</button>
+      </div>
+    </div>
+    {selected.length < preset.series.length || selected.some(item => item.values.length < 2) ? <div className="macro-correlation-empty">Aguardando histórico sincronizado suficiente para esta combinação{period === "daily" ? " no mapa diário" : " nos últimos 60 minutos"}.</div> : <>
+      <div className="macro-correlation-stats">{correlations.map(item => <article key={`${item.left}-${item.right}`}><span><i style={{ background: item.color }}/>{item.label}</span><strong className={item.latest == null ? "muted" : item.latest <= -0.5 ? "neg" : item.latest >= 0.5 ? "pos" : "warning"}>{correlationText(item.latest)}</strong><small>{correlationState(item.latest)} · n={item.samples}/30</small></article>)}</div>
+      <div className="macro-correlation-chart-wrap">
+        <svg className="macro-correlation-price-chart" viewBox="0 0 1000 240" preserveAspectRatio="none" role="img" aria-label={`Variação normalizada de ${preset.label}`}>
+          {Array.from({ length: 5 }, (_, index) => {
+            const value = yMinimum + (yMaximum - yMinimum) * index / 4;
+            return <g key={index}><line x1="48" x2="978" y1={y(value)} y2={y(value)} className="macro-grid-line"/><text x="42" y={y(value) + 3} textAnchor="end" className="macro-axis-label">{value.toFixed(2)}%</text></g>;
+          })}
+          <line x1="48" x2="978" y1={y(0)} y2={y(0)} className="macro-zero-line"/>
+          {selected.map(item => <polyline key={item.key} fill="none" stroke={item.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${y(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
+          <text x="48" y="236" className="macro-axis-label">{timeLabel(minimumTime)}</text><text x="978" y="236" textAnchor="end" className="macro-axis-label">{timeLabel(maximumTime)}</text>
+        </svg>
+        <div className="macro-correlation-legend">{selected.map(item => <span key={item.key}><i style={{ background: item.color }}/>{item.label}</span>)}</div>
+      </div>
+      <div className="macro-correlation-subhead"><span>COEFICIENTE MÓVEL · ESCALA −1 A +1</span><small>janela de até 30 variações sincronizadas · mínimo 12</small></div>
+      <div className="macro-correlation-chart-wrap">
+        <svg className="macro-correlation-chart" viewBox="0 0 1000 82" preserveAspectRatio="none" role="img" aria-label={`Correlação móvel dos pares em ${preset.label}`}>
+          {[-1, -0.5, 0, 0.5, 1].map(value => <g key={value}><line x1="48" x2="978" y1={correlationY(value)} y2={correlationY(value)} className={value === 0 ? "macro-zero-line" : "macro-grid-line"}/><text x="42" y={correlationY(value) + 3} textAnchor="end" className="macro-axis-label">{value > 0 ? "+" : ""}{value.toFixed(1)}</text></g>)}
+          {correlations.map(item => item.values.length > 1 && <polyline key={`${item.left}-${item.right}`} fill="none" stroke={item.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" points={item.values.map(point => `${x(point.time)},${correlationY(point.value)}`).join(" ")}><title>{item.label}</title></polyline>)}
+          <text x="48" y="80" className="macro-axis-label">{timeLabel(minimumTime)}</text><text x="978" y="80" textAnchor="end" className="macro-axis-label">{timeLabel(maximumTime)}</text>
+        </svg>
+      </div>
+    </>}
+    <div className="macro-chart-foot"><span>{period === "intraday" ? "JANELA · 60 MINUTOS" : "JANELA · 24 HORAS"}</span><span>Correlação baixa ou instável é exibida sem forçar uma relação inversa.</span></div>
+  </section>;
+}
 
 function isInPriceMapCategory(series: MacroSeries, category: string) {
   if (category === "all") return true;
@@ -497,6 +629,7 @@ export default function MacroTerminal() {
           <div className="macro-chart-foot"><span>BASE MÍNIMA · 23H DE HISTÓRICO</span><span>{snapshot?.chart.dailySeries?.length ?? 0} SÉRIES COM COBERTURA</span></div>
         </section>
       </div>
+      <MacroCorrelationMap intraday={chartSeries} daily={dailyChartSeries}/>
       <div className="macro-grid macro-lower">
         <section className="panel macro-assets-panel">
           <div className="panelhead"><span className="paneltitle">MOMENTUM NORMALIZADO · 1 / 5 / 15 / 60 MIN</span><span className="macro-tag">RETORNO · VELOCIDADE · Z-SCORE</span></div>
