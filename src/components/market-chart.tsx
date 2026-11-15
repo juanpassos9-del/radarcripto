@@ -83,9 +83,9 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       // Use the opposite label lane from reversal so simultaneous strategies
       // remain readable on the same candle. Arrow shape/color still show direction.
       position: signal.direction === "BUY" ? "aboveBar" as const : "belowBar" as const,
-      shape: signal.direction === "BUY" ? "arrowUp" as const : "arrowDown" as const,
+      shape: "circle" as const,
       color: signal.direction === "BUY" ? "#32c9df" : "#ffae55",
-      text: signal.direction === "BUY" ? "ROMP. ↑" : "ROMP. ↓",
+      text: "",
       size: 1,
     }));
     const vwapDeviationMarkers = vwapDeviationSignals.map(signal => ({
