@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, LogOut, Search, Wifi } from "lucide-react";
 import MarketChart from "@/components/market-chart";
-import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken, type BreakoutSignalData, type Candle, type ChartOverlays, type ReversalSignalData, type Trade, type VolatilityZones, type VwapDeviationSignalData } from "@/lib/market";
+import { fmtCompact, fmtPrice, fmtTime, getJson, getMarketWsToken, type BreakoutSignalData, type Candle, type ChartOverlays, type ReversalSignalData, type Trade, type TrendSignalData, type VolatilityZones, type VwapDeviationSignalData } from "@/lib/market";
 
 type Instrument = { symbol: string; name: string; category: "indices" | "forex" | "commodities"; minimumNotional?: number; pricePrecision?: number };
 type TradfiMarket = {
@@ -13,7 +13,7 @@ type TradfiMarket = {
   book: { bids: { price: number; quantity: number; total: number }[]; asks: { price: number; quantity: number; total: number }[]; spread: number; imbalance: number; status: string };
   trades: Trade[];
 };
-type TradfiIndicators = { zones: VolatilityZones; overlays: ChartOverlays; reversal: ReversalSignalData; breakout: BreakoutSignalData; vwapDeviation: VwapDeviationSignalData; limitations: string[]; receivedAt: number };
+type TradfiIndicators = { zones: VolatilityZones; overlays: ChartOverlays; reversal: ReversalSignalData; breakout: BreakoutSignalData; trend: TrendSignalData; vwapDeviation: VwapDeviationSignalData; limitations: string[]; receivedAt: number };
 type WatchQuote = { symbol: string; price: number | null; previousClose: number | null; changePercent: number | null; referenceTime: number | null };
 
 const intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
@@ -36,6 +36,7 @@ export default function TradfiTerminal() {
   const [showVolumeAnomalies, setShowVolumeAnomalies] = useState(true);
   const [showReversal, setShowReversal] = useState(true);
   const [showBreakout, setShowBreakout] = useState(true);
+  const [showTrend, setShowTrend] = useState(true);
   const [showVwapDeviation, setShowVwapDeviation] = useState(true);
   const [dvVolumeHigh, setDvVolumeHigh] = useState(1.8);
   const [dvVolumeLow, setDvVolumeLow] = useState(0.7);
@@ -159,11 +160,18 @@ export default function TradfiTerminal() {
   }, [category]);
 
   const visible = useMemo(() => instruments.filter(item => item.category === category && `${item.name} ${item.symbol}`.toLowerCase().includes(search.toLowerCase())), [instruments, category, search]);
+  const selected = instruments.find(item => item.symbol === symbol);
   const chartVwapDeviationSignals = useMemo(() => {
     const candleTimes = new Set(candles.map(candle => candle.time));
     return showVwapDeviation ? (indicators?.vwapDeviation.signals ?? []).filter(signal => candleTimes.has(signal.time)) : [];
   }, [candles, indicators, showVwapDeviation]);
-  const selected = instruments.find(item => item.symbol === symbol);
+  const chartTrendSignals = useMemo(() => {
+    const supported = interval === "5m" && (selected?.category === "indices" || selected?.category === "forex");
+    if (!showTrend || !supported) return [];
+    const candleTimes = new Set(candles.map(candle => candle.time));
+    return (indicators?.trend.signals ?? []).filter(signal => candleTimes.has(signal.time));
+  }, [candles, indicators, interval, selected?.category, showTrend]);
+  const trendAvailable = interval === "5m" && (selected?.category === "indices" || selected?.category === "forex");
   const bids = snapshot?.book.bids.slice(0, 10) ?? [];
   const asks = snapshot?.book.asks.slice(0, 10) ?? [];
   const maxDepth = Math.max(1, ...bids.map(row => row.total), ...asks.map(row => row.total));
@@ -197,9 +205,10 @@ export default function TradfiTerminal() {
               <button className={`volume-toggle ${showReversal ? "active" : ""}`} onClick={() => setShowReversal(value => !value)}>Reversão</button>
               <button className={`volume-toggle ${showBreakout ? "active" : ""}`} onClick={() => setShowBreakout(value => !value)}>Rompimento</button>
               <button className={`volume-toggle ${showVwapDeviation ? "active" : ""}`} onClick={() => setShowVwapDeviation(value => !value)}>DV</button>
+              <button className={`volume-toggle ${showTrend && trendAvailable ? "active" : ""}`} onClick={() => setShowTrend(value => !value)} disabled={!trendAvailable} title={trendAvailable ? "Sinais TREND calculados em candles fechados de 5 minutos" : "TREND disponível em 5 minutos para índices e Forex"}>TREND</button>
               <span className="tradfi-chart-source">{indicators?.zones.status === "ready" ? `σ diário · ${indicators.zones.observations ?? 0} retornos` : "Aguardando histórico diário"}</span>
             </div>
-            <div className="tradfi-chartarea">{loading ? <div className="loading">Carregando candles da BingX…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={indicators?.zones ?? null} showGarch={showGarch} showHv={showHv} showVolumeAnomalies={showVolumeAnomalies} overlays={indicators?.overlays ?? null} showVwaps={showVwaps} showPreviousLevels={showPreviousLevels} signals={showReversal ? indicators?.reversal.signals ?? emptySignals : emptySignals} breakoutSignals={showBreakout ? indicators?.breakout.signals ?? emptySignals : emptySignals} vwapDeviationSignals={chartVwapDeviationSignals}/> : <div className="chartfallback">Sem candles para a sessão atual.</div>}</div>
+            <div className="tradfi-chartarea">{loading ? <div className="loading">Carregando candles da BingX…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={indicators?.zones ?? null} showGarch={showGarch} showHv={showHv} showVolumeAnomalies={showVolumeAnomalies} overlays={indicators?.overlays ?? null} showVwaps={showVwaps} showPreviousLevels={showPreviousLevels} signals={showReversal ? indicators?.reversal.signals ?? emptySignals : emptySignals} breakoutSignals={showBreakout ? indicators?.breakout.signals ?? emptySignals : emptySignals} trendSignals={chartTrendSignals} vwapDeviationSignals={chartVwapDeviationSignals}/> : <div className="chartfallback">Sem candles para a sessão atual.</div>}</div>
             <div className="tradfi-signal-summary">
               <div><span className="tradfi-signal-label">RADAR DE REVERSÃO · MODELO INDEPENDENTE</span><strong className={indicators?.reversal.latest?.direction === "BUY" ? "pos" : indicators?.reversal.latest?.direction === "SELL" ? "neg" : ""}>{indicators?.reversal.latest ? `${indicators.reversal.latest.direction} · ${indicators.reversal.latest.score}/100 · ${indicators.reversal.latest.source} ${indicators.reversal.latest.sigma}σ` : "Sem sinal confirmado recente"}</strong><small>{indicators?.reversal.latest?.pattern ?? "Bandas diárias GARCH/HV252 · mínimo 1σ · candle fechado"}</small></div>
               <div><span className="tradfi-signal-label">ROMPIMENTO APÓS COMPRESSÃO · MODELO INDEPENDENTE</span><strong className={indicators?.breakout.latest?.direction === "BUY" ? "pos" : indicators?.breakout.latest?.direction === "SELL" ? "neg" : ""}>{indicators?.breakout.latest ? `${indicators.breakout.latest.direction} · ${indicators.breakout.latest.volumeRatio.toFixed(2)}× volume mediano · ${indicators.breakout.latest.distanceAtr.toFixed(2)} ATR` : indicators?.breakout.status === "insufficient_history" ? `Histórico insuficiente · ${indicators.breakout.observedCandles ?? 0}/${indicators.breakout.requiredCandles ?? "—"} candles` : "Sem rompimento confirmado recente"}</strong><small>Compressão de volatilidade, fechamento além da faixa e expansão de volume</small></div>

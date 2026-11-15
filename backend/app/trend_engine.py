@@ -1,4 +1,4 @@
-"""Closed-candle trend-following signals for Binance Spot 5-minute candles."""
+"""Closed-candle trend-following signals for five-minute OHLCV candles."""
 
 from __future__ import annotations
 
@@ -93,7 +93,13 @@ def _daily_vwap_sigma(candles: list[dict[str, Any]]) -> tuple[list[float | None]
     return vwap_values, sigma_values
 
 
-def build_trend_signals(symbol: str, interval: str, candles: list[dict[str, Any]]) -> dict[str, Any]:
+def build_trend_signals(
+    symbol: str,
+    interval: str,
+    candles: list[dict[str, Any]],
+    *,
+    source: str = "Binance Spot OHLCV",
+) -> dict[str, Any]:
     settings = {
         "interval": "5m", "emaFast": 9, "emaSlow": 21, "adxPeriod": 14,
         "adxMinimum": 23, "rocPeriod": 5, "volumeMultiple": 1.3,
@@ -175,6 +181,6 @@ def build_trend_signals(symbol: str, interval: str, candles: list[dict[str, Any]
         "symbol": symbol, "interval": interval, "status": "ready",
         "signals": signals[-80:], "latest": signals[-1] if signals else None,
         "settings": settings,
-        "source": "Binance Spot OHLCV; indicadores confirmados em candles fechados; VWAP e desvio estimados por OHLCV; sinal emitido ao entrar no alinhamento TREND",
+        "source": f"{source}; indicadores confirmados em candles fechados; VWAP e desvio estimados por OHLCV; sinal emitido ao entrar no alinhamento TREND",
         "observedCandles": len(bars),
     }

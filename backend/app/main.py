@@ -1655,7 +1655,11 @@ async def tradfi_indicators(
     dv_average_periods: int = Query(20, ge=5, le=100),
 ):
     """Volatility, anchored levels and deterministic signals from BingX TradFi OHLCV."""
-    symbol = await validate_bingx_tradfi_symbol(symbol)
+    symbol = symbol.upper()
+    catalog = await bingx_tradfi_catalog()
+    instrument = next((item for item in catalog if item["symbol"] == symbol), None)
+    if instrument is None:
+        raise HTTPException(404, "Índice ou par Forex indisponível na BingX.")
     if interval not in {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}:
         raise HTTPException(400, "Intervalo TradFi inválido.")
     try:
@@ -1703,6 +1707,10 @@ async def tradfi_indicators(
         )
         breakout = build_breakout_signals(symbol, interval, closed_candles)
         breakout["source"] = "BingX USDT-M TradFi OHLCV; candles fechados; compressão sem dados futuros"
+        if instrument["category"] in {"indices", "forex"}:
+            trend = build_trend_signals(symbol, interval, closed_candles, source="BingX USDT-M TradFi OHLCV")
+        else:
+            trend = {"symbol": symbol, "interval": interval, "status": "unsupported_category", "signals": [], "latest": None}
         utc_day_start_ms = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
         vwap_deviation = build_vwap_deviation_signals(
             symbol, interval, closed_candles, vwap_candles, signal_start_ms=utc_day_start_ms,
@@ -1778,7 +1786,7 @@ async def tradfi_indicators(
         overlays = {"symbol": symbol, "interval": interval, "timezone": "UTC", "vwap": series, "previous": previous,
                     "source": "BingX OHLCV · VWAP aproximada por preço típico e volume dos candles", "receivedAt": now_ms}
         return {"symbol": symbol, "interval": interval, "zones": zones, "overlays": overlays,
-                "reversal": reversal, "breakout": breakout, "vwapDeviation": vwap_deviation, "receivedAt": now_ms,
+                "reversal": reversal, "breakout": breakout, "trend": trend, "vwapDeviation": vwap_deviation, "receivedAt": now_ms,
                 "limitations": ["VWAPs e desvios são estimados com OHLCV, não com cada negócio individual.", "VWAP diária reinicia em 00:00 UTC; contratos TradFi podem ter pausas e sessões próprias.", "Sinais são calculados somente em candles fechados e não enviam ordens."]}
     except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as error:
         log.warning("BingX TradFi indicators unavailable", extra={"symbol": symbol, "interval": interval, "error": str(error)})
