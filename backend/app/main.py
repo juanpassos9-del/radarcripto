@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import json
 import logging
+import math
 import os
 import time
 from collections import deque
@@ -1775,19 +1776,17 @@ def decode_market_token(token: str, expected_use: str) -> dict[str, Any] | None:
 def verify_market_token(token: str, expected_use: str) -> bool:
     return decode_market_token(token, expected_use) is not None
 
-def allow_api_request(email: str, now: float | None = None) -> bool:
+def allow_api_request(email: str, now: float | None = None) -> tuple[bool, int]:
     current = time.monotonic() if now is None else now
     window = api_request_windows.setdefault(email, deque())
     while window and current - window[0] >= 60:
         window.popleft()
-    # A single active terminal polls several panels independently. Keep a
-    # practical floor even if an older Render environment still has the
-    # previous 60 requests/minute value until its Blueprint is synchronized.
-    request_limit = max(120, positive_int_setting("BETA_API_REQUESTS_PER_MINUTE", 120, 600))
+    request_limit = max(120, positive_int_setting("BETA_API_REQUESTS_PER_MINUTE", 300, 600))
     if len(window) >= request_limit:
-        return False
+        retry_after = max(1, math.ceil(60 - (current - window[0])))
+        return False, retry_after
     window.append(current)
-    return True
+    return True, 0
 
 @app.middleware("http")
 async def require_market_auth(request: Request, call_next):
@@ -1800,8 +1799,10 @@ async def require_market_auth(request: Request, call_next):
     claims = decode_market_token(token, "api") if scheme.lower() == "bearer" and token else None
     if claims is None:
         return JSONResponse(status_code=401, content={"detail": "Valid market API token required"})
-    if not allow_api_request(str(claims["email"])):
-        return JSONResponse(status_code=429, content={"detail": "Beta API limit reached; retry shortly"}, headers={"Retry-After": "15"})
+    allowed, retry_after = allow_api_request(str(claims["email"]))
+    if not allowed:
+        log.warning("Market API request rate-limited", extra={"path": request.url.path, "retry_after": retry_after})
+        return JSONResponse(status_code=429, content={"detail": "Limite temporário da API atingido; aguarde antes de tentar novamente."}, headers={"Retry-After": str(retry_after)})
     return await call_next(request)
 
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(","), allow_credentials=False, allow_methods=["GET"], allow_headers=["*"])

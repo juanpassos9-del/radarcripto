@@ -29,6 +29,7 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
         headers: {
           "Content-Type": upstream.headers.get("content-type") ?? "application/json",
           "Cache-Control": "no-store",
+          ...(upstream.headers.has("retry-after") ? { "Retry-After": upstream.headers.get("retry-after")! } : {}),
         },
       });
     } catch (error) {

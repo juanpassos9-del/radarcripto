@@ -73,7 +73,12 @@ export async function getJson<T>(path: string): Promise<T> {
       const message = body.detail ?? body.error;
       if (typeof message === "string" && message) detail = `${response.status}: ${message}`;
     } catch { /* Keep the HTTP status when the upstream body is not JSON. */ }
-    throw new Error(detail);
+    const failure = new Error(detail) as Error & { retryAfterMs?: number };
+    if (response.status === 429) {
+      const retryAfter = Number(response.headers.get("Retry-After"));
+      failure.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 60_000;
+    }
+    throw failure;
   }
   return response.json() as Promise<T>;
 }

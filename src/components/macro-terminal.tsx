@@ -322,9 +322,22 @@ export default function MacroTerminal() {
     let refreshTimer = 0;
     let delay = 1000;
     let refreshToken = false;
-    const refresh = () => getJson<MacroSnapshot>("/api/tradfi/macro")
-      .then(data => { if (active) { setSnapshot(data); setError(""); } })
-      .catch((cause: unknown) => { if (active) setError(cause instanceof Error ? `Falha ao carregar o Macro Quant: ${cause.message}` : "Falha ao carregar o Macro Quant. Tente novamente."); });
+    let refreshing = false;
+    let refreshAfter = 0;
+    const refresh = async () => {
+      if (!active || refreshing || document.visibilityState !== "visible" || Date.now() < refreshAfter) return;
+      refreshing = true;
+      try {
+        const data = await getJson<MacroSnapshot>("/api/tradfi/macro");
+        if (active) { setSnapshot(data); setError(""); }
+      } catch (cause: unknown) {
+        const error = cause instanceof Error ? cause as Error & { retryAfterMs?: number } : null;
+        if (error?.message.startsWith("429:")) refreshAfter = Date.now() + Math.max(30_000, error.retryAfterMs ?? 60_000);
+        if (active) setError(error ? `Falha ao carregar o Macro Quant: ${error.message}` : "Falha ao carregar o Macro Quant. Tente novamente.");
+      } finally {
+        refreshing = false;
+      }
+    };
     const connect = async () => {
       try {
         const token = await getMarketWsToken(refreshToken);
@@ -359,8 +372,10 @@ export default function MacroTerminal() {
     };
     void refresh();
     void connect();
-    refreshTimer = window.setInterval(refresh, 15_000);
-    return () => { active = false; window.clearTimeout(retryTimer); window.clearInterval(refreshTimer); socket?.close(); };
+    refreshTimer = window.setInterval(refresh, 30_000);
+    const onVisibilityChange = () => { if (document.visibilityState === "visible") void refresh(); };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => { active = false; window.clearTimeout(retryTimer); window.clearInterval(refreshTimer); document.removeEventListener("visibilitychange", onVisibilityChange); socket?.close(); };
   }, []);
 
   useEffect(() => {
