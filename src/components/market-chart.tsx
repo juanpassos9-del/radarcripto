@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CandlestickSeries, ColorType, createChart, createSeriesMarkers, CrosshairMode, HistogramSeries, LineSeries, LineStyle, TickMarkType, type CreatePriceLineOptions, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type Time, type UTCTimestamp } from "lightweight-charts";
 import type { BreakoutSignal, Candle, ChartOverlays, ReversalSignal, TrendSignal, VolatilityZones, VwapDeviationSignal } from "@/lib/market";
 
@@ -27,6 +27,7 @@ const formatChartCrosshairTime = (time: Time) => new Intl.DateTimeFormat("pt-BR"
 export type RiskRewardLevels = { entry: number | null; stop: number | null };
 type RiskRewardLevel = keyof RiskRewardLevels;
 type RiskRewardLine = RiskRewardLevel | "target1" | "target2";
+type TrendDiamond = { id: string; x: number; y: number; color: string; direction: "BUY" | "SELL" };
 
 export default function MarketChart({ candles, symbol, interval, zones, showGarch, showHv, showVolumeAnomalies, overlays, showVwaps, showPreviousLevels, signals, breakoutSignals, trendSignals = [], vwapDeviationSignals = [], riskRewardMode = false, riskRewardLevels, onRiskRewardPoint, onRiskRewardLevelChange }: { candles: Candle[]; symbol: string; interval: string; zones: VolatilityZones | null; showGarch: boolean; showHv: boolean; showVolumeAnomalies: boolean; overlays: ChartOverlays | null; showVwaps: boolean; showPreviousLevels: boolean; signals: ReversalSignal[]; breakoutSignals: BreakoutSignal[]; trendSignals?: TrendSignal[]; vwapDeviationSignals?: VwapDeviationSignal[]; riskRewardMode?: boolean; riskRewardLevels?: RiskRewardLevels; onRiskRewardPoint?: (price: number) => void; onRiskRewardLevelChange?: (level: RiskRewardLevel, price: number) => void }) {
   const host = useRef<HTMLDivElement>(null);
@@ -40,6 +41,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
   const zoneSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const referenceSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const [trendDiamonds, setTrendDiamonds] = useState<TrendDiamond[]>([]);
   const riskRewardLinesRef = useRef<Partial<Record<RiskRewardLine, IPriceLine>>>({});
   const riskRewardLevelsRef = useRef<RiskRewardLevels | undefined>(riskRewardLevels);
   const onRiskRewardLevelChangeRef = useRef(onRiskRewardLevelChange);
@@ -86,15 +88,6 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       text: signal.direction === "BUY" ? "ROMP. ↑" : "ROMP. ↓",
       size: 1,
     }));
-    const trendMarkers = trendSignals.map(signal => ({
-      id: `trend-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
-      time: signal.time as UTCTimestamp,
-      position: signal.direction === "BUY" ? "belowBar" as const : "aboveBar" as const,
-      shape: signal.direction === "BUY" ? "arrowUp" as const : "arrowDown" as const,
-      color: signal.direction === "BUY" ? "#4169e1" : "#ff3fa4",
-      text: "",
-      size: 1,
-    }));
     const vwapDeviationMarkers = vwapDeviationSignals.map(signal => ({
       id: `dv-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
       time: signal.time as UTCTimestamp,
@@ -104,8 +97,49 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       text: `DV ${signal.sigma}`,
       size: 1,
     }));
-    markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers, ...trendMarkers, ...vwapDeviationMarkers].sort((a, b) => Number(a.time) - Number(b.time)));
-  }, [signals, breakoutSignals, trendSignals, vwapDeviationSignals]);
+    markersRef.current?.setMarkers([...reversalMarkers, ...breakoutMarkers, ...vwapDeviationMarkers].sort((a, b) => Number(a.time) - Number(b.time)));
+  }, [signals, breakoutSignals, vwapDeviationSignals]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candle = candleRef.current as { priceToCoordinate: (price: number) => number | null } | null;
+    const hostElement = host.current;
+    if (!chart || !candle || !hostElement) return;
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const height = hostElement.clientHeight;
+        const candleByTime = new Map(candles.map(item => [item.time, item]));
+        const next = trendSignals.flatMap(signal => {
+          const item = candleByTime.get(signal.time);
+          const x = chart.timeScale().timeToCoordinate(signal.time as UTCTimestamp);
+          const reference = item ? signal.direction === "BUY" ? item.low : item.high : signal.price;
+          const priceY = candle.priceToCoordinate(reference);
+          if (x == null || priceY == null) return [];
+          const y = priceY + (signal.direction === "BUY" ? 10 : -10);
+          if (x < 0 || x > hostElement.clientWidth || y < 0 || y > height * 0.8) return [];
+          return [{
+            id: `trend-${signal.symbol}-${signal.interval}-${signal.time}-${signal.direction}`,
+            x, y, direction: signal.direction,
+            color: signal.direction === "BUY" ? "#4169e1" : "#ff3fa4",
+          }];
+        });
+        setTrendDiamonds(next);
+      });
+    };
+    update();
+    chart.timeScale().subscribeVisibleLogicalRangeChange(update);
+    window.addEventListener("resize", update);
+    const resizeObserver = new ResizeObserver(update);
+    resizeObserver.observe(hostElement);
+    return () => {
+      cancelAnimationFrame(frame);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(update);
+      window.removeEventListener("resize", update);
+      resizeObserver.disconnect();
+    };
+  }, [candles, trendSignals]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -317,5 +351,13 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
     };
   }, [firstCandleTime, lastCandleTime, hasMultipleCandles, overlays, showVwaps, showPreviousLevels, symbol, interval]);
 
-  return <div ref={host} aria-label={`Gráfico de candles de ${symbol}`} />;
+  return <div className="market-chart-container">
+    <div ref={host} aria-label={`Gráfico de candles de ${symbol}`} />
+    <svg className="market-chart-trend-layer" aria-hidden="true">
+      {trendDiamonds.map(marker => <g key={marker.id}>
+        <title>TREND {marker.direction === "BUY" ? "COMPRA" : "VENDA"}</title>
+        <polygon points={`${marker.x},${marker.y - 5.5} ${marker.x + 5.5},${marker.y} ${marker.x},${marker.y + 5.5} ${marker.x - 5.5},${marker.y}`} fill={marker.color} stroke="#0d1219" strokeWidth="1.5" />
+      </g>)}
+    </svg>
+  </div>;
 }
