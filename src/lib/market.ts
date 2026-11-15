@@ -103,7 +103,7 @@ async function authorizedFetch(url: string): Promise<Response> {
 export function getMarketWsToken(forceRefresh = false) {
   return getMarketToken("ws", forceRefresh);
 }
-export const marketDataLabel = "BINGX PERPETUAL · USDT";
+export const marketDataLabel = "HYPERLIQUID PERPETUAL · USD";
 export const fmtPrice = (value: number | null | undefined, digits = 2) => value == null ? "—" : new Intl.NumberFormat("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
 export const fmtCompact = (value: number | null | undefined) => value == null ? "—" : new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value);
 export const fmtTime = (timestamp: number | null | undefined) => timestamp == null ? "—" : new Date(timestamp).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour12: false });

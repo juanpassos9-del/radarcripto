@@ -53,6 +53,8 @@ SPOT_DATA_FALLBACKS = tuple(dict.fromkeys(
 ))
 SPOT_WS = os.getenv("BINANCE_SPOT_WS_URL", "wss://data-stream.binance.vision/stream")
 BINGX_PERP_API = "https://open-api.bingx.com"
+HYPERLIQUID_INFO_API = "https://api.hyperliquid.xyz"
+HYPERLIQUID_WS_URL = "wss://api.hyperliquid.xyz/ws"
 MAX_GAP_BACKFILL_TRADES = max(0, int(os.getenv("FLOW_GAP_RECOVERY_MAX_TRADES", "5000")))
 MAX_AGGREGATED_BOOK_LEVELS = 150
 MAX_EXTERNAL_SYMBOLS = 5
@@ -94,6 +96,17 @@ TRADFI_DAILY_CLOSES: dict[str, dict[str, Any]] = {}
 TRADFI_DAILY_CLOSES_TASK: asyncio.Task[Any] | None = None
 TRADFI_DAILY_CLOSES_PENDING: dict[str, dict[str, Any]] = {}
 INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"}
+HYPERLIQUID_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "3d", "1w", "1M"}
+HYPERLIQUID_INTERVAL_MS = {"1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000, "3d": 259_200_000, "1w": 604_800_000, "1M": 2_592_000_000}
+
+def market_supports_interval(market: str, interval: str) -> bool:
+    return interval in (HYPERLIQUID_INTERVALS if market == "perpetual" else INTERVALS)
+
+def hyperliquid_coin(symbol: str) -> str:
+    symbol = symbol.upper()
+    if symbol not in SYMBOLS:
+        raise HTTPException(400, f"MVP supports only: {', '.join(SYMBOLS)}")
+    return symbol.removesuffix("USDT")
 
 def positive_int_setting(name: str, default: int, maximum: int) -> int:
     try:
@@ -752,6 +765,15 @@ class MarketService:
 
     @staticmethod
     def _request_cache_ttl(base: str, path: str, params: dict[str, Any]) -> float:
+        if base == HYPERLIQUID_INFO_API:
+            if path == "ticker":
+                return 8
+            if path == "depth":
+                return 2
+            if path == "klines":
+                return {"1m": 5, "3m": 5, "5m": 5, "15m": 8, "30m": 10, "1h": 12, "2h": 15, "4h": 20, "8h": 30, "12h": 30, "1d": 60, "3d": 60, "1w": 120, "1M": 180}.get(str(params.get("interval", "")), 0)
+            if path == "trades":
+                return 2
         if base == BINGX_PERP_API:
             if path.endswith("/ticker"):
                 return 8
@@ -779,6 +801,100 @@ class MarketService:
         return 0
 
     async def _request_uncached(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
+        if base == HYPERLIQUID_INFO_API:
+            request_params = dict(params or {})
+            coin = hyperliquid_coin(str(request_params["symbol"])) if request_params.get("symbol") else None
+            if path == "ticker":
+                body = {"type": "metaAndAssetCtxs"}
+            elif path == "depth":
+                body = {"type": "l2Book", "coin": coin}
+            elif path == "trades":
+                body = {"type": "recentTrades", "coin": coin}
+            elif path == "klines":
+                interval = str(request_params.get("interval", "5m"))
+                interval_ms = HYPERLIQUID_INTERVAL_MS.get(interval)
+                if interval_ms is None:
+                    raise HTTPException(400, "Unsupported Hyperliquid candle interval")
+                now_ms = int(time.time() * 1000)
+                limit = max(1, min(5000, int(request_params.get("limit", 240))))
+                end_time = int(request_params.get("endTime", now_ms))
+                start_time = int(request_params.get("startTime", end_time - limit * interval_ms))
+                body = {"type": "candleSnapshot", "req": {"coin": coin, "interval": interval, "startTime": start_time, "endTime": end_time}}
+            else:
+                raise HTTPException(400, "Unsupported Hyperliquid market resource")
+
+            try:
+                async with self.request_slots:
+                    response = await self.client.post(f"{base}/info", json=body, timeout=12)
+                if response.status_code == 429:
+                    retry_after = min(max(float(response.headers.get("Retry-After", 1)), 0.25), 5)
+                    await asyncio.sleep(retry_after)
+                    async with self.request_slots:
+                        response = await self.client.post(f"{base}/info", json=body, timeout=12)
+                response.raise_for_status()
+                data = response.json()
+                if isinstance(data, str):
+                    data = json.loads(data)
+            except (httpx.HTTPError, ValueError, TypeError) as error:
+                raise HTTPException(502, f"Hyperliquid market data unavailable: {str(error)[:180]}") from error
+
+            if path == "ticker":
+                if not isinstance(data, list) or len(data) < 2:
+                    raise HTTPException(502, "Hyperliquid returned invalid perpetual market metadata")
+                meta, contexts = data[0], data[1]
+                rows = []
+                for instrument, context in zip(meta.get("universe", []), contexts):
+                    name = str(instrument.get("name", "")).upper()
+                    if name not in {value.removesuffix("USDT") for value in SYMBOLS}:
+                        continue
+                    price = float(context.get("midPx", context.get("markPx", context.get("oraclePx", 0))) or 0)
+                    previous = float(context.get("prevDayPx", 0) or 0)
+                    base_volume = float(context.get("dayBaseVlm", 0) or 0)
+                    quote_volume = float(context.get("dayNtlVlm", price * base_volume) or 0)
+                    rows.append({
+                        "symbol": name, "lastPrice": price,
+                        "priceChangePercent": ((price / previous) - 1) * 100 if price > 0 and previous > 0 else None,
+                        "volume": base_volume, "quoteVolume": quote_volume,
+                        "highPrice": None, "lowPrice": None,
+                    })
+                if request_params.get("symbol"):
+                    return next((row for row in rows if row["symbol"] == coin), None)
+                return rows
+
+            if path == "depth":
+                if not isinstance(data, dict):
+                    raise HTTPException(502, "Hyperliquid returned an invalid L2 book")
+                levels = data.get("levels", [[], []])
+                return {
+                    "lastUpdateId": int(data.get("time", time.time() * 1000)),
+                    "bids": [[row["px"], row["sz"]] for row in levels[0]],
+                    "asks": [[row["px"], row["sz"]] for row in levels[1]],
+                }
+
+            if path == "trades":
+                rows = data if isinstance(data, list) else []
+                normalized = [{
+                    "a": str(row.get("tid", f"{row.get('time', 0)}:{row.get('px', '')}")),
+                    "T": int(row.get("time", 0)), "p": row.get("px"), "q": row.get("sz"),
+                    "m": str(row.get("side", "")).upper() != "B",
+                } for row in rows]
+                normalized.sort(key=lambda row: int(row["T"]), reverse=True)
+                return normalized[:int(request_params.get("limit", 60))]
+
+            rows = data if isinstance(data, list) else []
+            interval_ms = HYPERLIQUID_INTERVAL_MS[str(request_params.get("interval", "5m"))]
+            normalized = []
+            for row in rows:
+                opened = int(row["t"])
+                base_volume = float(row.get("v", 0) or 0)
+                typical_price = (float(row["h"]) + float(row["l"]) + float(row["c"])) / 3
+                normalized.append([
+                    opened, float(row["o"]), float(row["h"]), float(row["l"]), float(row["c"]),
+                    base_volume, int(row.get("T", opened + interval_ms - 1)), typical_price * base_volume,
+                ])
+            normalized.sort(key=lambda row: int(row[0]))
+            limit = int(request_params.get("limit", 240))
+            return normalized[-limit:]
         if base == BINGX_PERP_API:
             request_params = dict(params or {})
             symbol = request_params.get("symbol")
@@ -881,16 +997,21 @@ class MarketService:
         base, path = self.base_and_path(market, "ticker")
         received = int(time.time() * 1000)
         row = await self.request(base, path, {"symbol": symbol})
-        event = int(row.get("closeTime", row.get("time", row.get("timestamp", received))))
-        if event < 10_000_000_000:
+        if not row:
+            raise HTTPException(404, "Perpetual contract is not listed on Hyperliquid")
+        event_value = row.get("closeTime", row.get("time", row.get("timestamp")))
+        event = int(event_value) if event_value is not None else None
+        if event is not None and event < 10_000_000_000:
             event *= 1000
         price = float(row["lastPrice"])
-        change = float(row.get("priceChangePercent", row.get("priceChangePercent24h", 0)))
+        change_value = row.get("priceChangePercent", row.get("priceChangePercent24h"))
+        change = float(change_value) if change_value is not None else None
         volume = float(row.get("volume", row.get("volume24h", 0)))
         quote_volume = float(row.get("quoteVolume", row.get("quoteVolume24h", price * volume)))
-        high = float(row.get("highPrice", row.get("high", price)))
-        low = float(row.get("lowPrice", row.get("low", price)))
-        return MarketSnapshot(symbol=symbol, price=price, change24h=change, volume24h=volume, quoteVolume24h=quote_volume, high24h=high, low24h=low, source=self.market_source(market), eventTime=event, receivedAt=received, latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale")
+        high_value, low_value = row.get("highPrice", row.get("high")), row.get("lowPrice", row.get("low"))
+        high = float(high_value) if high_value is not None else None
+        low = float(low_value) if low_value is not None else None
+        return MarketSnapshot(symbol=symbol, price=price, change24h=change, volume24h=volume, quoteVolume24h=quote_volume, high24h=high, low24h=low, source=self.market_source(market), eventTime=event, receivedAt=received, latencyMs=max(0, received - event) if event is not None else None, status="live" if event is None or received - event < 60_000 else "stale")
 
     async def market_context(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -945,19 +1066,15 @@ class MarketService:
 
     @staticmethod
     def market_source(market: str) -> str:
-        return "BingX USDT-M Perpetual" if market == "perpetual" else "Binance Spot"
+        return "Hyperliquid Perpetual" if market == "perpetual" else "Binance Spot"
 
     @staticmethod
     def base_and_path(market: str, resource: str) -> tuple[str, str]:
         """Return the REST base and endpoint for a supported public market feed."""
         if market == "perpetual":
-            paths = {
-                "ticker": "/openApi/swap/v2/quote/ticker",
-                "depth": "/openApi/swap/v2/quote/depth",
-                "klines": "/openApi/swap/v3/quote/klines",
-                "trades": "/openApi/swap/v2/quote/trades",
-            }
-            return BINGX_PERP_API, paths[resource]
+            if resource not in {"ticker", "depth", "klines", "trades"}:
+                raise HTTPException(400, "Unsupported Hyperliquid market resource")
+            return HYPERLIQUID_INFO_API, resource
         paths = {
             "ticker": "/api/v3/ticker/24hr",
             "depth": "/api/v3/depth",
@@ -969,7 +1086,7 @@ class MarketService:
     async def book(self, symbol: str, market: str, limit: int) -> BookSnapshot:
         if market == "perpetual":
             base, path = self.base_and_path(market, "depth")
-            snapshot = await self.request(base, path, {"symbol": symbol, "limit": 100})
+            snapshot = await self.request(base, path, {"symbol": symbol})
             all_bids = sorted(((float(price), float(qty)) for price, qty in snapshot["bids"] if float(qty) > 0), reverse=True)
             all_asks = sorted(( (float(price), float(qty)) for price, qty in snapshot["asks"] if float(qty) > 0))
             bids, asks = all_bids[:limit], all_asks[:limit]
@@ -977,11 +1094,11 @@ class MarketService:
             total = 0.0
             for price, qty in bids:
                 total += price * qty
-                bid_levels.append(Level(price=price, quantity=qty, total=total, sources=["BingX Perp"]))
+                bid_levels.append(Level(price=price, quantity=qty, total=total, sources=["Hyperliquid"]))
             total = 0.0
             for price, qty in asks:
                 total += price * qty
-                ask_levels.append(Level(price=price, quantity=qty, total=total, sources=["BingX Perp"]))
+                ask_levels.append(Level(price=price, quantity=qty, total=total, sources=["Hyperliquid"]))
             bid_qty = sum(qty for _, qty in all_bids)
             ask_qty = sum(qty for _, qty in all_asks)
             midpoint = (bids[0][0] + asks[0][0]) / 2 if bids and asks else 0.0
@@ -993,7 +1110,7 @@ class MarketService:
             event_time = int(snapshot.get("lastUpdateId", received_at))
             if event_time < 10_000_000_000:
                 event_time *= 1000
-            return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=asks[0][0] - bids[0][0] if asks and bids else 0.0, imbalance=(bid_qty - ask_qty) / (bid_qty + ask_qty) if bid_qty + ask_qty else 0.0, eventTime=event_time, receivedAt=received_at, status="live" if bids and asks else "unavailable", source="BingX Perpetual", sources={"BingX Perp": "live"}, liquidityBands=liquidity)
+            return BookSnapshot(symbol=symbol, bids=bid_levels, asks=ask_levels, spread=asks[0][0] - bids[0][0] if asks and bids else 0.0, imbalance=(bid_qty - ask_qty) / (bid_qty + ask_qty) if bid_qty + ask_qty else 0.0, eventTime=event_time, receivedAt=received_at, status="live" if bids and asks else "unavailable", source="Hyperliquid Perpetual", sources={"Hyperliquid": "live"}, liquidityBands=liquidity)
         self.ensure_external_collectors(symbol)
         key = (market, symbol)
         init_lock = self.book_init_locks.setdefault(key, asyncio.Lock())
@@ -1454,6 +1571,82 @@ class MarketService:
                 await asyncio.sleep(1)
 
     async def event_stream(self, market: str, symbol: str, interval: str):
+        if market == "perpetual":
+            coin = hyperliquid_coin(symbol)
+            subscriptions = [
+                {"type": "trades", "coin": coin},
+                {"type": "candle", "coin": coin, "interval": interval},
+                {"type": "l2Book", "coin": coin},
+                {"type": "allMids"},
+            ]
+            while True:
+                try:
+                    async with websockets.connect(HYPERLIQUID_WS_URL, ping_interval=20, ping_timeout=20, max_size=2**20) as socket:
+                        for subscription in subscriptions:
+                            await socket.send(json.dumps({"method": "subscribe", "subscription": subscription}))
+                        async for raw in socket:
+                            message = json.loads(raw)
+                            channel, data = message.get("channel"), message.get("data", {})
+                            received = int(time.time() * 1000)
+                            if channel == "trades":
+                                rows = data if isinstance(data, list) else []
+                                for row in rows:
+                                    trade = Trade(
+                                        id=f"{row.get('time', 0)}:{row.get('tid', '')}", time=int(row["time"]),
+                                        price=float(row["px"]), quantity=float(row["sz"]),
+                                        side="buy" if str(row.get("side", "")).upper() == "B" else "sell",
+                                        source="Hyperliquid",
+                                    )
+                                    yield {"type": "trade", "data": trade.model_dump()}
+                            elif channel == "candle" and isinstance(data, dict) and data.get("s") == coin:
+                                opened, closed = int(data["t"]), int(data.get("T", data["t"]))
+                                candle = Candle(
+                                    time=opened // 1000, open=float(data["o"]), high=float(data["h"]),
+                                    low=float(data["l"]), close=float(data["c"]), volume=float(data.get("v", 0)),
+                                )
+                                yield {"type": "candle", "data": candle.model_dump(), "closed": closed < received}
+                            elif channel == "l2Book" and isinstance(data, dict):
+                                levels = data.get("levels", [[], []])
+                                bids = sorted(((float(row["px"]), float(row["sz"])) for row in levels[0]), reverse=True)
+                                asks = sorted(( (float(row["px"]), float(row["sz"])) for row in levels[1]))
+                                bid_total = ask_total = 0.0
+                                bid_levels, ask_levels = [], []
+                                for price, quantity in bids:
+                                    bid_total += price * quantity
+                                    bid_levels.append(Level(price=price, quantity=quantity, total=bid_total, sources=["Hyperliquid"]))
+                                for price, quantity in asks:
+                                    ask_total += price * quantity
+                                    ask_levels.append(Level(price=price, quantity=quantity, total=ask_total, sources=["Hyperliquid"]))
+                                bid_qty, ask_qty = sum(qty for _, qty in bids), sum(qty for _, qty in asks)
+                                midpoint = (bids[0][0] + asks[0][0]) / 2 if bids and asks else 0.0
+                                bands: dict[str, float] = {}
+                                for label, fraction in (("0.1%", .001), ("0.5%", .005)):
+                                    bands[f"bid{label}"] = sum(price * qty for price, qty in bids if midpoint * (1 - fraction) <= price <= midpoint)
+                                    bands[f"ask{label}"] = sum(price * qty for price, qty in asks if midpoint <= price <= midpoint * (1 + fraction))
+                                snapshot = BookSnapshot(
+                                    symbol=symbol, bids=bid_levels[:20], asks=ask_levels[:20],
+                                    spread=asks[0][0] - bids[0][0] if asks and bids else 0,
+                                    imbalance=(bid_qty - ask_qty) / (bid_qty + ask_qty) if bid_qty + ask_qty else 0,
+                                    eventTime=int(data.get("time", received)), receivedAt=received,
+                                    status="live" if bids and asks else "unavailable", source="Hyperliquid Perpetual",
+                                    sources={"Hyperliquid": "live" if bids and asks else "unavailable"}, liquidityBands=bands,
+                                )
+                                yield {"type": "book", "data": snapshot.model_dump()}
+                            elif channel == "allMids" and isinstance(data, dict):
+                                price_value = data.get("mids", {}).get(coin)
+                                if price_value:
+                                    snapshot = MarketSnapshot(
+                                        symbol=symbol, price=float(price_value), change24h=None, volume24h=None,
+                                        quoteVolume24h=None, high24h=None, low24h=None, source="Hyperliquid Perpetual",
+                                        eventTime=received, receivedAt=received, latencyMs=0, status="live",
+                                    )
+                                    yield {"type": "market", "data": snapshot.model_dump()}
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Hyperliquid market websocket disconnected", extra={"symbol": symbol, "interval": interval})
+                    await asyncio.sleep(1)
+            return
         endpoint = SPOT_WS
         streams = [f"{symbol.lower()}@aggTrade", f"{symbol.lower()}@kline_{interval}", f"{symbol.lower()}@ticker"]
         url = f"{endpoint}?streams={'/'.join(streams)}"
@@ -1592,30 +1785,30 @@ async def markets(market: str = Query("spot")):
             received = int(time.time() * 1000)
             snapshots, unavailable = [], []
             for symbol in SYMBOLS:
-                row = by_symbol.get(f"{symbol.removesuffix('USDT')}-USDT")
+                row = by_symbol.get(hyperliquid_coin(symbol))
                 if not row:
-                    unavailable.append({"symbol": symbol, "reason": "Contrato indisponível no ticker da BingX"})
+                    unavailable.append({"symbol": symbol, "reason": "Perpétuo não listado na Hyperliquid"})
                     continue
                 try:
                     price = float(row["lastPrice"])
-                    event = int(row.get("closeTime", row.get("time", received)))
-                    if event < 10_000_000_000:
-                        event *= 1000
+                    event_value = None
+                    event = None
                     volume = float(row.get("volume", row.get("volume24h", 0)))
                     snapshots.append(MarketSnapshot(
                         symbol=symbol, price=price,
-                        change24h=float(row.get("priceChangePercent", row.get("priceChangePercent24h", 0))),
+                        change24h=float(row["priceChangePercent"]) if row.get("priceChangePercent") is not None else None,
                         volume24h=volume, quoteVolume24h=float(row.get("quoteVolume", row.get("quoteVolume24h", price * volume))),
-                        high24h=float(row.get("highPrice", row.get("high", price))), low24h=float(row.get("lowPrice", row.get("low", price))),
-                        source="BingX USDT-M Perpetual", eventTime=event, receivedAt=received,
-                        latencyMs=max(0, received - event), status="live" if received - event < 60_000 else "stale",
+                        high24h=None, low24h=None,
+                        source="Hyperliquid Perpetual", eventTime=event, receivedAt=received,
+                        latencyMs=None,
+                        status="live",
                     ).model_dump())
                 except (KeyError, TypeError, ValueError) as error:
                     unavailable.append({"symbol": symbol, "reason": str(error)})
             return {"markets": snapshots, "unavailable": unavailable}
         except (httpx.HTTPError, HTTPException, ValueError, TypeError) as error:
-            log.warning("BingX perpetual tickers unavailable: %s", error)
-            raise HTTPException(502, "Não foi possível carregar os tickers dos perpétuos BingX.") from error
+            log.warning("Hyperliquid perpetual tickers unavailable: %s", error)
+            raise HTTPException(502, "Não foi possível carregar os perpétuos da Hyperliquid.") from error
     results = await asyncio.gather(*(service.ticker(symbol, market) for symbol in SYMBOLS), return_exceptions=True)
     unavailable = []
     for index, item in enumerate(results):
@@ -2056,14 +2249,14 @@ async def market_context():
 @app.get("/api/candles")
 async def candles(symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"), limit: int = Query(240, ge=10, le=500)):
     symbol, market = validate_symbol(symbol), validate_market(market)
-    if interval not in INTERVALS:
+    if not market_supports_interval(market, interval):
         raise HTTPException(400, "Unsupported candle interval")
     base, path = service.base_and_path(market, "klines")
     try:
         rows = await service.request(base, path, {"symbol": symbol, "interval": interval, "limit": limit})
     except (httpx.HTTPError, HTTPException) as error:
         log.exception("candle request failed", extra={"symbol": symbol, "market": market, "interval": interval})
-        raise HTTPException(502, f"Unable to load Binance candles: {error}") from error
+        raise HTTPException(502, f"Unable to load {service.market_source(market)} candles: {error}") from error
     return {"candles": [Candle(time=int(r[0] // 1000), open=float(r[1]), high=float(r[2]), low=float(r[3]), close=float(r[4]), volume=float(r[5])).model_dump() for r in rows], "source": service.market_source(market), "receivedAt": int(time.time() * 1000), "coverage": "exchange historical OHLCV"}
 
 def _period_starts(timestamp_ms: int) -> tuple[int, int, int]:
@@ -2089,7 +2282,7 @@ def _period_extreme(rows: list[list[Any]], start_ms: int, end_ms: int, field: in
 @app.get("/api/chart-overlays")
 async def chart_overlays(symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot")):
     symbol, market = validate_symbol(symbol), validate_market(market)
-    if interval not in {"1m", "5m", "15m", "1h", "4h", "1d"}:
+    if interval not in {"1m", "5m", "15m", "1h", "4h", "1d"} or not market_supports_interval(market, interval):
         raise HTTPException(400, "Unsupported chart overlay interval")
     base, path = service.base_and_path(market, "klines")
     try:
@@ -2172,7 +2365,8 @@ async def chart_overlays(symbol: str = Query("BTCUSDT"), interval: str = Query("
                 "low": _period_extreme(daily_rows, previous_month_start, month_start, 3, "low"),
             },
         }
-        return {"symbol": symbol, "interval": interval, "timezone": "UTC", "vwap": series, "previous": previous, "source": f"{service.market_source(market)} klines quote volume / base volume", "receivedAt": int(time.time() * 1000)}
+        overlay_source = f"{service.market_source(market)} OHLCV · VWAP estimada por preço típico × volume base" if market == "perpetual" else f"{service.market_source(market)} klines quote volume / base volume"
+        return {"symbol": symbol, "interval": interval, "timezone": "UTC", "vwap": series, "previous": previous, "source": overlay_source, "receivedAt": int(time.time() * 1000)}
     except httpx.HTTPError as error:
         raise HTTPException(502, f"Unable to load anchored VWAP and previous period levels: {error}") from error
 
@@ -2186,10 +2380,10 @@ async def trades(symbol: str = Query("BTCUSDT"), market: str = Query("spot"), li
     if market == "perpetual":
         base, path = service.base_and_path(market, "trades")
         response = await service.request(base, path, {"symbol": symbol, "limit": limit})
-        rows = [Trade(id=row["a"], time=int(row["T"]), price=float(row["p"]), quantity=float(row["q"]), side="sell" if row["m"] else "buy", source="BingX Perp") for row in response or []]
+        rows = [Trade(id=row["a"], time=int(row["T"]), price=float(row["p"]), quantity=float(row["q"]), side="sell" if row["m"] else "buy", source="Hyperliquid") for row in response or []]
         rows.sort(key=lambda trade: (trade.time, str(trade.id)), reverse=True)
         latest = rows[0].time if rows else None
-        return {"trades": [trade.model_dump() for trade in rows[:limit]], "source": "BingX USDT-M Perpetual · public recent trades", "sources": {"BingX Perp": "live" if rows else "unavailable"}, "tradeHealth": {"BingX Perp": {"status": "live" if rows else "unavailable", "lastTradeAt": latest}}, "receivedAt": int(time.time() * 1000), "coverage": "Negociações públicas observadas no contrato perpétuo BingX selecionado; agressão inferida pelo campo maker da exchange. Não representa o fluxo global."}
+        return {"trades": [trade.model_dump() for trade in rows[:limit]], "source": "Hyperliquid Perpetual · negociações públicas recentes", "sources": {"Hyperliquid": "live" if rows else "unavailable"}, "tradeHealth": {"Hyperliquid": {"status": "live" if rows else "unavailable", "lastTradeAt": latest}}, "receivedAt": int(time.time() * 1000), "coverage": "Negociações públicas observadas no contrato perpétuo Hyperliquid; lado agressor informado pela exchange. Não representa o fluxo global."}
     service.ensure_external_collectors(symbol)
     sample = service.samples.get((market, symbol), deque())
     stored = await asyncio.to_thread(service.flow_store.recent, symbol, limit) if service.flow_store else []
@@ -2314,7 +2508,7 @@ async def reversal_signals(
     volume_enabled: bool = Query(True),
 ):
     symbol, market = validate_symbol(symbol), validate_market(market)
-    if interval not in INTERVALS:
+    if not market_supports_interval(market, interval):
         raise HTTPException(400, "Unsupported candle interval")
     base, path = service.base_and_path(market, "klines")
     try:
@@ -2367,7 +2561,7 @@ async def reversal_evaluation(
 ):
     """Evaluate closed-candle reversal signals against later OHLCV, with explicit costs."""
     symbol, market = validate_symbol(symbol), validate_market(market)
-    if interval not in INTERVALS:
+    if not market_supports_interval(market, interval):
         raise HTTPException(400, "Unsupported candle interval")
     base, path = service.base_and_path(market, "klines")
     try:
@@ -2439,7 +2633,7 @@ async def reversal_evaluation(
             "symbol": symbol, "market": market, "interval": interval,
             "settings": {"minSigma": 1.0, "minScore": 50, "cooldown": 10, "volumeEnabled": True, "lookaheadCandles": lookahead, "feeBpsPerSide": fee_bps, "slippageBpsPerSide": slippage_bps},
             "summary": summary, "outcomes": outcomes,
-            "source": "Binance Spot OHLCV; entry is next candle open and exit is close after the lookahead horizon",
+            "source": f"{service.market_source(market)} OHLCV; entry is next candle open and exit is close after the lookahead horizon",
             "limitations": ["Only the most recent 40 qualified signals are evaluated.", "Overlapping signals are counted independently.", "Fees and slippage are user-supplied estimates; funding, spread, market impact and execution failures are excluded.", "This is a retrospective estimate, not a live signal or a promise of future results."],
             "receivedAt": int(time.time() * 1000),
         }
@@ -2456,7 +2650,7 @@ async def breakout_signals(
 ):
     """Independent closed-candle squeeze breakout signals for Spot OHLCV."""
     symbol, market = validate_symbol(symbol), validate_market(market)
-    if interval not in INTERVALS:
+    if not market_supports_interval(market, interval):
         raise HTTPException(400, "Unsupported candle interval")
     base, path = service.base_and_path(market, "klines")
     try:
@@ -2480,7 +2674,7 @@ async def trend_signals(
 ):
     """Independent trend-following signals for closed BingX perpetual candles."""
     symbol, market = validate_symbol(symbol), validate_market(market)
-    if interval not in INTERVALS:
+    if not market_supports_interval(market, interval):
         raise HTTPException(400, "Unsupported candle interval")
     if interval != "5m":
         return build_trend_signals(symbol, interval, [])
@@ -2505,7 +2699,7 @@ async def vwap_deviation_signals(
 ):
     """Closed-candle daily VWAP deviation rejections for the chart's current UTC session."""
     symbol, market = validate_symbol(symbol), validate_market(market)
-    if interval not in INTERVALS:
+    if not market_supports_interval(market, interval):
         raise HTTPException(400, "Unsupported candle interval")
     if interval not in VWAP_INTERVAL_MS:
         return build_vwap_deviation_signals(symbol, interval, [], [], source=f"{service.market_source(market)} OHLCV")
@@ -2558,7 +2752,10 @@ async def volatility(symbol: str = Query("BTCUSDT"), market: str = Query("spot")
     try:
         rows = await service.request(base, path, {"symbol": symbol, "interval": "1d", "limit": 400})
         daily = [{"time": int(row[0] // 1000), "close": float(row[4])} for row in rows]
-        return calculate_zones(symbol, daily)
+        zones = calculate_zones(symbol, daily)
+        if market == "perpetual":
+            zones["source"] = "Hyperliquid Perpetual daily OHLCV · último candle diário fechado"
+        return zones
     except (httpx.HTTPError, KeyError, ValueError, IndexError) as error:
         raise HTTPException(502, f"Daily volatility data unavailable: {error}") from error
 
@@ -2598,12 +2795,12 @@ async def market_ws(socket: WebSocket):
         return
     symbol = socket.query_params.get("symbol", "BTCUSDT").upper()
     requested_market = socket.query_params.get("market", "spot")
-    market = os.getenv("NEXUS_MARKET_MODE", "spot").strip().lower()
-    if requested_market != "spot":
-        await socket.close(code=1008, reason="This terminal provides Binance Spot data only")
+    if requested_market not in {"spot", "perpetual"}:
+        await socket.close(code=1008, reason="Unsupported market")
         return
+    market = requested_market
     interval = socket.query_params.get("interval", "5m")
-    if symbol not in SYMBOLS or interval not in INTERVALS:
+    if symbol not in SYMBOLS or not market_supports_interval(market, interval):
         await socket.close(code=1008, reason="Unsupported symbol, market or interval")
         return
     admitted, active_sessions = await service.try_open_market_session()
@@ -2618,7 +2815,8 @@ async def market_ws(socket: WebSocket):
         await socket.accept(subprotocol="nexus-market-v1")
         subscription_key, market_queue = await service.subscribe_market(market, symbol, interval)
         consumer = asyncio.create_task(_consume_market(socket, market_queue))
-        producer = asyncio.create_task(_produce_book(socket, symbol, market))
+        if market == "spot":
+            producer = asyncio.create_task(_produce_book(socket, symbol, market))
         while True:
             try:
                 await asyncio.wait_for(socket.receive_text(), timeout=30)

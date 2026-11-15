@@ -25,7 +25,7 @@ services:
           type: web
           envVarKey: RENDER_EXTERNAL_URL
       - key: NEXT_PUBLIC_MARKET_MODE
-        value: spot
+        value: perpetual
       - key: AUTH_SECRET
         generateValue: true
       - key: BETA_MAX_USERS
@@ -43,7 +43,7 @@ services:
       - key: CORS_ORIGINS
         value: https://nexus-terminal-web.onrender.com
       - key: NEXUS_MARKET_MODE
-        value: spot
+        value: perpetual
       - key: BETA_MAX_CONCURRENT_SESSIONS
         value: "10"
       - key: BETA_API_REQUESTS_PER_MINUTE
