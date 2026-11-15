@@ -30,6 +30,13 @@ MACRO_ASSETS: dict[str, dict[str, str]] = {
     "HL:xyz:EWZ": {"key": "EWZ", "label": "EWZ sintético", "category": "equity", "color": "#57d69a", "source": "Hyperliquid · XYZ"},
     "HL:xyz:SOXL": {"key": "SOXL", "label": "SOXL/USDC · perpétuo sintético", "category": "equity", "color": "#ff80bf", "source": "Hyperliquid · XYZ", "unit": "USDC"},
     "HL:xyz:TLT": {"key": "TLT", "label": "TLT sintético", "category": "bond", "color": "#e3bd65", "source": "Hyperliquid · XYZ"},
+    "HL:XYZ:AAPL": {"key": "AAPL", "label": "Apple · tokenizada", "category": "stocks", "color": "#7dd3fc", "source": "Hyperliquid · XYZ"},
+    "HL:XYZ:MSFT": {"key": "MSFT", "label": "Microsoft · tokenizada", "category": "stocks", "color": "#60a5fa", "source": "Hyperliquid · XYZ"},
+    "HL:XYZ:GOOGL": {"key": "GOOGL", "label": "Alphabet · tokenizada", "category": "stocks", "color": "#f87171", "source": "Hyperliquid · XYZ"},
+    "HL:XYZ:AMZN": {"key": "AMZN", "label": "Amazon · tokenizada", "category": "stocks", "color": "#fb923c", "source": "Hyperliquid · XYZ"},
+    "HL:XYZ:META": {"key": "META", "label": "Meta · tokenizada", "category": "stocks", "color": "#818cf8", "source": "Hyperliquid · XYZ"},
+    "HL:XYZ:NVDA": {"key": "NVDA", "label": "NVIDIA · tokenizada", "category": "stocks", "color": "#a3e635", "source": "Hyperliquid · XYZ"},
+    "HL:XYZ:TSLA": {"key": "TSLA", "label": "Tesla · tokenizada", "category": "stocks", "color": "#f472b6", "source": "Hyperliquid · XYZ"},
     "HL:spot:WBRL-USDC": {"key": "WBRLUSDC", "label": "WBRL/USDC · real empacotado", "category": "fx", "color": "#b8e986", "source": "Hyperliquid Spot", "unit": "USDC por WBRL"},
     "BINANCE:BTCUSDT": {"key": "BTC", "label": "BTC/USDT", "category": "crypto", "color": "#f3a712", "source": "Binance Spot"},
     "BINANCE:ETHUSDT": {"key": "ETH", "label": "ETH/USDT", "category": "crypto", "color": "#8b9cff", "source": "Binance Spot"},
@@ -217,7 +224,7 @@ def build_macro_snapshot(
             "sampleCount": sample_count, "ageMs": age_ms,
             "status": "live" if has_live else "history" if latest else "warming",
         }
-        if metadata["key"] in {"DXY", "EURUSD", "USDJPY", "USDCHF", "AUDJPY", "SP500", "NASDAQ100", "RUSSELL2000", "DOW", "GER40", "NIKKEI225", "WTI", "GOLD", "COPPER", "UST2Y", "UST10Y", "UST30Y", "EWZ", "DRAM", "SOXL", "BTC", "ETH", "SOL", "LINK", "AAVE", "ONDO", "NEAR"} and len(recent) >= 2:
+        if metadata["key"] in {"DXY", "EURUSD", "USDJPY", "USDCHF", "AUDJPY", "SP500", "NASDAQ100", "RUSSELL2000", "DOW", "GER40", "NIKKEI225", "WTI", "GOLD", "COPPER", "UST2Y", "UST10Y", "UST30Y", "EWZ", "DRAM", "SOXL", "BTC", "ETH", "SOL", "LINK", "AAVE", "ONDO", "NEAR", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA"} and len(recent) >= 2:
             baseline = recent[0]["price"]
             chart_series.append({
                 "key": metadata["key"], "label": metadata["label"], "color": metadata["color"],

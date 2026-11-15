@@ -170,12 +170,12 @@ export default function TradfiTerminal() {
     return showVwapDeviation ? (indicators?.vwapDeviation.signals ?? []).filter(signal => candleTimes.has(signal.time)) : [];
   }, [candles, indicators, showVwapDeviation]);
   const chartTrendSignals = useMemo(() => {
-    const supported = interval === "5m" && (selected?.category === "indices" || selected?.category === "forex");
+    const supported = interval === "5m" && (selected?.category === "indices" || selected?.category === "forex" || selected?.category === "stocks");
     if (!showTrend || !supported) return [];
     const candleTimes = new Set(candles.map(candle => candle.time));
     return (indicators?.trend.signals ?? []).filter(signal => candleTimes.has(signal.time));
   }, [candles, indicators, interval, selected?.category, showTrend]);
-  const trendAvailable = interval === "5m" && (selected?.category === "indices" || selected?.category === "forex");
+  const trendAvailable = interval === "5m" && (selected?.category === "indices" || selected?.category === "forex" || selected?.category === "stocks");
   const bids = snapshot?.book.bids.slice(0, 10) ?? [];
   const asks = snapshot?.book.asks.slice(0, 10) ?? [];
   const maxDepth = Math.max(1, ...bids.map(row => row.total), ...asks.map(row => row.total));
@@ -209,7 +209,7 @@ export default function TradfiTerminal() {
               <button className={`volume-toggle ${showReversal ? "active" : ""}`} onClick={() => setShowReversal(value => !value)}>Reversão</button>
               <button className={`volume-toggle ${showBreakout ? "active" : ""}`} onClick={() => setShowBreakout(value => !value)}>Rompimento</button>
               <button className={`volume-toggle ${showVwapDeviation ? "active" : ""}`} onClick={() => setShowVwapDeviation(value => !value)}>DV</button>
-              <button className={`volume-toggle ${showTrend && trendAvailable ? "active" : ""}`} onClick={() => setShowTrend(value => !value)} disabled={!trendAvailable} title={trendAvailable ? "Sinais TREND calculados em candles fechados de 5 minutos" : "TREND disponível em 5 minutos para índices e Forex"}>TREND</button>
+              <button className={`volume-toggle ${showTrend && trendAvailable ? "active" : ""}`} onClick={() => setShowTrend(value => !value)} disabled={!trendAvailable} title={trendAvailable ? "Sinais TREND calculados em candles fechados de 5 minutos" : "TREND disponível em 5 minutos"}>TREND</button>
               <span className="tradfi-chart-source">{indicators?.zones.status === "ready" ? `σ diário · ${indicators.zones.observations ?? 0} retornos` : "Aguardando histórico diário"}</span>
             </div>
             <div className="tradfi-chartarea">{loading ? <div className="loading">Carregando candles de {selected?.category === "stocks" ? "Hyperliquid" : "BingX"}…</div> : candles.length ? <MarketChart key={`${symbol}:${interval}`} candles={candles} symbol={symbol} interval={interval} zones={indicators?.zones ?? null} showGarch={showGarch} showHv={showHv} showVolumeAnomalies={showVolumeAnomalies} overlays={indicators?.overlays ?? null} showVwaps={showVwaps} showPreviousLevels={showPreviousLevels} signals={showReversal ? indicators?.reversal.signals ?? emptySignals : emptySignals} breakoutSignals={showBreakout ? indicators?.breakout.signals ?? emptySignals : emptySignals} trendSignals={chartTrendSignals} vwapDeviationSignals={chartVwapDeviationSignals}/> : <div className="chartfallback">Sem candles para a sessão atual.</div>}</div>

@@ -35,6 +35,13 @@ HYPERLIQUID_ASSETS: dict[str, dict[str, str]] = {
     "HL:xyz:EWZ": {"coin": "xyz:EWZ", "dex": "xyz", "category": "equity"},
     "HL:xyz:SOXL": {"coin": "xyz:SOXL", "dex": "xyz", "category": "equity"},
     "HL:xyz:TLT": {"coin": "xyz:TLT", "dex": "xyz", "category": "bond"},
+    "HL:XYZ:AAPL": {"coin": "xyz:AAPL", "dex": "xyz", "category": "stocks"},
+    "HL:XYZ:MSFT": {"coin": "xyz:MSFT", "dex": "xyz", "category": "stocks"},
+    "HL:XYZ:GOOGL": {"coin": "xyz:GOOGL", "dex": "xyz", "category": "stocks"},
+    "HL:XYZ:AMZN": {"coin": "xyz:AMZN", "dex": "xyz", "category": "stocks"},
+    "HL:XYZ:META": {"coin": "xyz:META", "dex": "xyz", "category": "stocks"},
+    "HL:XYZ:NVDA": {"coin": "xyz:NVDA", "dex": "xyz", "category": "stocks"},
+    "HL:XYZ:TSLA": {"coin": "xyz:TSLA", "dex": "xyz", "category": "stocks"},
     "HL:spot:WBRL-USDC": {"coin": "", "dex": "", "category": "fx", "market": "spot"},
 }
 
@@ -595,6 +602,8 @@ class MarketService:
                                 await self.publish_tradfi_quote(symbol, float(mid), source=source)
                             if dex == "xyz":
                                 for symbol, instrument in self.hyperliquid_stock_assets.items():
+                                    if symbol in HYPERLIQUID_ASSETS:
+                                        continue
                                     mid = mids.get(instrument["coin"])
                                     if mid is not None:
                                         await self.publish_tradfi_quote(symbol, float(mid), source="Hyperliquid HIP-3 · ações")
@@ -2180,7 +2189,7 @@ async def tradfi_indicators(
         )
         breakout = build_breakout_signals(symbol, interval, closed_candles)
         breakout["source"] = f"{source_label} OHLCV; candles fechados; compressão sem dados futuros"
-        if instrument["category"] in {"indices", "forex"}:
+        if instrument["category"] in {"indices", "forex", "stocks"}:
             trend = build_trend_signals(symbol, interval, closed_candles, source=f"{source_label} OHLCV")
         else:
             trend = {"symbol": symbol, "interval": interval, "status": "unsupported_category", "signals": [], "latest": None}

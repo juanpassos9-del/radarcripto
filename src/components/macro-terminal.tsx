@@ -25,7 +25,7 @@ const WATCHLIST_CATEGORIES: { key: string; label: string }[] = [
   { key: "fx", label: "MOEDAS & FX" }, { key: "index", label: "ÍNDICES" },
   { key: "equity", label: "ETFs SINTÉTICOS" }, { key: "bond", label: "TÍTULOS" },
   { key: "rates", label: "TREASURIES · YIELDS" }, { key: "energy", label: "ENERGIA" },
-  { key: "metal", label: "METAIS" }, { key: "crypto", label: "CRIPTO" },
+  { key: "metal", label: "METAIS" }, { key: "crypto", label: "CRIPTO" }, { key: "stocks", label: "STOCKS" },
 ];
 const CHART_SERIES_COLORS: Record<string, string> = {
   DXY: "#00D9F5",
@@ -52,6 +52,13 @@ const CHART_SERIES_COLORS: Record<string, string> = {
   AAVE: "#B6509E",
   ONDO: "#59C5B6",
   NEAR: "#E85B64",
+  AAPL: "#7DD3FC",
+  MSFT: "#60A5FA",
+  GOOGL: "#F87171",
+  AMZN: "#FB923C",
+  META: "#818CF8",
+  NVDA: "#A3E635",
+  TSLA: "#F472B6",
 };
 type MacroSnapshot = {
   asOf: number; source: string; status: string;
@@ -73,7 +80,7 @@ type MacroSnapshot = {
 
 const PRICE_MAP_CATEGORIES = [
   ["all", "TODAS"], ["index", "ÍNDICES"], ["fx", "MOEDAS"],
-  ["commodities", "COMMODITIES"], ["rates", "JUROS"], ["crypto", "CRIPTO"],
+  ["commodities", "COMMODITIES"], ["rates", "JUROS"], ["crypto", "CRIPTO"], ["stocks", "STOCKS"],
 ] as const;
 
 function isInPriceMapCategory(series: MacroSeries, category: string) {
@@ -104,7 +111,7 @@ function buildRotationReadings(points: RotationPoint[]) {
   }
   const categoryNames: Record<string, string> = {
     index: "ÍNDICES", fx: "MOEDAS", energy: "ENERGIA", metal: "METAIS",
-    rates: "TREASURIES", equity: "ETFs", bond: "TÍTULOS", crypto: "CRIPTO",
+    rates: "TREASURIES", equity: "ETFs", bond: "TÍTULOS", crypto: "CRIPTO", stocks: "STOCKS",
   };
   const categoryStrength = new Map<string, { total: number; count: number }>();
   for (const point of points) {
@@ -176,7 +183,7 @@ function MarketRotationRadar({ points, category, onCategoryChange }: { points: R
   const width = 900, height = 500, cx = width / 2, cy = height / 2, radiusX = 315, radiusY = 190;
   const categories = [
     ["all", "TODAS"], ["index", "ÍNDICES"], ["fx", "MOEDAS"], ["energy", "ENERGIA"],
-    ["metal", "METAIS"], ["rates", "JUROS"], ["equity", "ETFs"], ["bond", "TÍTULOS"], ["crypto", "CRIPTO"],
+    ["metal", "METAIS"], ["rates", "JUROS"], ["equity", "ETFs"], ["bond", "TÍTULOS"], ["crypto", "CRIPTO"], ["stocks", "STOCKS"],
   ];
   const filtered = points.filter(point => category === "all" || point.asset.category === category);
   const reading = buildRotationReadings(points);
