@@ -2265,7 +2265,7 @@ async def reversal_evaluation(
 @app.get("/api/breakout-signals")
 async def breakout_signals(
     symbol: str = Query("BTCUSDT"), interval: str = Query("5m"), market: str = Query("spot"),
-    compression_percentile: float = Query(20, ge=1, le=50), volume_multiple: float = Query(1.5, ge=1, le=10),
+    compression_percentile: float = Query(10, ge=1, le=50), volume_multiple: float = Query(2.0, ge=1, le=10),
     breakout_atr_multiple: float = Query(0.15, ge=0, le=2),
     range_lookback: int = Query(20, ge=5, le=100), volume_lookback: int = Query(20, ge=5, le=100),
     cooldown: int = Query(10, ge=0, le=500), buy_enabled: bool = Query(True), sell_enabled: bool = Query(True),
