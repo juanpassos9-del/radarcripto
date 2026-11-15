@@ -92,6 +92,9 @@ TRADFI_COMMODITY_SYMBOLS = {
     "NCCOXAG2USD-USDT": "Prata",
     "NCCOZINC2USD-USDT": "Zinco",
 }
+# HIP-3's xyz DEX mixes equities, ETFs, FX and commodities. Keep the Stocks tab
+# restricted to listed company/share instruments instead of exposing the full DEX.
+HYPERLIQUID_STOCK_TICKERS = set("""TSLA NVDA HOOD INTC PLTR COIN META AAPL MSFT ORCL GOOGL AMZN AMD MU SNDK MSTR CRCL NFLX COST LLY SKHX TSM RIVN BABA SMSN USAR CRWV GME SOFTBANK HYUNDAI KIOXIA HIMS DKNG LITE BX PURRDAT MRVL RKLB BIRD CBRS ZM EBAY ARM ASML MINIMAX BB QNT DELL IBM AVGO NOW NBIS WDC NOK BE ZHIPU QCOM STRC BOT AMAT GIGADEV SHAZ SKHY KSTR CXMT GEV UNITREE LYTE NCLD IREN NET CRWD RDDT AAOI MRNA BMNR OURA LRCX UMC CAMBRICON TWST GLW RELIANCE JIO TTWO ANT ICE CVX DRAM""".split())
 TRADFI_DAILY_CLOSES: dict[str, dict[str, Any]] = {}
 TRADFI_DAILY_CLOSES_TASK: asyncio.Task[Any] | None = None
 TRADFI_DAILY_CLOSES_PENDING: dict[str, dict[str, Any]] = {}
@@ -141,9 +144,11 @@ class MarketService:
         self.macro_regime_state: dict[str, Any] = {"confirmed": "AQUECENDO", "candidate": None, "count": 0, "lastBucket": None}
         self.macro_divergence_states: dict[str, dict[str, Any]] = {}
         self.tradfi_prices: dict[str, dict[str, Any]] = {}
+        self.hyperliquid_stock_assets: dict[str, dict[str, Any]] = {}
+        self.hyperliquid_stock_catalog_expires = 0.0
         self.tradfi_samples: dict[str, deque[dict[str, Any]]] = {}
         self.tradfi_symbol_categories: dict[str, str] = {symbol: descriptor["category"] for symbol, descriptor in HYPERLIQUID_ASSETS.items()}
-        self.tradfi_watchlist_subscribers: dict[str, set[WebSocket]] = {"indices": set(), "forex": set(), "commodities": set()}
+        self.tradfi_watchlist_subscribers: dict[str, set[WebSocket]] = {"indices": set(), "forex": set(), "commodities": set(), "stocks": set()}
         self.tradfi_macro_subscribers: set[WebSocket] = set()
         self.samples: dict[tuple[str, str], deque[Trade]] = {}
         self.external_books: dict[tuple[str, str], dict[str, Any]] = {}
@@ -535,6 +540,8 @@ class MarketService:
                     universe = (response[0] or {}).get("universe", [])
                     contexts = response[1] if len(response) > 1 else []
                     indices = {str(row.get("name", "")): index for index, row in enumerate(universe)}
+                    if dex == "xyz":
+                        await hyperliquid_stock_catalog(refresh=True, response=response)
                     for symbol, descriptor in HYPERLIQUID_ASSETS.items():
                         if descriptor["dex"] != dex:
                             continue
@@ -586,6 +593,11 @@ class MarketService:
                                 self.tradfi_symbol_categories[symbol] = descriptor["category"]
                                 source = "Hyperliquid Spot · WBRL/USDC" if is_spot else "Hyperliquid HIP-3"
                                 await self.publish_tradfi_quote(symbol, float(mid), source=source)
+                            if dex == "xyz":
+                                for symbol, instrument in self.hyperliquid_stock_assets.items():
+                                    mid = mids.get(instrument["coin"])
+                                    if mid is not None:
+                                        await self.publish_tradfi_quote(symbol, float(mid), source="Hyperliquid HIP-3 · ações")
                     finally:
                         spot_refresh_task.cancel()
                         await asyncio.gather(spot_refresh_task, return_exceptions=True)
@@ -803,7 +815,7 @@ class MarketService:
     async def _request_uncached(self, base: str, path: str, params: dict[str, Any] | None = None) -> Any:
         if base == HYPERLIQUID_INFO_API:
             request_params = dict(params or {})
-            coin = hyperliquid_coin(str(request_params["symbol"])) if request_params.get("symbol") else None
+            coin = str(request_params["coin"]) if request_params.get("coin") else hyperliquid_coin(str(request_params["symbol"])) if request_params.get("symbol") else None
             if path == "ticker":
                 body = {"type": "metaAndAssetCtxs"}
             elif path == "depth":
@@ -1852,6 +1864,48 @@ async def bingx_tradfi_catalog() -> list[dict[str, Any]]:
         instruments.append({"symbol": symbol, "name": label, "category": category, "asset": asset, "minimumNotional": row.get("tradeMinUSDT"), "pricePrecision": row.get("pricePrecision"), "quantityPrecision": row.get("quantityPrecision")})
     return sorted(instruments, key=lambda item: (item["category"], item["name"]))
 
+async def hyperliquid_stock_catalog(refresh: bool = False, response: Any = None) -> list[dict[str, Any]]:
+    """Return active company instruments from HIP-3 xyz, excluding ETFs and non-equities."""
+    if not refresh and service.hyperliquid_stock_assets and service.hyperliquid_stock_catalog_expires > time.monotonic():
+        return list(service.hyperliquid_stock_assets.values())
+    data = response or await service.hyperliquid_info({"type": "metaAndAssetCtxs", "dex": "xyz"})
+    metadata = data[0] if isinstance(data, list) and data else {}
+    contexts = data[1] if isinstance(data, list) and len(data) > 1 else []
+    instruments: dict[str, dict[str, Any]] = {}
+    today = datetime.now(timezone.utc).date().isoformat()
+    for index, row in enumerate(metadata.get("universe", [])):
+        coin = str(row.get("name", ""))
+        ticker = coin.split(":", 1)[-1].upper()
+        if not coin.startswith("xyz:") or ticker not in HYPERLIQUID_STOCK_TICKERS or row.get("isDelisted"):
+            continue
+        symbol = f"HL:{coin.upper()}"
+        context = contexts[index] if index < len(contexts) else {}
+        price = context.get("midPx") or context.get("markPx") or context.get("oraclePx")
+        previous = context.get("prevDayPx")
+        quote_volume = context.get("dayNtlVlm")
+        instrument = {
+            "symbol": symbol, "name": ticker, "category": "stocks", "asset": ticker,
+            "coin": coin, "dex": "xyz", "pricePrecision": 2,
+            "price": float(price) if price not in (None, "") else None,
+            "previousClose": float(previous) if previous not in (None, "", "0") else None,
+            "quoteVolume24h": float(quote_volume) if quote_volume not in (None, "") else 0.0,
+        }
+        instruments[symbol] = instrument
+        service.tradfi_symbol_categories[symbol] = "stocks"
+        if instrument["previousClose"]:
+            TRADFI_DAILY_CLOSES[symbol] = {
+                "close": instrument["previousClose"], "candleTime": int(time.time()) - 86_400,
+                "referenceDate": today, "source": "Hyperliquid variação 24h · prevDayPx",
+            }
+        if instrument["price"]:
+            await service.publish_tradfi_quote(
+                symbol, instrument["price"], source="Hyperliquid HIP-3 · ações",
+                quote_volume_24h=instrument["quoteVolume24h"],
+            )
+    service.hyperliquid_stock_assets = instruments
+    service.hyperliquid_stock_catalog_expires = time.monotonic() + 120
+    return list(instruments.values())
+
 async def validate_bingx_tradfi_symbol(symbol: str) -> str:
     symbol = symbol.upper()
     catalog = await bingx_tradfi_catalog()
@@ -1862,8 +1916,15 @@ async def validate_bingx_tradfi_symbol(symbol: str) -> str:
 @app.get("/api/tradfi/contracts")
 async def tradfi_contracts():
     try:
-        instruments = await bingx_tradfi_catalog()
-        return {"source": "BingX USDT-M Perpetual · contratos TradFi", "receivedAt": int(time.time() * 1000), "instruments": instruments}
+        stocks = await hyperliquid_stock_catalog()
+        try:
+            instruments = await bingx_tradfi_catalog()
+        except (httpx.HTTPError, ValueError, KeyError) as error:
+            log.warning("BingX TradFi catalogue unavailable; returning Hyperliquid stocks only: %s", error)
+            if stocks:
+                return {"source": "Hyperliquid HIP-3 · ações", "receivedAt": int(time.time() * 1000), "instruments": stocks}
+            raise
+        return {"source": "BingX TradFi + ações perpétuas Hyperliquid HIP-3", "receivedAt": int(time.time() * 1000), "instruments": [*instruments, *stocks]}
     except (httpx.HTTPError, ValueError, KeyError) as error:
         log.warning("BingX TradFi contract list unavailable: %s", error)
         raise HTTPException(502, "Não foi possível carregar os contratos TradFi da BingX.") from error
@@ -1906,8 +1967,28 @@ async def refresh_tradfi_daily_closes() -> None:
 
 @app.get("/api/tradfi/watchlist")
 async def tradfi_watchlist(category: str = Query("indices")):
-    if category not in {"indices", "forex", "commodities"}:
+    if category not in {"indices", "forex", "commodities", "stocks"}:
         raise HTTPException(400, "Categoria TradFi inválida.")
+    if category == "stocks":
+        try:
+            selected = await hyperliquid_stock_catalog()
+            quotes = []
+            for item in selected:
+                current = service.tradfi_prices.get(item["symbol"], {})
+                price = current.get("price", item.get("price"))
+                previous = item.get("previousClose")
+                change = ((price / previous) - 1) * 100 if price is not None and previous else None
+                quotes.append({
+                    "symbol": item["symbol"], "price": price, "previousClose": previous,
+                    "changePercent": round(change, 4) if change is not None else None,
+                    "referenceTime": int(time.time()) - 86_400 if previous else None,
+                    "source": "Hyperliquid HIP-3 · variação 24h",
+                })
+            return {"category": category, "quotes": quotes, "receivedAt": int(time.time() * 1000),
+                    "reference": "Variação 24h conforme prevDayPx da Hyperliquid.", "referenceStatus": "ready"}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+            log.warning("Hyperliquid stock watchlist unavailable: %s", error)
+            raise HTTPException(502, "Não foi possível atualizar ações da Hyperliquid HIP-3.") from error
     catalog = await bingx_tradfi_catalog()
     selected = [item for item in catalog if item["category"] == category]
     service.ensure_tradfi_ticker_stream()
@@ -2003,10 +2084,17 @@ async def tradfi_macro():
 
 @app.get("/api/tradfi/candles")
 async def tradfi_candles(symbol: str = Query(...), interval: str = Query("5m"), limit: int = Query(240, ge=20, le=500)):
-    symbol = await validate_bingx_tradfi_symbol(symbol)
+    symbol = symbol.upper()
     if interval not in {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}:
         raise HTTPException(400, "Intervalo TradFi inválido.")
+    stock = service.hyperliquid_stock_assets.get(symbol)
+    if stock is None:
+        symbol = await validate_bingx_tradfi_symbol(symbol)
     try:
+        if stock:
+            rows = await service.request(HYPERLIQUID_INFO_API, "klines", {"coin": stock["coin"], "interval": interval, "limit": limit})
+            candles = [{"time": int(row[0] // 1000), "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5])} for row in rows or []]
+            return {"symbol": symbol, "interval": interval, "candles": candles, "source": "Hyperliquid HIP-3 · DEX xyz", "receivedAt": int(time.time() * 1000)}
         rows = await bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": interval, "limit": limit}, 15)
         candles = [{"time": int(row["time"] // 1000), "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]), "close": float(row["close"]), "volume": float(row.get("volume", 0))} for row in rows or []]
         return {"symbol": symbol, "interval": interval, "candles": candles, "source": "BingX USDT-M Perpetual", "receivedAt": int(time.time() * 1000)}
@@ -2024,31 +2112,45 @@ async def tradfi_indicators(
     dv_close_extreme: float = Query(0.7, ge=0.5, le=1),
     dv_average_periods: int = Query(20, ge=5, le=100),
 ):
-    """Volatility, anchored levels and deterministic signals from BingX TradFi OHLCV."""
+    """Volatility, anchored levels and deterministic signals from public TradFi OHLCV."""
     symbol = symbol.upper()
-    catalog = await bingx_tradfi_catalog()
-    instrument = next((item for item in catalog if item["symbol"] == symbol), None)
+    instrument = service.hyperliquid_stock_assets.get(symbol)
+    if instrument is None:
+        catalog = await bingx_tradfi_catalog()
+        instrument = next((item for item in catalog if item["symbol"] == symbol), None)
     if instrument is None:
         raise HTTPException(404, "Índice ou par Forex indisponível na BingX.")
     if interval not in {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}:
         raise HTTPException(400, "Intervalo TradFi inválido.")
     try:
-        rows, daily_rows, hourly_rows, vwap_source_rows = await asyncio.gather(
-            bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": interval, "limit": 300}, 20),
-            bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "1d", "limit": 400}, 300),
-            bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "1h", "limit": 500}, 60),
-            bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "5m", "limit": 301}, 20),
-        )
+        if instrument.get("category") == "stocks":
+            coin = instrument["coin"]
+            rows, daily_rows, hourly_rows, vwap_source_rows = await asyncio.gather(
+                service.request(HYPERLIQUID_INFO_API, "klines", {"coin": coin, "interval": interval, "limit": 300}),
+                service.request(HYPERLIQUID_INFO_API, "klines", {"coin": coin, "interval": "1d", "limit": 400}),
+                service.request(HYPERLIQUID_INFO_API, "klines", {"coin": coin, "interval": "1h", "limit": 500}),
+                service.request(HYPERLIQUID_INFO_API, "klines", {"coin": coin, "interval": "5m", "limit": 301}),
+            )
+        else:
+            rows, daily_rows, hourly_rows, vwap_source_rows = await asyncio.gather(
+                bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": interval, "limit": 300}, 20),
+                bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "1d", "limit": 400}, 300),
+                bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "1h", "limit": 500}, 60),
+                bingx_tradfi_request("/openApi/swap/v2/quote/klines", {"symbol": symbol, "interval": "5m", "limit": 301}, 20),
+            )
 
-        def normalize(row: dict[str, Any]) -> dict[str, Any]:
+        def normalize(row: Any) -> dict[str, Any]:
+            if isinstance(row, (list, tuple)):
+                return {"time": int(row[0] // 1000), "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5] or 0)}
             return {"time": int(row["time"] // 1000), "open": float(row["open"]), "high": float(row["high"]), "low": float(row["low"]), "close": float(row["close"]), "volume": float(row.get("volume", 0))}
 
         candles = [normalize(row) for row in rows or []]
         daily = [normalize(row) for row in daily_rows or []]
         hourly = [normalize(row) for row in hourly_rows or []]
-        vwap_candles = [normalize(row) for row in vwap_source_rows or [] if int(row["time"]) + 300_000 <= int(time.time() * 1000)]
+        vwap_candles = [candle for candle in (normalize(row) for row in vwap_source_rows or []) if candle["time"] * 1000 + 300_000 <= int(time.time() * 1000)]
         zones = calculate_zones(symbol, daily)
-        zones["source"] = "BingX USDT-M TradFi daily klines"
+        source_label = "Hyperliquid HIP-3 DEX xyz" if instrument.get("category") == "stocks" else "BingX USDT-M TradFi"
+        zones["source"] = f"{source_label} daily klines"
 
         # Keep levels aligned with the information that was available at each
         # closed intraday candle. The newest daily bar is the still-forming bar.
@@ -2068,7 +2170,7 @@ async def tradfi_indicators(
             if day_index not in zones_cache:
                 history = daily[:day_index + 2]
                 zones_cache[day_index] = calculate_zones(symbol, history)
-                zones_cache[day_index]["source"] = "BingX USDT-M TradFi daily klines"
+                zones_cache[day_index]["source"] = f"{source_label} daily klines"
             zones_by_candle.append(zones_cache[day_index])
 
         reversal = build_reversal_signals(
@@ -2076,15 +2178,15 @@ async def tradfi_indicators(
             min_sigma=1.0, min_score=50, cooldown=10, volume_enabled=True,
         )
         breakout = build_breakout_signals(symbol, interval, closed_candles)
-        breakout["source"] = "BingX USDT-M TradFi OHLCV; candles fechados; compressão sem dados futuros"
+        breakout["source"] = f"{source_label} OHLCV; candles fechados; compressão sem dados futuros"
         if instrument["category"] in {"indices", "forex"}:
-            trend = build_trend_signals(symbol, interval, closed_candles, source="BingX USDT-M TradFi OHLCV")
+            trend = build_trend_signals(symbol, interval, closed_candles, source=f"{source_label} OHLCV")
         else:
             trend = {"symbol": symbol, "interval": interval, "status": "unsupported_category", "signals": [], "latest": None}
         utc_day_start_ms = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
         vwap_deviation = build_vwap_deviation_signals(
             symbol, interval, closed_candles, vwap_candles, signal_start_ms=utc_day_start_ms,
-            source="BingX USDT-M OHLCV · VWAP aproximada por candles de 5 min",
+            source=f"{source_label} OHLCV · VWAP aproximada por candles de 5 min",
             volume_high=dv_volume_high, volume_low=dv_volume_low,
             spread_wide=dv_spread_wide, spread_narrow=dv_spread_narrow,
             close_extreme=dv_close_extreme, average_periods=dv_average_periods,
@@ -2164,8 +2266,39 @@ async def tradfi_indicators(
 
 @app.get("/api/tradfi/market")
 async def tradfi_market(symbol: str = Query(...)):
-    symbol = await validate_bingx_tradfi_symbol(symbol)
+    symbol = symbol.upper()
+    stock = service.hyperliquid_stock_assets.get(symbol)
+    if stock is None:
+        symbol = await validate_bingx_tradfi_symbol(symbol)
     try:
+        if stock:
+            depth, trades = await asyncio.gather(
+                service.request(HYPERLIQUID_INFO_API, "depth", {"coin": stock["coin"]}),
+                service.request(HYPERLIQUID_INFO_API, "trades", {"coin": stock["coin"], "limit": 30}),
+            )
+            live_quote = service.tradfi_prices.get(symbol, {})
+            price = float(live_quote.get("price") or stock.get("price") or 0)
+            reference = TRADFI_DAILY_CLOSES.get(symbol, {})
+            previous = float(reference.get("close") or stock.get("previousClose") or 0)
+            change = ((price / previous) - 1) * 100 if price > 0 and previous > 0 else 0
+            bids_raw, asks_raw = (depth or {}).get("bids", []), (depth or {}).get("asks", [])
+            bids = [{"price": float(row[0]), "quantity": float(row[1]), "total": float(row[0]) * float(row[1]), "sources": ["Hyperliquid HIP-3"]} for row in bids_raw]
+            asks = [{"price": float(row[0]), "quantity": float(row[1]), "total": float(row[0]) * float(row[1]), "sources": ["Hyperliquid HIP-3"]} for row in asks_raw]
+            bid_qty, ask_qty = sum(row["quantity"] for row in bids), sum(row["quantity"] for row in asks)
+            normalized_trades = [{
+                "id": str(row.get("a", row.get("T", index))), "time": int(row.get("T", 0)),
+                "price": float(row["p"]), "quantity": float(row.get("q", 0)),
+                "side": "sell" if row.get("m") else "buy", "source": "Hyperliquid HIP-3",
+            } for index, row in enumerate(trades or [])]
+            first_bid = float(bids_raw[0][0]) if bids_raw else price
+            first_ask = float(asks_raw[0][0]) if asks_raw else price
+            return {"symbol": symbol, "source": "Hyperliquid HIP-3 · DEX xyz", "receivedAt": int(time.time() * 1000),
+                "ticker": {"price": price, "change24h": change, "high24h": None, "low24h": None,
+                           "quoteVolume24h": float(live_quote.get("quoteVolume24h", stock.get("quoteVolume24h", 0)) or 0), "eventTime": int(live_quote.get("eventTime", time.time() * 1000))},
+                "book": {"bids": bids, "asks": asks, "spread": first_ask - first_bid,
+                         "imbalance": (bid_qty - ask_qty) / (bid_qty + ask_qty) if bid_qty + ask_qty else 0,
+                         "status": "live" if bids and asks else "stale", "source": "Hyperliquid HIP-3"},
+                "trades": normalized_trades}
         ticker, depth, trades = await asyncio.gather(
             bingx_tradfi_request("/openApi/swap/v2/quote/ticker", {"symbol": symbol}, 3),
             bingx_tradfi_request("/openApi/swap/v2/quote/depth", {"symbol": symbol, "limit": 20}, 2),
