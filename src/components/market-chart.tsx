@@ -57,7 +57,7 @@ export default function MarketChart({ candles, symbol, interval, zones, showGarc
       grid: { vertLines: { color: "#17202a" }, horzLines: { color: "#17202a" } },
       crosshair: { mode: CrosshairMode.Normal }, rightPriceScale: { borderColor: "#27313c", scaleMargins: { top: 0.08, bottom: 0.2 } }, timeScale: { borderColor: "#27313c", timeVisible: true, secondsVisible: false, rightOffset: 16, tickMarkFormatter: formatChartTick },
     });
-    const candle = chart.addSeries(CandlestickSeries, { upColor: "#44d49a", downColor: "#ff667c", borderUpColor: "#44d49a", borderDownColor: "#ff667c", wickUpColor: "#44d49a", wickDownColor: "#ff667c", priceLineColor: "#28d6c5" });
+    const candle = chart.addSeries(CandlestickSeries, { upColor: "#44d49a", downColor: "#ff667c", borderUpColor: "#44d49a", borderDownColor: "#ff667c", wickUpColor: "#44d49a", wickDownColor: "#ff667c", priceLineColor: "rgba(255, 255, 255, 0.42)", priceLineStyle: LineStyle.Dashed, priceLineWidth: 1 });
     const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume" });
     markersRef.current = createSeriesMarkers(candle, []);
     chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 }, visible: false });
