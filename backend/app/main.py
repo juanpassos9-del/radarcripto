@@ -1781,7 +1781,9 @@ def allow_api_request(email: str, now: float | None = None) -> tuple[bool, int]:
     window = api_request_windows.setdefault(email, deque())
     while window and current - window[0] >= 60:
         window.popleft()
-    request_limit = max(120, positive_int_setting("BETA_API_REQUESTS_PER_MINUTE", 300, 600))
+    # Keep the full beta allowance even when Render still has an older
+    # Blueprint value configured; the supported cap remains 600/min per account.
+    request_limit = max(600, positive_int_setting("BETA_API_REQUESTS_PER_MINUTE", 600, 600))
     if len(window) >= request_limit:
         retry_after = max(1, math.ceil(60 - (current - window[0])))
         return False, retry_after
