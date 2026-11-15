@@ -26,6 +26,8 @@ export default function Terminal() {
   const [market] = useState<"perpetual">("perpetual");
   const selectedKeyRef = useRef("");
   const historicalCandlesReadyRef = useRef(false);
+  const marketSocketConnectedRef = useRef(false);
+  const wsMarketSnapshotsRef = useRef<Record<string, MarketSnapshot>>({});
   selectedKeyRef.current = `${symbol}|${interval}|${market}`;
   const [markets, setMarkets] = useState<Record<string, MarketSnapshot>>({});
   const [scannerFlow, setScannerFlow] = useState<ScannerFlowSnapshot | null>(null);
@@ -99,7 +101,14 @@ export default function Terminal() {
   const loadMarkets = useCallback(async () => {
     try {
       const data = await getJson<{ markets: MarketSnapshot[] }>(`/api/markets?market=${market}`);
-      setMarkets(Object.fromEntries(data.markets.map(item => [item.symbol, item])));
+      const now = Date.now();
+      setMarkets(Object.fromEntries(data.markets.map(item => {
+        const streamSnapshot = wsMarketSnapshotsRef.current[item.symbol];
+        return [item.symbol, {
+          ...item,
+          ...(streamSnapshot && now - streamSnapshot.receivedAt < 60_000 ? streamSnapshot : {}),
+        }] as const;
+      })));
       if (data.markets.some(item => item.status === "live" && item.price != null)) {
         setApiState("connected"); setApiMessage("");
       } else {
@@ -144,7 +153,7 @@ export default function Terminal() {
     await Promise.allSettled([candlesTask, bookTask]);
   }, [symbol, interval, market]);
 
-  // Refresh the selected Hyperliquid perpetual contract's public tape snapshot.
+  // Seed the tape from REST, then use REST only as a fallback while the live stream is disconnected.
   useEffect(() => {
     let active = true;
     let refreshing = false;
@@ -160,7 +169,7 @@ export default function Terminal() {
       })
       .catch(() => undefined);
     const guardedRefresh = () => {
-      if (!active || refreshing || document.visibilityState !== "visible") return;
+      if (!active || refreshing || marketSocketConnectedRef.current || document.visibilityState !== "visible") return;
       refreshing = true;
       void refresh().finally(() => { refreshing = false; });
     };
@@ -314,19 +323,29 @@ export default function Terminal() {
       polling = true;
       void loadAsset().finally(() => { polling = false; });
     }, 20_000);
-    if (market === "perpetual") {
-      const timer = window.setInterval(() => {
-        if (!active || polling || document.visibilityState !== "visible") return;
-        polling = true;
-        void loadAsset().finally(() => { polling = false; });
-      }, 20_000);
-      return () => { active = false; window.clearInterval(timer); if (historyRecovery) window.clearInterval(historyRecovery); };
-    }
     const marketApiUrl = process.env.NEXT_PUBLIC_MARKET_API_URL;
     const streamUrl = marketApiUrl
       ? `${marketApiUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/+$/, "")}/ws/market`
       : process.env.NEXT_PUBLIC_MARKET_WS_URL || "ws://127.0.0.1:8001/ws/market";
-    let socket: WebSocket | null = null; let poll: number | null = null;
+    let socket: WebSocket | null = null;
+    let poll: number | null = null;
+    let reconnect: number | null = null;
+    let reconnectDelay = 1_000;
+    const startFallbackPolling = (delay: number) => {
+      if (poll || !active) return;
+      poll = window.setInterval(() => {
+        if (!active || polling || marketSocketConnectedRef.current || document.visibilityState !== "visible") return;
+        polling = true;
+        void loadAsset().finally(() => { polling = false; });
+      }, delay);
+    };
+    const scheduleReconnect = (delay: number) => {
+      if (!active || reconnect !== null) return;
+      reconnect = window.setTimeout(() => {
+        reconnect = null;
+        void connect();
+      }, delay);
+    };
     const connect = async () => {
       if (!active) return;
       try {
@@ -335,12 +354,10 @@ export default function Terminal() {
         const params = new URLSearchParams({ symbol, market, interval });
         socket = new WebSocket(`${streamUrl}?${params}`, ["nexus-market-v1", token]);
       } catch {
-        if (!active || poll) return;
-        poll = window.setInterval(() => {
-          if (!active || polling) return;
-          polling = true;
-          void loadAsset().finally(() => { polling = false; });
-        }, 15_000);
+        marketSocketConnectedRef.current = false;
+        startFallbackPolling(15_000);
+        scheduleReconnect(reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
         return;
       }
       socket.onmessage = (event) => {
@@ -354,7 +371,20 @@ export default function Terminal() {
           } else if (message.type === "book") setBook(message.data as BookData);
           else if (message.type === "market") {
             const snapshot = message.data as MarketSnapshot;
-            setMarkets(current => { const previous = current[snapshot.symbol]; return { ...current, [snapshot.symbol]: { ...previous, ...snapshot, change24h: snapshot.change24h ?? previous?.change24h ?? null, volume24h: snapshot.volume24h ?? previous?.volume24h ?? null, quoteVolume24h: snapshot.quoteVolume24h ?? previous?.quoteVolume24h ?? null, high24h: snapshot.high24h ?? previous?.high24h ?? null, low24h: snapshot.low24h ?? previous?.low24h ?? null } }; });
+            setMarkets(current => {
+              const previous = wsMarketSnapshotsRef.current[snapshot.symbol] ?? current[snapshot.symbol];
+              const merged = {
+                ...previous,
+                ...snapshot,
+                change24h: snapshot.change24h ?? previous?.change24h ?? null,
+                volume24h: snapshot.volume24h ?? previous?.volume24h ?? null,
+                quoteVolume24h: snapshot.quoteVolume24h ?? previous?.quoteVolume24h ?? null,
+                high24h: snapshot.high24h ?? previous?.high24h ?? null,
+                low24h: snapshot.low24h ?? previous?.low24h ?? null,
+              };
+              wsMarketSnapshotsRef.current[snapshot.symbol] = merged;
+              return { ...current, [snapshot.symbol]: merged };
+            });
           } else if (message.type === "candle") {
             if (!historicalCandlesReadyRef.current) return;
             const candle = message.data as Candle;
@@ -363,29 +393,35 @@ export default function Terminal() {
           }
         } catch { /* invalid event is ignored; REST refresh continues */ }
       };
-      socket.onopen = () => { setBetaLimitMessage(""); if (poll) { window.clearInterval(poll); poll = null; } };
+      socket.onopen = () => {
+        marketSocketConnectedRef.current = true;
+        reconnectDelay = 1_000;
+        setBetaLimitMessage("");
+        if (poll) { window.clearInterval(poll); poll = null; }
+      };
       socket.onerror = () => socket?.close();
       socket.onclose = (event) => {
+        marketSocketConnectedRef.current = false;
         if (event.code === 1013) {
           setBetaLimitMessage("Limite de sessões ao vivo atingido; dados em atualização periódica de reserva.");
-          if (!active || poll) return;
-          poll = window.setInterval(() => {
-            if (!active || polling || document.visibilityState !== "visible") return;
-            polling = true;
-            void loadAsset().finally(() => { polling = false; });
-          }, 30_000);
+          startFallbackPolling(30_000);
+          scheduleReconnect(30_000);
           return;
         }
-        if (!active || poll) return;
-        poll = window.setInterval(() => {
-          if (!active || polling) return;
-          polling = true;
-          void loadAsset().finally(() => { polling = false; });
-        }, 15_000);
+        startFallbackPolling(15_000);
+        scheduleReconnect(reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
       };
     };
     connect();
-    return () => { active = false; socket?.close(); if (poll) window.clearInterval(poll); if (historyRecovery) window.clearInterval(historyRecovery); };
+    return () => {
+      active = false;
+      marketSocketConnectedRef.current = false;
+      socket?.close();
+      if (poll) window.clearInterval(poll);
+      if (reconnect !== null) window.clearTimeout(reconnect);
+      if (historyRecovery) window.clearInterval(historyRecovery);
+    };
   }, [symbol, interval, market, loadAsset, loadMarkets, loadReversalSignals, loadBreakoutSignals, loadTrendSignals, loadVwapDeviationSignals]);
 
   const current = markets[symbol];
